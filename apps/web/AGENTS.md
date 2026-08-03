@@ -7,3 +7,4 @@ This workspace is a Next.js App Router application.
 - Keep metadata in `app/layout.tsx` or the relevant route.
 - Use the workspace commands: `npm run dev --workspace @video-meetings/web`, `npm run lint --workspace @video-meetings/web`, and `npm run build --workspace @video-meetings/web`.
 - Do not access API secrets from browser code; only variables prefixed with `NEXT_PUBLIC_` may be exposed to the client.
+- All screenshots save to /screenshot folder

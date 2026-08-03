@@ -1,3 +1,6 @@
+@import 'tailwindcss';
+@import '@heroui/styles';
+
 * {
   box-sizing: border-box;
 }
@@ -9,11 +12,5 @@ body {
 }
 
 body {
-  font-family: Arial, Helvetica, sans-serif;
-}
-
-main {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 3rem 1.5rem;
+  background: #f4f4f5;
 }

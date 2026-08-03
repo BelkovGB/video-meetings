@@ -3,6 +3,7 @@ node_modules/
 .next/
 dist/
 coverage/
+/screenshot
 
 # Environment and local tooling
 .env*
@@ -10,3 +11,5 @@ coverage/
 .DS_Store
 *.log
 *.tsbuildinfo
+.agents/
+.playwright-mcp/

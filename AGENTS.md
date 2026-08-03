@@ -21,3 +21,4 @@
 - Do not add a dependency unless it is needed for the requested work.
 - Keep web and API concerns in their respective workspaces.
 - When changing the project architecture, update the relevant documentation in the same change.
+- For every UI change, use the `ui-ux-pro-max` skill and visually test the changed interface through Playwright MCP before delivery. Verify the affected interactions and responsive behaviour, not only the code or build output. A UI task is complete only after these checks pass.
