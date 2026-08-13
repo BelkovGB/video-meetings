@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsDateString, IsNotEmpty, IsString, MaxLength } from 'class-validator';
+import { IsDateString, IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator';
 
 export class CreateMeetingDto {
   @Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value))
@@ -9,5 +9,8 @@ export class CreateMeetingDto {
   title!: string;
 
   @IsDateString()
+  @Matches(/^(?:20\d{2}|2100)-/, {
+    message: 'date year must be between 2000 and 2100',
+  })
   date!: string;
 }

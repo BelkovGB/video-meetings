@@ -1,3 +1,3 @@
 export class GetMeetingsQuery {
-  constructor(public readonly ownerId: string) {}
+  constructor(public readonly userId: string) {}
 }

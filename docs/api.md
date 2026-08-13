@@ -1,16 +1,22 @@
 # Video Meetings HTTP API
 
-The API base URL is `http://localhost:3001`. Requests and responses use JSON.
+The API base URL is `http://localhost:3001`. Responses use JSON; requests use
+JSON except for the multipart file-upload endpoint.
 
 ## Public routes
 
-| Method | Route            | Authentication |
-| ------ | ---------------- | -------------- |
-| POST   | `/auth/register` | None           |
-| POST   | `/auth/login`    | None           |
-| POST   | `/meetings`      | Bearer JWT     |
-| GET    | `/meetings`      | Bearer JWT     |
-| GET    | `/meetings/:id`  | Bearer JWT     |
+| Method | Route                                                | Authentication     |
+| ------ | ---------------------------------------------------- | ------------------ |
+| POST   | `/auth/register`                                     | None               |
+| POST   | `/auth/login`                                        | None               |
+| POST   | `/meetings`                                          | Bearer JWT         |
+| GET    | `/meetings`                                          | Bearer JWT         |
+| GET    | `/meetings/:id`                                      | Bearer JWT         |
+| POST   | `/meetings/:meetingId/files`                         | Bearer JWT         |
+| GET    | `/meetings/:meetingId/files`                         | Bearer JWT         |
+| POST   | `/meetings/:meetingId/files/:fileId/download-ticket` | Bearer JWT         |
+| GET    | `/file-downloads/:ticket`                            | One-time ticket    |
+| DELETE | `/meetings/:meetingId/files/:fileId`                 | Bearer JWT (owner) |
 
 `UsersModule` is an internal API module and does not expose HTTP routes.
 
@@ -77,6 +83,19 @@ Missing, malformed, or invalid tokens return `401 Unauthorized`.
 `ownerId` is intentionally not returned. A meeting belongs to the authenticated
 user who created it.
 
+The detail route additionally returns the caller's safe authorization role
+without exposing the owner's identifier:
+
+```json
+{
+  "accessRole": "owner"
+}
+```
+
+`accessRole` is `owner` for the meeting owner and `participant` for a recorded
+participant. Detail and collection responses include it; creation keeps the base
+representation.
+
 ### `POST /meetings`
 
 Creates a meeting owned by the authenticated user.
@@ -94,25 +113,27 @@ Returns `201 Created` and the meeting representation.
 
 Validation rules:
 
-| Field        | Rule                                                       |
-| ------------ | ---------------------------------------------------------- |
-| `title`      | Required string, trimmed, 1–255 characters after trimming. |
-| `date`       | Required ISO 8601 date-time string.                        |
-| Other fields | Rejected; clients cannot set `id` or `ownerId`.            |
+| Field        | Rule                                                        |
+| ------------ | ----------------------------------------------------------- |
+| `title`      | Required string, trimmed, 1–255 characters after trimming.  |
+| `date`       | Required ISO 8601 date-time string; year must be 2000–2100. |
+| Other fields | Rejected; clients cannot set `id` or `ownerId`.             |
 
 Invalid input returns `400 Bad Request` and does not create a meeting.
 
 ### `GET /meetings`
 
-Returns `200 OK` with an array containing only the authenticated user's
-meetings. Results are ordered by creation time, newest first. An authenticated
-user with no meetings receives `200 OK` and `[]`.
+Returns `200 OK` with meetings where the authenticated user is the owner or a
+recorded participant. Results are ordered by creation time, newest first, and
+every item includes `accessRole` set to `owner` or `participant`. An authenticated
+user with no available meetings receives `200 OK` and `[]`.
 
 ### `GET /meetings/:id`
 
-Returns `200 OK` and a meeting when it belongs to the authenticated user.
+Returns `200 OK`, the meeting, and `accessRole` when the authenticated user is
+its owner or a recorded participant.
 
-If the meeting does not exist or belongs to another user, the endpoint returns
+If the meeting does not exist or the user has no access, the endpoint returns
 `404 Not Found`:
 
 ```json
@@ -125,6 +146,108 @@ If the meeting does not exist or belongs to another user, the endpoint returns
 Using the same response for absent and foreign meetings prevents identifier
 enumeration and ownership disclosure.
 
+## Meeting files
+
+The owner of a meeting and its recorded participants can upload one allowed file
+at a time and list the files already attached to it. Membership management is
+not exposed by this API yet; the file routes enforce the shared owner-or-
+participant access policy.
+
+### `POST /meetings/:meetingId/files`
+
+Accepts `multipart/form-data` with exactly one field named `file`. The JWT and
+meeting access check run before multipart parsing, so a user outside the meeting
+cannot create a temporary file.
+
+The server writes the upload to `UPLOAD_TEMP_DIR`, validates its size, supplied
+MIME type, extension, and file signature, then atomically moves it to
+`UPLOAD_DIR` under a random internal key. The original filename is never used as
+a filesystem path.
+
+The local MVP accepts at most one active upload per authenticated user and four
+active uploads per API process by default. A conflicting upload returns `409`
+with `UPLOAD_BUSY`. Stale temporary files and final objects without matching
+database metadata are reconciled after a 24-hour safety window; a READY record
+whose object disappeared is moved to `MISSING`.
+
+Accepted formats are MP3, M4A, WAV, OGG, MP4, WebM, MOV, TXT, VTT, SRT, PDF,
+and DOCX. Their MIME types must match the allowlist in
+[`research-meetings-upload.md`](research-meetings-upload.md). The maximum file
+size is `UPLOAD_MAX_BYTES` (1 GiB by default).
+
+Successful requests return `201 Created`:
+
+```json
+{
+  "id": "cm...",
+  "name": "retrospective.mp4",
+  "category": "video",
+  "mimeType": "video/mp4",
+  "sizeBytes": 734003200,
+  "uploadedAt": "2026-08-11T10:00:00.000Z"
+}
+```
+
+Invalid multipart requests return `400` with `INVALID_MULTIPART_UPLOAD`; a
+missing file returns `400` with `MISSING_UPLOAD`; files larger than the limit
+return `413` with `UPLOAD_TOO_LARGE`; unsupported names, MIME types, extensions,
+or content return `415` with `UNSUPPORTED_FILE_TYPE`. A missing or inaccessible
+meeting returns the same `404 Meeting not found` response.
+
+### `GET /meetings/:meetingId/files`
+
+Returns `200 OK` with the same metadata representation for each ready file,
+newest first. Internal storage keys and uploader IDs are never returned.
+
+### `POST /meetings/:meetingId/files/:fileId/download-ticket`
+
+The meeting owner or a participant can create a download ticket for a ready
+file. The JWT-protected request returns `201 Created`:
+
+```json
+{
+  "ticket": "<random-one-time-token>",
+  "expiresAt": "2026-08-11T10:01:00.000Z"
+}
+```
+
+The raw 256-bit ticket is returned only once. PostgreSQL stores its SHA-256 hash,
+the issuing user, and a 60-second expiration time.
+
+### `GET /file-downloads/:ticket`
+
+Redeems a valid ticket exactly once and streams the file with download headers.
+The response includes `Content-Length`, the verified `Content-Type`, a safe
+`Content-Disposition`, `Cache-Control: private, no-store`, and
+`X-Content-Type-Options: nosniff`. The server rechecks the issuing user's current
+meeting access before opening the file. Missing, expired, used, or revoked
+tickets return `404 Not Found`.
+
+### `DELETE /meetings/:meetingId/files/:fileId`
+
+Only the meeting owner can delete a ready file. A participant receives
+`403 Forbidden`; an outsider receives the same `404 Meeting not found` response
+used by other meeting-file routes. The API marks metadata as `DELETING`, removes
+the storage object, deletes the metadata and its download tickets, then returns
+`204 No Content`. Deleted files no longer appear in the list or download. If a
+storage or database operation fails after the status transition, a background
+reconciler retries the hidden deletion after one minute.
+
+## Local upload configuration
+
+| Variable                         | Default              | Purpose                                          |
+| -------------------------------- | -------------------- | ------------------------------------------------ |
+| `UPLOAD_DIR`                     | `./var/uploads`      | Permanent local file storage.                    |
+| `UPLOAD_TEMP_DIR`                | `./var/uploads-temp` | Temporary upload storage on the same filesystem. |
+| `UPLOAD_MAX_BYTES`               | `1073741824`         | Per-file byte limit.                             |
+| `UPLOAD_MAX_REQUEST_BYTES`       | `1074790400`         | Multipart request limit, including overhead.     |
+| `UPLOAD_MIN_FREE_BYTES`          | `2147483648`         | Reserved free capacity for the storage volume.   |
+| `UPLOAD_MAX_ACTIVE_UPLOADS`      | `4`                  | Maximum active uploads in one API process.       |
+| `UPLOAD_RECONCILIATION_GRACE_MS` | `86400000`           | Safety window for stale and orphan cleanup.      |
+
+The API creates the directories with private permissions at startup and refuses
+to start if the temporary and permanent paths are on different filesystems.
+
 ## Running checks
 
 End-to-end tests need PostgreSQL running with the `DATABASE_URL` from `.env`.
@@ -136,7 +259,8 @@ npm run test:e2e --workspace @video-meetings/api
 ```
 
 The test suite covers registration, login, request validation, access-token
-protection, meeting ownership, and non-disclosure of another user's meeting.
+protection, meeting ownership, meeting-file upload/listing/download/deletion,
+file validation, one-time tickets, and non-disclosure of another user's meeting.
 
 Run static checks separately:
 

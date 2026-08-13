@@ -8,25 +8,91 @@ datasource db {
 }
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  passwordHash String    @map("password_hash")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
-  meetings     Meeting[]
+  id                         String                      @id @default(cuid())
+  email                      String                      @unique
+  passwordHash               String                      @map("password_hash")
+  createdAt                  DateTime                    @default(now()) @map("created_at")
+  updatedAt                  DateTime                    @updatedAt @map("updated_at")
+  meetings                   Meeting[]
+  meetingParticipations      MeetingParticipant[]
+  uploadedMeetingFiles       MeetingFile[]               @relation("UploadedMeetingFiles")
+  meetingFileDownloadTickets MeetingFileDownloadTicket[]
 
   @@map("users")
 }
 
 model Meeting {
-  id        String   @id @default(cuid())
-  title     String   @db.VarChar(255)
-  date      DateTime
-  ownerId   String?  @map("owner_id")
-  owner     User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id           String               @id @default(cuid())
+  title        String               @db.VarChar(255)
+  date         DateTime
+  ownerId      String?              @map("owner_id")
+  owner        User?                @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  createdAt    DateTime             @default(now()) @map("created_at")
+  updatedAt    DateTime             @updatedAt @map("updated_at")
+  participants MeetingParticipant[]
+  files        MeetingFile[]
 
   @@index([ownerId, createdAt])
   @@map("meetings")
+}
+
+model MeetingParticipant {
+  meetingId String   @map("meeting_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([meetingId, userId])
+  @@index([userId])
+  @@map("meeting_participants")
+}
+
+enum MeetingFileCategory {
+  AUDIO
+  VIDEO
+  TRANSCRIPT
+  DOCUMENT
+}
+
+enum MeetingFileStatus {
+  READY
+  DELETING
+  MISSING
+}
+
+model MeetingFile {
+  id              String                      @id @default(cuid())
+  meetingId       String                      @map("meeting_id")
+  uploadedById    String?                     @map("uploaded_by_id")
+  originalName    String                      @map("original_name") @db.VarChar(255)
+  storageKey      String                      @unique @map("storage_key")
+  category        MeetingFileCategory
+  mimeType        String                      @map("mime_type") @db.VarChar(255)
+  sizeBytes       Int                         @map("size_bytes")
+  status          MeetingFileStatus           @default(READY)
+  createdAt       DateTime                    @default(now()) @map("created_at")
+  updatedAt       DateTime                    @updatedAt @map("updated_at")
+  meeting         Meeting                     @relation(fields: [meetingId], references: [id], onDelete: Restrict)
+  uploadedBy      User?                       @relation("UploadedMeetingFiles", fields: [uploadedById], references: [id], onDelete: SetNull)
+  downloadTickets MeetingFileDownloadTicket[]
+
+  @@index([meetingId, status, createdAt])
+  @@index([uploadedById])
+  @@map("meeting_files")
+}
+
+model MeetingFileDownloadTicket {
+  tokenHash      String      @id @map("token_hash") @db.Char(64)
+  fileId         String      @map("file_id")
+  issuedToUserId String      @map("issued_to_user_id")
+  expiresAt      DateTime    @map("expires_at")
+  usedAt         DateTime?   @map("used_at")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  file           MeetingFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  issuedTo       User        @relation(fields: [issuedToUserId], references: [id], onDelete: Cascade)
+
+  @@index([fileId])
+  @@index([expiresAt])
+  @@map("meeting_file_download_tickets")
 }

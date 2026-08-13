@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "meeting_files"
+    ADD COLUMN "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;

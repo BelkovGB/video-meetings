@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { PrismaService } from '../src/prisma/prisma.service';
 
 type Meeting = {
   id: string;
@@ -41,6 +42,7 @@ function expectMeeting(response: request.Response, expected: Omit<Meeting, 'id'>
 
 describe('Meetings (e2e)', () => {
   let app: INestApplication;
+  let prisma: PrismaService;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -49,6 +51,7 @@ describe('Meetings (e2e)', () => {
 
     app = moduleRef.createNestApplication();
     await app.init();
+    prisma = app.get(PrismaService);
   });
 
   afterAll(async () => {
@@ -62,6 +65,14 @@ describe('Meetings (e2e)', () => {
       .expect(201);
 
     return response.body as UserSession;
+  }
+
+  function getUserId(accessToken: string): string {
+    const payload = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64url').toString()) as {
+      sub: string;
+    };
+
+    return payload.sub;
   }
 
   async function createMeeting(
@@ -125,6 +136,9 @@ describe('Meetings (e2e)', () => {
     ['title exceeds 255 characters', { title: 'a'.repeat(256), date: validDate }],
     ['date is null', { title: createMeetingTitle(), date: null }],
     ['date is not an ISO 8601 date-time', { title: createMeetingTitle(), date: 'tomorrow' }],
+    ['date year is below 2000', { title: createMeetingTitle(), date: '1999-12-31T23:59:00Z' }],
+    ['date year is above 2100', { title: createMeetingTitle(), date: '2101-01-01T00:00:00Z' }],
+    ['date year has five digits', { title: createMeetingTitle(), date: '99999-09-09T09:59:00Z' }],
   ])('rejects creation when %s', async (_description, payload) => {
     const user = await registerUser();
 
@@ -158,9 +172,10 @@ describe('Meetings (e2e)', () => {
     expect(response.body).not.toEqual(expect.arrayContaining([expect.objectContaining({ title })]));
   });
 
-  it('returns only the authenticated user meetings', async () => {
+  it('returns owned and participant meetings without revealing inaccessible meetings', async () => {
     const firstUser = await registerUser();
     const secondUser = await registerUser();
+    const participant = await registerUser();
     const firstMeeting = await createMeeting(firstUser.accessToken, createMeetingTitle('Planning'));
     const secondMeetingForFirstUser = await createMeeting(
       firstUser.accessToken,
@@ -170,6 +185,13 @@ describe('Meetings (e2e)', () => {
       secondUser.accessToken,
       createMeetingTitle('Private meeting'),
     );
+    const sharedMeeting = await createMeeting(
+      secondUser.accessToken,
+      createMeetingTitle('Shared meeting'),
+    );
+    await prisma.meetingParticipant.create({
+      data: { meetingId: sharedMeeting.id, userId: getUserId(participant.accessToken) },
+    });
 
     const response = await request(app.getHttpServer())
       .get('/meetings')
@@ -178,13 +200,23 @@ describe('Meetings (e2e)', () => {
 
     expect(response.body).toEqual(
       expect.arrayContaining([
-        expect.objectContaining(firstMeeting),
-        expect.objectContaining(secondMeetingForFirstUser),
+        expect.objectContaining({ ...firstMeeting, accessRole: 'owner' }),
+        expect.objectContaining({ ...secondMeetingForFirstUser, accessRole: 'owner' }),
       ]),
     );
     expect(response.body).not.toEqual(
       expect.arrayContaining([expect.objectContaining(secondMeeting)]),
     );
+
+    const participantResponse = await request(app.getHttpServer())
+      .get('/meetings')
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .expect(200);
+
+    expect(participantResponse.body).toEqual([
+      expect.objectContaining({ ...sharedMeeting, accessRole: 'participant' }),
+    ]);
+    expect(participantResponse.body[0]).not.toHaveProperty('ownerId');
   });
 
   it('rejects a list request without an access token', async () => {
@@ -205,6 +237,28 @@ describe('Meetings (e2e)', () => {
       .expect(200);
 
     expect(response.body).toMatchObject(requestedMeeting);
+    expect(response.body).toMatchObject({ accessRole: 'owner' });
+  });
+
+  it('returns a meeting participant view with a non-owner access role', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken, createMeetingTitle('Shared meeting'));
+    await prisma.meetingParticipant.create({
+      data: { meetingId: meeting.id, userId: getUserId(participant.accessToken) },
+    });
+
+    const response = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}`)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      id: meeting.id,
+      title: meeting.title,
+      accessRole: 'participant',
+    });
+    expect(response.body).not.toHaveProperty('ownerId');
   });
 
   it('does not reveal another user meeting by its identifier', async () => {

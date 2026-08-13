@@ -6,6 +6,13 @@
 - `apps/api` is the NestJS API.
 - Use npm workspaces and run shared commands from the repository root.
 
+## Meeting file uploads
+
+- Read [`docs/research-meetings-upload.md`](docs/research-meetings-upload.md)
+  before implementing or changing meeting file uploads. It documents the
+  recommended architecture, security controls, and evolution path for meeting
+  file storage and transfer.
+
 ## Commands
 
 - Install: `npm ci`

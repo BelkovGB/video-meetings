@@ -2,10 +2,11 @@ import { Module, ValidationPipe } from '@nestjs/common';
 import { APP_PIPE } from '@nestjs/core';
 
 import { AuthModule } from './auth/auth.module';
+import { FilesModule } from './files/files.module';
 import { MeetingsModule } from './meetings/meetings.module';
 
 @Module({
-  imports: [AuthModule, MeetingsModule],
+  imports: [AuthModule, MeetingsModule, FilesModule],
   providers: [
     {
       provide: APP_PIPE,

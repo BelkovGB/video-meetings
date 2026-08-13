@@ -10,16 +10,24 @@ import { GetMeetingQuery } from '../queries/get-meeting.query';
 export class GetMeetingHandler implements IQueryHandler<GetMeetingQuery> {
   constructor(private readonly prisma: PrismaService) {}
 
-  async execute({ id, ownerId }: GetMeetingQuery) {
+  async execute({ id, userId }: GetMeetingQuery) {
     const meeting = await this.prisma.meeting.findFirst({
-      where: { id, ownerId },
-      select: meetingSelect,
+      where: {
+        id,
+        OR: [{ ownerId: userId }, { participants: { some: { userId } } }],
+      },
+      select: { ...meetingSelect, ownerId: true },
     });
 
     if (!meeting) {
       throw new NotFoundException('Meeting not found');
     }
 
-    return meeting;
+    const { ownerId, ...response } = meeting;
+
+    return {
+      ...response,
+      accessRole: ownerId === userId ? 'owner' : 'participant',
+    };
   }
 }

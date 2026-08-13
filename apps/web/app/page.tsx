@@ -12,6 +12,7 @@ import {
   Spinner,
   TextField,
 } from '@heroui/react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
@@ -19,6 +20,7 @@ type Meeting = {
   id: string;
   title: string;
   date: string;
+  accessRole: 'owner' | 'participant';
 };
 
 type ApiError = {
@@ -31,6 +33,27 @@ type FormErrors = {
 };
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+const meetingDateMin = '2000-01-01T00:00';
+const meetingDateMax = '2100-12-31T23:59';
+
+function getMeetingDateError(value: string): string | undefined {
+  if (!value) {
+    return 'Укажите дату и время встречи.';
+  }
+
+  const [yearPart] = value.split('-');
+  const year = Number(yearPart);
+
+  if (!/^\d{4}$/.test(yearPart) || year < 2000 || year > 2100) {
+    return 'Укажите год с 2000 по 2100.';
+  }
+
+  if (Number.isNaN(new Date(value).getTime())) {
+    return 'Введите корректные дату и время.';
+  }
+
+  return undefined;
+}
 
 function getEmailFromToken(token: string) {
   try {
@@ -139,8 +162,30 @@ export default function DashboardPage() {
   const validateDate = () => {
     setFieldErrors((currentErrors) => ({
       ...currentErrors,
-      date: date ? undefined : 'Укажите дату и время встречи.',
+      date: getMeetingDateError(date),
     }));
+  };
+
+  const validateMeetingForm = (): boolean => {
+    const nextFieldErrors: FormErrors = {
+      title: title.trim() ? undefined : 'Введите название встречи.',
+      date: getMeetingDateError(date),
+    };
+
+    if (!nextFieldErrors.title && !nextFieldErrors.date) {
+      return true;
+    }
+
+    setFieldErrors(nextFieldErrors);
+    requestAnimationFrame(() => {
+      if (nextFieldErrors.title) {
+        titleInputRef.current?.focus();
+        return;
+      }
+
+      dateInputRef.current?.focus();
+    });
+    return false;
   };
 
   const createMeeting = async (event: FormEvent<HTMLFormElement>) => {
@@ -152,21 +197,7 @@ export default function DashboardPage() {
       return;
     }
 
-    const nextFieldErrors: FormErrors = {
-      title: title.trim() ? undefined : 'Введите название встречи.',
-      date: date ? undefined : 'Укажите дату и время встречи.',
-    };
-
-    if (nextFieldErrors.title || nextFieldErrors.date) {
-      setFieldErrors(nextFieldErrors);
-      requestAnimationFrame(() => {
-        if (nextFieldErrors.title) {
-          titleInputRef.current?.focus();
-          return;
-        }
-
-        dateInputRef.current?.focus();
-      });
+    if (!validateMeetingForm()) {
       return;
     }
 
@@ -182,14 +213,14 @@ export default function DashboardPage() {
         },
         body: JSON.stringify({ title: title.trim(), date: new Date(date).toISOString() }),
       });
-      const data = (await response.json()) as Meeting & ApiError;
+      const data = (await response.json()) as Omit<Meeting, 'accessRole'> & ApiError;
 
       if (!response.ok || !data.id) {
         setSubmitError(getApiErrorMessage(data));
         return;
       }
 
-      setMeetings((currentMeetings) => [data, ...currentMeetings]);
+      setMeetings((currentMeetings) => [{ ...data, accessRole: 'owner' }, ...currentMeetings]);
       setTitle('');
       setDate('');
       setIsCreateOpen(false);
@@ -199,6 +230,12 @@ export default function DashboardPage() {
       setIsCreating(false);
     }
   };
+
+  const formErrorMessages = [
+    fieldErrors.title ? `Название: ${fieldErrors.title}` : null,
+    fieldErrors.date ? `Дата и время: ${fieldErrors.date}` : null,
+    submitError,
+  ].filter((message): message is string => Boolean(message));
 
   if (isLoading) {
     return (
@@ -231,7 +268,10 @@ export default function DashboardPage() {
           <div>
             <p className="text-sm font-semibold text-cyan-300">Ваше рабочее пространство</p>
             <h1 className="mt-3 max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
-              Рады видеть вас, <span className="break-all">{email || 'коллега'}</span>.
+              Рады видеть вас.
+              <span className="mt-2 block break-words text-2xl leading-tight text-cyan-100 sm:text-3xl">
+                {email || 'коллега'}
+              </span>
             </h1>
             <p className="mt-5 max-w-xl text-base leading-7 text-slate-300">
               Здесь собраны все ваши встречи: от первой идеи до следующего важного решения.
@@ -257,7 +297,7 @@ export default function DashboardPage() {
             <p className="mt-4 text-sm leading-6 text-slate-300">
               {meetings.length === 0
                 ? 'Создайте первую встречу — она сразу появится здесь.'
-                : 'Все встречи доступны только из вашего аккаунта.'}
+                : 'Здесь собраны ваши и приглашённые встречи.'}
             </p>
           </section>
         </section>
@@ -326,6 +366,7 @@ export default function DashboardPage() {
                 value={title}
                 onChange={(value) => {
                   setTitle(value);
+                  setSubmitError(null);
                   if (fieldErrors.title) {
                     setFieldErrors((currentErrors) => ({ ...currentErrors, title: undefined }));
                   }
@@ -336,19 +377,10 @@ export default function DashboardPage() {
                   ref={titleInputRef}
                   autoComplete="off"
                   placeholder="Например, планирование спринта"
-                  aria-describedby={fieldErrors.title ? 'meeting-title-error' : undefined}
+                  aria-describedby={fieldErrors.title ? 'create-meeting-errors' : undefined}
                   onBlur={validateTitle}
                   className="h-12 rounded-xl border border-slate-200 bg-slate-50 px-4 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-cyan-500 focus:bg-white focus:ring-4 focus:ring-cyan-100"
                 />
-                {fieldErrors.title ? (
-                  <p
-                    id="meeting-title-error"
-                    role="alert"
-                    className="mt-2 text-sm font-medium text-red-700"
-                  >
-                    {fieldErrors.title}
-                  </p>
-                ) : null}
               </TextField>
               <TextField
                 isInvalid={Boolean(fieldErrors.date)}
@@ -357,8 +389,12 @@ export default function DashboardPage() {
                 value={date}
                 onChange={(value) => {
                   setDate(value);
+                  setSubmitError(null);
                   if (fieldErrors.date) {
-                    setFieldErrors((currentErrors) => ({ ...currentErrors, date: undefined }));
+                    setFieldErrors((currentErrors) => ({
+                      ...currentErrors,
+                      date: getMeetingDateError(value),
+                    }));
                   }
                 }}
                 type="datetime-local"
@@ -366,19 +402,12 @@ export default function DashboardPage() {
                 <Label className="mb-2 text-sm font-medium text-slate-700">Дата и время</Label>
                 <Input
                   ref={dateInputRef}
-                  aria-describedby={fieldErrors.date ? 'meeting-date-error' : undefined}
+                  min={meetingDateMin}
+                  max={meetingDateMax}
+                  aria-describedby={fieldErrors.date ? 'create-meeting-errors' : undefined}
                   onBlur={validateDate}
                   className="h-12 rounded-xl border border-slate-200 bg-slate-50 px-4 text-slate-950 outline-none transition focus:border-cyan-500 focus:bg-white focus:ring-4 focus:ring-cyan-100"
                 />
-                {fieldErrors.date ? (
-                  <p
-                    id="meeting-date-error"
-                    role="alert"
-                    className="mt-2 text-sm font-medium text-red-700"
-                  >
-                    {fieldErrors.date}
-                  </p>
-                ) : null}
               </TextField>
               <Button
                 type="submit"
@@ -388,17 +417,27 @@ export default function DashboardPage() {
                 {isCreating ? <Spinner size="sm" color="current" /> : 'Создать'}
               </Button>
             </form>
-            {submitError ? (
+            {formErrorMessages.length > 0 ? (
               <Alert
+                id="create-meeting-errors"
                 role="alert"
                 status="danger"
                 className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-red-950"
               >
                 <AlertIndicator className="text-red-700" />
                 <AlertContent>
-                  <AlertDescription className="text-sm font-medium text-red-800">
-                    {submitError}
-                  </AlertDescription>
+                  <AlertTitle className="text-sm font-semibold text-red-900">
+                    {submitError && !fieldErrors.title && !fieldErrors.date
+                      ? 'Не удалось создать встречу'
+                      : 'Проверьте данные встречи'}
+                  </AlertTitle>
+                  <div className="text-sm font-medium text-red-800">
+                    <ul className="list-disc space-y-1 pl-5">
+                      {formErrorMessages.map((message) => (
+                        <li key={message}>{message}</li>
+                      ))}
+                    </ul>
+                  </div>
                 </AlertContent>
               </Alert>
             ) : null}
@@ -411,13 +450,13 @@ export default function DashboardPage() {
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold text-cyan-300">Ближайшее и важное</p>
+              <p className="text-sm font-semibold text-cyan-300">Рабочая история</p>
               <h2 id="recent-meetings-title" className="mt-1 text-2xl font-semibold tracking-tight">
-                Последние встречи
+                Все встречи
               </h2>
             </div>
             <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-sm text-slate-300">
-              Показано: {Math.min(meetings.length, 3)}
+              Доступно: {meetings.length}
             </span>
           </div>
 
@@ -442,17 +481,22 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="mt-6 grid gap-3 lg:grid-cols-3">
-              {meetings.slice(0, 3).map((meeting) => (
-                <article
+              {meetings.map((meeting) => (
+                <Link
                   key={meeting.id}
-                  className="rounded-2xl border border-white/10 bg-slate-900/50 p-5 transition hover:border-cyan-200/30 hover:bg-slate-900"
+                  href={`/meetings/${meeting.id}`}
+                  aria-label={`Открыть встречу ${meeting.title}`}
+                  className="rounded-2xl border border-white/10 bg-slate-900/50 p-5 transition duration-200 hover:border-cyan-200/30 hover:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-cyan-300 focus:ring-offset-2 focus:ring-offset-slate-950"
                 >
                   <span className="grid h-10 w-10 place-items-center rounded-xl bg-cyan-300/10 text-cyan-200">
                     <CalendarIcon />
                   </span>
                   <h3 className="mt-5 text-lg font-semibold text-white">{meeting.title}</h3>
                   <p className="mt-2 text-sm text-slate-300">{formatMeetingDate(meeting.date)}</p>
-                </article>
+                  <span className="mt-4 inline-flex rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-cyan-100">
+                    {meeting.accessRole === 'owner' ? 'Владелец' : 'Участник'}
+                  </span>
+                </Link>
               ))}
             </div>
           )}

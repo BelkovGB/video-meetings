@@ -10,11 +10,18 @@ import { GetMeetingsQuery } from '../queries/get-meetings.query';
 export class GetMeetingsHandler implements IQueryHandler<GetMeetingsQuery> {
   constructor(private readonly prisma: PrismaService) {}
 
-  execute({ ownerId }: GetMeetingsQuery) {
-    return this.prisma.meeting.findMany({
-      where: { ownerId },
+  async execute({ userId }: GetMeetingsQuery) {
+    const meetings = await this.prisma.meeting.findMany({
+      where: {
+        OR: [{ ownerId: userId }, { participants: { some: { userId } } }],
+      },
       orderBy: { createdAt: 'desc' },
-      select: meetingSelect,
+      select: { ...meetingSelect, ownerId: true },
     });
+
+    return meetings.map(({ ownerId, ...meeting }) => ({
+      ...meeting,
+      accessRole: ownerId === userId ? 'owner' : 'participant',
+    }));
   }
 }
