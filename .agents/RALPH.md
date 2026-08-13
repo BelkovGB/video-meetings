@@ -30,8 +30,8 @@ Codex не использует Claude Code `Stop` hook. В этом проек�
    self-review, но не имеет права изменять `.git` или GitHub.
 5. Скрипт проверяет ветку и изменения, повторно запускает обязательные проверки и
    создаёт ровно один commit.
-6. Отдельный `codex exec review` на модели `review.model` (`gpt-5.6-terra`) в
-   read-only sandbox проверяет созданный commit и пишет
+6. Отдельный read-only `codex exec` на модели `review.model`
+   (`gpt-5.6-terra`) проверяет созданный commit и пишет
    структурированный результат в `.agents/last-review.json`.
 7. Только после успешного review оркестратор закрывает issue через GitHub CLI.
 8. При замечаниях или ошибке review issue остаётся открытой, в неё добавляется
