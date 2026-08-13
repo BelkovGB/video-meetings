@@ -6,7 +6,7 @@
   "draftPullRequest": true,
 
   "maxIterations": 1,
-  "maxTurns": 150,
+  "maxTurns": 50,
   "maxTestFixAttempts": 5,
 
   "developmentModel": "gpt-5.6-terra",
@@ -25,7 +25,7 @@
   "milestoneReview": {
     "enabled": true,
     "model": "gpt-5.6-sol",
-    "maxTurns": 50,
+    "maxTurns": 150,
     "schemaFile": ".agents/review.schema.json",
     "outputFile": ".agents/last-milestone-review.json"
   }
