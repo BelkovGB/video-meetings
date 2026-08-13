@@ -137,6 +137,7 @@ async function runCodexWithTurnLimit(args, options) {
 
   let stderr = "";
   let stdoutBuffer = "";
+  let lastAgentMessage = "";
   // Счётчик шагов текущей сессии Codex.
   let turns = 0;
   let limitReached = false;
@@ -156,6 +157,9 @@ async function runCodexWithTurnLimit(args, options) {
     }
 
     const item = event.item;
+    if (event.type === "item.completed" && item?.type === "agent_message" && item.text) {
+      lastAgentMessage = item.text;
+    }
     let currentTurn = null;
     if (
       (event.type === "item.started" || event.type === "item.completed") &&
@@ -223,7 +227,7 @@ async function runCodexWithTurnLimit(args, options) {
   }
 
   console.log(`${options.label}: использовано шагов ${turns}/${options.maxTurns}.`);
-  return { turns };
+  return { turns, lastAgentMessage };
 }
 
 // -----------------------------------------------------------------------------
@@ -667,6 +671,8 @@ async function runIndependentReview(config, repository, issue, commit) {
     await runCodexWithTurnLimit(
       [
         "exec",
+        "--sandbox",
+        "read-only",
         "review",
         "--json",
         "--model",
@@ -750,17 +756,112 @@ async function runIndependentReview(config, repository, issue, commit) {
 }
 
 // -----------------------------------------------------------------------------
+// Подготовка commit и закрытие issue силами оркестратора
+// -----------------------------------------------------------------------------
+
+function commitMessageFromAgent(lastAgentMessage, issue) {
+  const marker = lastAgentMessage.match(/^COMMIT_MESSAGE:\s*(.+)$/im)?.[1]?.trim();
+  if (
+    marker &&
+    marker.length <= 120 &&
+    /^(feat|fix|docs|test|refactor|perf|build|ci|chore): [^\r\n]+$/.test(marker)
+  ) {
+    return marker;
+  }
+
+  return `chore: complete issue #${issue.number}`;
+}
+
+function closeIssue(config, repository, issue, commit) {
+  const completion = config.review.enabled
+    ? "Ralph Loop validations and independent review passed."
+    : "Ralph Loop validations passed; independent review is disabled in config.";
+  run("gh", [
+    "issue",
+    "close",
+    String(issue.number),
+    "--repo",
+    repository,
+    "--reason",
+    "completed",
+    "--comment",
+    `Implemented in commit ${commit}. ${completion}`,
+  ]);
+
+  if (issueState(repository, issue.number) !== "CLOSED") {
+    fail(`Issue #${issue.number} не закрылась после успешной реализации.`);
+  }
+}
+
+async function commitAndCompleteIssue(config, repository, issue, startingCommit, lastAgentMessage) {
+  const currentBranch = run("git", ["branch", "--show-current"]).stdout;
+  const currentCommit = run("git", ["rev-parse", "HEAD"]).stdout;
+  const changes = run("git", ["status", "--porcelain"]).stdout;
+  const violations = [];
+
+  if (currentBranch !== config.branch) {
+    violations.push(`Codex переключился на ветку ${currentBranch}`);
+  }
+  if (currentCommit !== startingCommit) {
+    violations.push("Codex самостоятельно создал commit");
+  }
+  if (changes === "") {
+    violations.push("Codex не оставил изменений для commit");
+  }
+  if (issueState(repository, issue.number) !== "OPEN") {
+    violations.push("Codex самостоятельно изменил состояние issue");
+  }
+  if (violations.length > 0) {
+    fail(`Issue #${issue.number}: ${violations.join("; ")}. Цикл остановлен.`);
+  }
+
+  runConfiguredValidation(config);
+  run("git", ["add", "--all"]);
+
+  const stagedDiff = run("git", ["diff", "--cached", "--quiet"], {
+    allowFailure: true,
+  });
+  if (stagedDiff.status === 0) {
+    fail(`Issue #${issue.number}: после staging нет изменений для commit.`);
+  }
+  if (stagedDiff.status !== 1) {
+    fail(`Issue #${issue.number}: не удалось проверить staged diff.`);
+  }
+
+  const commitMessage = commitMessageFromAgent(lastAgentMessage, issue);
+  run("git", ["commit", "-m", commitMessage], { inherit: true });
+
+  const commitCount = Number(
+    run("git", ["rev-list", "--count", `${startingCommit}..HEAD`]).stdout,
+  );
+  const remainingChanges = run("git", ["status", "--porcelain"]).stdout;
+  if (commitCount !== 1 || remainingChanges !== "") {
+    fail(
+      `Issue #${issue.number}: оркестратор ожидал один commit и чистое дерево, ` +
+        `получено commits=${commitCount}, changes=${remainingChanges ? "yes" : "no"}.`,
+    );
+  }
+
+  const commit = run("git", ["rev-parse", "HEAD"]).stdout;
+  await runIndependentReview(config, repository, issue, commit);
+  closeIssue(config, repository, issue, commit);
+}
+
+// -----------------------------------------------------------------------------
 // Реализация одной issue на Terra и проверка правил завершения
 // -----------------------------------------------------------------------------
 
 async function runCodex(config, repository, issue, rules) {
   const startingCommit = run("git", ["rev-parse", "HEAD"]).stdout;
+  let codexResult;
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
   try {
-    await runCodexWithTurnLimit(
+    codexResult = await runCodexWithTurnLimit(
       [
         "exec",
         "--json",
+        "--sandbox",
+        "workspace-write",
         "--model",
         config.developmentModel,
         "-C",
@@ -784,39 +885,13 @@ async function runCodex(config, repository, issue, rules) {
     throw error;
   }
 
-  const state = issueState(repository, issue.number);
-  const currentBranch = run("git", ["branch", "--show-current"]).stdout;
-  const changes = run("git", ["status", "--porcelain"]).stdout;
-  const commitCount = Number(
-    run("git", ["rev-list", "--count", `${startingCommit}..HEAD`]).stdout,
+  await commitAndCompleteIssue(
+    config,
+    repository,
+    issue,
+    startingCommit,
+    codexResult.lastAgentMessage,
   );
-  const violations = [];
-  if (state !== "CLOSED") {
-    violations.push("issue осталась открытой");
-  }
-  if (currentBranch !== config.branch) {
-    violations.push(`Codex переключился на ветку ${currentBranch}`);
-  }
-  if (changes !== "") {
-    violations.push("остались незакоммиченные изменения");
-  }
-  if (commitCount !== 1) {
-    violations.push(`ожидался 1 commit, создано ${commitCount}`);
-  }
-
-  if (violations.length > 0) {
-    if (state === "CLOSED") {
-      reopenIssueWithComment(
-        repository,
-        issue,
-        `## Ralph Loop: completion checks failed\n\n${violations.map((violation) => `- ${violation}`).join("\n")}\n\nIssue reopened because the iteration did not satisfy the completion rules.`,
-      );
-    }
-    fail(`Issue #${issue.number}: ${violations.join("; ")}. Цикл остановлен.`);
-  }
-
-  const commit = run("git", ["rev-parse", "HEAD"]).stdout;
-  await runIndependentReview(config, repository, issue, commit);
 }
 
 // -----------------------------------------------------------------------------
@@ -880,7 +955,7 @@ function verifyPullRequestTarget(config, pullRequest) {
   return pullRequest;
 }
 
-function runPullRequestValidation(config) {
+function runConfiguredValidation(config) {
   for (const script of config.validationScripts) {
     console.log(`\n=== npm run ${script} ===\n`);
     run("npm", ["run", script], { inherit: true });
@@ -893,7 +968,7 @@ function createPullRequest(config, repository) {
     fail("Нельзя создать PR: в рабочем дереве есть незакоммиченные изменения.");
   }
 
-  runPullRequestValidation(config);
+  runConfiguredValidation(config);
   run("git", ["fetch", "origin", config.baseBranch], { inherit: true });
   const commitCount = Number(
     run("git", [
@@ -1065,6 +1140,8 @@ Report only actionable findings introduced by this PR. Use verdict "fail" when a
     await runCodexWithTurnLimit(
       [
         "exec",
+        "--sandbox",
+        "read-only",
         "review",
         "--json",
         "--model",

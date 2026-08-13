@@ -5,3 +5,4 @@ coverage
 package-lock.json
 .agents
 .playwright-mcp
+apps/web/next-env.d.ts
