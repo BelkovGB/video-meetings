@@ -564,23 +564,29 @@ function verifyMilestone(repository, title) {
 function openIssues(repository, milestone) {
   const issues = parseJson(
     run("gh", [
-      "issue",
-      "list",
-      "--repo",
-      repository,
-      "--milestone",
-      milestone,
-      "--state",
-      "open",
-      "--limit",
-      "100",
-      "--json",
-      "number,title,body,url",
+      "api",
+      "--method",
+      "GET",
+      `repos/${repository}/issues`,
+      "-f",
+      "state=open",
+      "-F",
+      `milestone=${milestone.number}`,
+      "-F",
+      "per_page=100",
     ]).stdout,
-    "gh issue list",
+    "GitHub milestone issues API",
   );
 
-  return issues.sort((left, right) => left.number - right.number);
+  return issues
+    .filter((issue) => !issue.pull_request)
+    .map((issue) => ({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      url: issue.html_url,
+    }))
+    .sort((left, right) => left.number - right.number);
 }
 
 // -----------------------------------------------------------------------------
@@ -619,18 +625,11 @@ function renderPrompt(config, issue, rules) {
 // -----------------------------------------------------------------------------
 
 function issueState(repository, issueNumber) {
-  return parseJson(
-    run("gh", [
-      "issue",
-      "view",
-      String(issueNumber),
-      "--repo",
-      repository,
-      "--json",
-      "state",
-    ]).stdout,
-    `gh issue view ${issueNumber}`,
-  ).state;
+  const issue = parseJson(
+    run("gh", ["api", `repos/${repository}/issues/${issueNumber}`]).stdout,
+    `GitHub issue ${issueNumber}`,
+  );
+  return issue.state?.toUpperCase();
 }
 
 function reopenIssueWithComment(repository, issue, comment) {
@@ -668,6 +667,109 @@ function formatReviewComment(review) {
   return `## Ralph Loop: independent review found problems\n\n${review.summary}\n\n${findings}\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.`;
 }
 
+function normalizeReviewResult(review) {
+  if (review.verdict === "fail" && review.findings.length === 0) {
+    fail("Review returned FAIL without actionable findings.");
+  }
+
+  if (review.verdict === "pass" && review.findings.length > 0) {
+    return {
+      ...review,
+      verdict: "fail",
+      summary:
+        `Codex returned PASS together with ${review.findings.length} actionable findings. ` +
+        `Ralph treated the result as FAIL. ${review.summary}`,
+    };
+  }
+
+  return review;
+}
+
+function issueBodyWithReviewContext(issue, review) {
+  const startMarker = "<!-- ralph-issue-review-context:start -->";
+  const endMarker = "<!-- ralph-issue-review-context:end -->";
+  const previousContext = new RegExp(
+    `\\n*${startMarker}[\\s\\S]*?${endMarker}\\n*`,
+    "g",
+  );
+  const originalBody = issueBodyWithoutCompletionState(issue)
+    .replace(previousContext, "")
+    .trimEnd();
+  const reviewContext = formatReviewComment(review).replace(
+    "\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.",
+    "",
+  );
+  return `${originalBody}\n\n${startMarker}\n${reviewContext}\n${endMarker}`.trim();
+}
+
+function updateIssueReviewContext(repository, issue, review) {
+  const updatedBody = issueBodyWithReviewContext(issue, review);
+
+  run("gh", [
+    "issue",
+    "edit",
+    String(issue.number),
+    "--repo",
+    repository,
+    "--body",
+    updatedBody,
+  ]);
+  issue.body = updatedBody;
+}
+
+function issueBodyWithoutCompletionState(issue) {
+  return (issue.body ?? "")
+    .replace(
+      /\n*<!-- ralph-issue-completion status:(?:pending-review|review-passed) commit:[0-9a-f]{40} -->\n*/gi,
+      "\n",
+    )
+    .trim();
+}
+
+function issueCompletionState(issue) {
+  const match = (issue.body ?? "").match(
+    /<!-- ralph-issue-completion status:(pending-review|review-passed) commit:([0-9a-f]{40}) -->/i,
+  );
+  return match ? { status: match[1].toLowerCase(), commit: match[2].toLowerCase() } : null;
+}
+
+function issueBodyWithCompletionState(issue, status, commit) {
+  const body = issueBodyWithoutCompletionState(issue);
+  return `${body}\n\n<!-- ralph-issue-completion status:${status} commit:${commit} -->`.trim();
+}
+
+function setIssueCompletionState(repository, issue, status, commit) {
+  const updatedBody = issueBodyWithCompletionState(issue, status, commit);
+  run("gh", [
+    "issue",
+    "edit",
+    String(issue.number),
+    "--repo",
+    repository,
+    "--body",
+    updatedBody,
+  ]);
+  issue.body = updatedBody;
+}
+
+function clearIssueCompletionState(repository, issue) {
+  const updatedBody = issueBodyWithoutCompletionState(issue);
+  if (updatedBody === (issue.body ?? "").trim()) {
+    return;
+  }
+
+  run("gh", [
+    "issue",
+    "edit",
+    String(issue.number),
+    "--repo",
+    repository,
+    "--body",
+    updatedBody,
+  ]);
+  issue.body = updatedBody;
+}
+
 // -----------------------------------------------------------------------------
 // Локальное ревью commit одной issue на модели Terra
 // -----------------------------------------------------------------------------
@@ -681,7 +783,7 @@ async function runIndependentReview(config, repository, issue, commit) {
     unlinkSync(config.review.outputPath);
   }
 
-  const reviewPrompt = `Review commit ${commit} only as the implementation of GitHub issue #${issue.number}: ${issue.title}.\n\nIssue body:\n${issue.body?.trim() || "(empty)"}\n\nCheck correctness, regressions, security, edge cases, tests, and every requirement from the issue body. Use verdict \"fail\" when at least one actionable finding exists; otherwise use \"pass\" with an empty findings array. Do not edit files.`;
+  const reviewPrompt = `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; inspect it as evidence, but verify that the current HEAD still satisfies the issue and has not regressed it.\n\nIssue body:\n${issue.body?.trim() || "(empty)"}\n\nCheck correctness, regressions, security, edge cases, tests, and every requirement from the issue body. Use verdict \"fail\" when at least one actionable finding exists; otherwise use \"pass\" with an empty findings array. Do not edit files.`;
 
   console.log(`\n=== Independent Codex review for issue #${issue.number} ===\n`);
 
@@ -752,6 +854,17 @@ async function runIndependentReview(config, repository, issue, commit) {
     fail(`Review issue #${issue.number} вернул некорректный результат.`);
   }
 
+  try {
+    review = normalizeReviewResult(review);
+  } catch (error) {
+    reopenIssueWithComment(
+      repository,
+      issue,
+      "## Ralph Loop: independent review returned FAIL without findings\n\nThe result contains no actionable finding, so implementation cannot continue safely. The pending commit is preserved and review will be retried on the next run.",
+    );
+    fail(`Review issue #${issue.number} вернул FAIL без findings: ${error.message}`);
+  }
+
   const changes = run("git", ["status", "--porcelain"]).stdout;
   if (changes !== "") {
     reopenIssueWithComment(
@@ -763,6 +876,7 @@ async function runIndependentReview(config, repository, issue, commit) {
   }
 
   if (review.verdict !== "pass" || review.findings.length > 0) {
+    updateIssueReviewContext(repository, issue, review);
     reopenIssueWithComment(repository, issue, formatReviewComment(review));
     console.log(
       `Review issue #${issue.number}: FAIL — найдено замечаний: ${review.findings.length}.`,
@@ -791,25 +905,124 @@ function commitMessageFromAgent(lastAgentMessage, issue) {
   return `chore: complete issue #${issue.number}`;
 }
 
+function alreadyFixedCommitFromAgent(lastAgentMessage) {
+  return (
+    String(lastAgentMessage ?? "")
+      .trimEnd()
+      .match(/(?:^|\r?\n)ALREADY_FIXED:\s*([0-9a-f]{7,40})\s*$/i)?.[1] ?? null
+  );
+}
+
+function verifiedIssueCommit(commit, issue) {
+  const resolved = run("git", ["rev-parse", "--verify", `${commit}^{commit}`], {
+    allowFailure: true,
+  });
+  if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(resolved.stdout)) {
+    fail(`Issue #${issue.number}: commit ${commit} не найден.`);
+  }
+
+  const ancestor = run("git", ["merge-base", "--is-ancestor", resolved.stdout, "HEAD"], {
+    allowFailure: true,
+  });
+  if (ancestor.status !== 0) {
+    fail(`Issue #${issue.number}: commit ${resolved.stdout} не принадлежит текущей ветке.`);
+  }
+  return resolved.stdout;
+}
+
 function closeIssue(config, repository, issue, commit) {
   const completion = config.review.enabled
     ? "Ralph Loop validations and independent review passed."
     : "Ralph Loop validations passed; independent review is disabled in config.";
   run("gh", [
     "issue",
-    "close",
+    "comment",
     String(issue.number),
     "--repo",
     repository,
-    "--reason",
-    "completed",
-    "--comment",
+    "--body",
     `Implemented in commit ${commit}. ${completion}`,
   ]);
 
-  if (issueState(repository, issue.number) !== "CLOSED") {
+  const closedIssue = parseJson(
+    run("gh", [
+      "api",
+      "--method",
+      "PATCH",
+      `repos/${repository}/issues/${issue.number}`,
+      "-f",
+      "state=closed",
+      "-f",
+      "state_reason=completed",
+    ]).stdout,
+    `GitHub close issue ${issue.number}`,
+  );
+  if (closedIssue.state?.toUpperCase() !== "CLOSED") {
     fail(`Issue #${issue.number} не закрылась после успешной реализации.`);
   }
+}
+
+async function reviewAndCloseCommittedIssue(
+  config,
+  repository,
+  issue,
+  commit,
+  markPending = true,
+) {
+  if (!config.review.enabled) {
+    closeIssue(config, repository, issue, commit);
+    return {
+      completed: true,
+      commit,
+      review: { verdict: "pass", summary: "Independent review is disabled.", findings: [] },
+    };
+  }
+
+  if (markPending) {
+    setIssueCompletionState(repository, issue, "pending-review", commit);
+  }
+  const review = await runIndependentReview(config, repository, issue, commit);
+  if (review.verdict !== "pass" || review.findings.length > 0) {
+    return { completed: false, commit, review };
+  }
+
+  // Удаляем recovery-marker до закрытия: позднее ручное reopen должно снова
+  // пройти обычную реализацию, а не использовать старый commit как актуальный.
+  clearIssueCompletionState(repository, issue);
+  try {
+    closeIssue(config, repository, issue, commit);
+  } catch (error) {
+    // Если закрытие технически не удалось, стараемся сохранить точку resume.
+    try {
+      setIssueCompletionState(repository, issue, "pending-review", commit);
+    } catch (restoreError) {
+      console.error(
+        `Не удалось восстановить состояние pending-review для issue #${issue.number}: ${restoreError.message}`,
+      );
+    }
+    throw error;
+  }
+  return { completed: true, commit, review };
+}
+
+async function resumeIssueCompletion(config, repository, issue, completion) {
+  const commit = verifiedIssueCommit(completion.commit, issue);
+  if (run("git", ["status", "--porcelain"]).stdout !== "") {
+    fail(`Issue #${issue.number}: нельзя продолжить review при грязном рабочем дереве.`);
+  }
+
+  // Marker хранится в редактируемом body issue и служит только указателем на
+  // commit. Он не является доверенным доказательством пройденных проверок.
+  runConfiguredValidation(config);
+  if (run("git", ["status", "--porcelain"]).stdout !== "") {
+    fail(`Issue #${issue.number}: проверки при возобновлении изменили рабочее дерево.`);
+  }
+
+  console.log(
+    `Issue #${issue.number}: повторяем validations и review commit ${commit} ` +
+      `(сохранённое состояние: ${completion.status}).`,
+  );
+  return reviewAndCloseCommittedIssue(config, repository, issue, commit, false);
 }
 
 async function commitAndCompleteIssue(config, repository, issue, startingCommit, lastAgentMessage) {
@@ -824,14 +1037,26 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   if (currentCommit !== startingCommit) {
     violations.push("Codex самостоятельно создал commit");
   }
-  if (changes === "") {
-    violations.push("Codex не оставил изменений для commit");
-  }
   if (issueState(repository, issue.number) !== "OPEN") {
     violations.push("Codex самостоятельно изменил состояние issue");
   }
   if (violations.length > 0) {
     fail(`Issue #${issue.number}: ${violations.join("; ")}. Цикл остановлен.`);
+  }
+
+  if (changes === "") {
+    const alreadyFixedCommit = alreadyFixedCommitFromAgent(lastAgentMessage);
+    if (!alreadyFixedCommit) {
+      fail(
+        `Issue #${issue.number}: Codex не оставил изменений и не указал ALREADY_FIXED commit.`,
+      );
+    }
+    const commit = verifiedIssueCommit(alreadyFixedCommit, issue);
+    runConfiguredValidation(config);
+    if (run("git", ["status", "--porcelain"]).stdout !== "") {
+      fail(`Issue #${issue.number}: проверки already-fixed решения изменили рабочее дерево.`);
+    }
+    return reviewAndCloseCommittedIssue(config, repository, issue, commit);
   }
 
   runConfiguredValidation(config);
@@ -869,12 +1094,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   }
 
   const commit = run("git", ["rev-parse", "HEAD"]).stdout;
-  const review = await runIndependentReview(config, repository, issue, commit);
-  if (review.verdict !== "pass" || review.findings.length > 0) {
-    return { completed: false, commit, review };
-  }
-  closeIssue(config, repository, issue, commit);
-  return { completed: true, commit, review };
+  return reviewAndCloseCommittedIssue(config, repository, issue, commit);
 }
 
 // -----------------------------------------------------------------------------
@@ -882,6 +1102,16 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 // -----------------------------------------------------------------------------
 
 async function runCodex(config, repository, issue, rules) {
+  const completion = issueCompletionState(issue);
+  if (completion?.status === "pending-review") {
+    return resumeIssueCompletion(config, repository, issue, completion);
+  }
+  if (completion) {
+    // Совместимость со старым review-passed marker: он не является доверенным
+    // состоянием и не должен обходить новую реализацию после reopen.
+    clearIssueCompletionState(repository, issue);
+  }
+
   const startingCommit = run("git", ["rev-parse", "HEAD"]).stdout;
   let codexResult;
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
@@ -1251,6 +1481,13 @@ Report only actionable findings introduced by this PR. Use verdict "fail" when a
     fail(`Milestone review PR #${pullRequest.number} вернул некорректный результат.`);
   }
 
+  try {
+    review = normalizeReviewResult(review);
+  } catch (error) {
+    postMilestoneReviewFailure(config, repository, pullRequest, error.message);
+    fail(`Milestone review PR #${pullRequest.number} вернул FAIL без findings.`);
+  }
+
   const changes = run("git", ["status", "--porcelain"]).stdout;
   if (changes !== "") {
     const message = "The read-only milestone review changed the working tree.";
@@ -1288,23 +1525,31 @@ function reviewFindingMarker(pullRequest, finding) {
 }
 
 function milestoneIssues(repository, milestone) {
-  return parseJson(
+  const issues = parseJson(
     run("gh", [
-      "issue",
-      "list",
-      "--repo",
-      repository,
-      "--milestone",
-      milestone.title,
-      "--state",
-      "all",
-      "--limit",
-      "100",
-      "--json",
-      "number,title,body,state,url",
+      "api",
+      "--method",
+      "GET",
+      `repos/${repository}/issues`,
+      "-f",
+      "state=all",
+      "-F",
+      `milestone=${milestone.number}`,
+      "-F",
+      "per_page=100",
     ]).stdout,
     `GitHub issues for milestone ${milestone.title}`,
   );
+
+  return issues
+    .filter((issue) => !issue.pull_request)
+    .map((issue) => ({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      state: issue.state?.toUpperCase(),
+      url: issue.html_url,
+    }));
 }
 
 function findingIssueTitle(finding) {
@@ -1495,9 +1740,28 @@ function printCheck(config, repository, milestone, repositoryState, issues) {
 async function runContinuousLoop(context, actions) {
   const { config, repository, milestone, rules } = context;
   let iteration = 0;
+  const pendingIssues = new Map();
+  const completedIssueNumbers = new Set();
 
   while (true) {
-    const issues = actions.openIssues(repository, config.milestone);
+    const listedIssues = actions.openIssues(repository, milestone);
+    const issuesByNumber = new Map();
+    // Сначала добавляем ответ GitHub, затем локальную очередь: локальная копия
+    // содержит самый свежий body после review и должна победить устаревший REST-ответ.
+    for (const issue of [...listedIssues, ...pendingIssues.values()]) {
+      if (completedIssueNumbers.has(issue.number)) {
+        // REST-список может кратко вернуть уже закрытую issue. Прямой GET
+        // отличает этот stale-ответ от настоящего повторного открытия.
+        if (actions.issueState(repository, issue.number) !== "OPEN") {
+          continue;
+        }
+        completedIssueNumbers.delete(issue.number);
+      }
+      issuesByNumber.set(issue.number, issue);
+    }
+    const issues = [...issuesByNumber.values()].sort(
+      (left, right) => left.number - right.number,
+    );
     if (issues.length === 0) {
       const pullRequest = actions.createPullRequest(config, repository);
       const review = await actions.runMilestoneReview(
@@ -1506,7 +1770,7 @@ async function runContinuousLoop(context, actions) {
         milestone,
         pullRequest,
       );
-      if (review.verdict === "pass") {
+      if (review.verdict === "pass" && review.findings.length === 0) {
         return { verdict: "pass", iterations: iteration, pullRequest };
       }
 
@@ -1520,13 +1784,9 @@ async function runContinuousLoop(context, actions) {
       if (reviewIssues.length === 0) {
         fail("Milestone review завершился с FAIL, но ни одной issue исправления не создано.");
       }
-      const visibleIssueNumbers = new Set(
-        actions.openIssues(repository, config.milestone).map((issue) => issue.number),
-      );
-      if (!reviewIssues.some((issue) => visibleIssueNumbers.has(issue.number))) {
-        fail(
-          "Issues из milestone-review созданы, но не появились в очереди открытых задач.",
-        );
+      for (const issue of reviewIssues) {
+        completedIssueNumbers.delete(issue.number);
+        pendingIssues.set(issue.number, issue);
       }
       console.log(
         `Milestone review создал или переоткрыл ${reviewIssues.length} issues. Ralph продолжает цикл исправлений.`,
@@ -1542,13 +1802,20 @@ async function runContinuousLoop(context, actions) {
 
     iteration += 1;
     console.log(`Итерация ${iteration}/${config.maxIterations}; осталось issues: ${issues.length}.`);
-    await actions.runCodex(config, repository, issues[0], rules);
+    const currentIssue = issues[0];
+    const result = await actions.runCodex(config, repository, currentIssue, rules);
+    if (result?.completed === false) {
+      pendingIssues.set(currentIssue.number, currentIssue);
+    } else {
+      pendingIssues.delete(currentIssue.number);
+      completedIssueNumbers.add(currentIssue.number);
+    }
   }
 }
 
 async function executeMode(context, actions) {
   const { mode: selectedMode, config, repository, milestone, repositoryState, rules } = context;
-  const issues = actions.openIssues(repository, config.milestone);
+  const issues = actions.openIssues(repository, milestone);
 
   if (selectedMode === "--check") {
     actions.printCheck(config, repository, milestone, repositoryState, issues);
@@ -1576,6 +1843,7 @@ async function executeMode(context, actions) {
 
 function defaultActions() {
   return {
+    issueState,
     openIssues,
     printCheck,
     runCodex,
@@ -1629,8 +1897,13 @@ if (isMainModule) {
 }
 
 export {
+  alreadyFixedCommitFromAgent,
   createOrReopenReviewIssues,
   executeMode,
+  issueBodyWithCompletionState,
+  issueBodyWithReviewContext,
+  issueCompletionState,
+  normalizeReviewResult,
   reviewFindingMarker,
   reviewFindingFingerprint,
   runCodexWithTurnLimit,
