@@ -13,7 +13,12 @@ apps/api/var/
 .DS_Store
 *.log
 *.tsbuildinfo
-.agents/
+.agents/*
+!.agents/RALPH.md
+!.agents/ralph-loop.mjs
+!.agents/ralph-rules.md
+!.agents/ralph.config.json
+!.agents/review.schema.json
 .playwright-mcp/
 .playwright-cli/
 apps/web/test-results/
