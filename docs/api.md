@@ -3,12 +3,14 @@
 The API base URL is `http://localhost:3001`. Responses use JSON; requests use
 JSON except for the multipart file-upload endpoint.
 
-## Public routes
+## HTTP routes
 
 | Method | Route                                                | Authentication     |
 | ------ | ---------------------------------------------------- | ------------------ |
 | POST   | `/auth/register`                                     | None               |
 | POST   | `/auth/login`                                        | None               |
+| GET    | `/users/me`                                          | Bearer JWT         |
+| PATCH  | `/users/me`                                          | Bearer JWT         |
 | POST   | `/meetings`                                          | Bearer JWT         |
 | GET    | `/meetings`                                          | Bearer JWT         |
 | GET    | `/meetings/:id`                                      | Bearer JWT         |
@@ -57,6 +59,60 @@ A duplicate email returns `409 Conflict`.
 
 Accepts the same payload and returns `200 OK` with an `accessToken`.
 Missing or invalid credentials return `401 Unauthorized`.
+
+## Current user profile
+
+Profile operations require an access token. Send it in the HTTP header:
+
+```http
+Authorization: Bearer <accessToken>
+```
+
+Missing, malformed, or invalid tokens return `401 Unauthorized` and do not
+change profile data.
+
+### Profile representation
+
+```json
+{
+  "id": "cm...",
+  "email": "user@example.com",
+  "displayName": "Ada Lovelace"
+}
+```
+
+`displayName` is `null` until it is first saved. The representation deliberately
+contains only the caller's safe account fields: it never includes password
+hashes or account timestamps. Email is read-only.
+
+### `GET /users/me`
+
+Returns `200 OK` with the safe profile for the authenticated user. The target is
+always derived from the JWT, so there is no route or request field for reading
+another user's profile.
+
+### `PATCH /users/me`
+
+Updates the authenticated user's display name and returns `200 OK` with the
+updated safe profile.
+
+Request:
+
+```json
+{
+  "displayName": "Ada Lovelace"
+}
+```
+
+Validation rules:
+
+| Field         | Rule                                                                          |
+| ------------- | ----------------------------------------------------------------------------- |
+| `displayName` | Required string; trimmed; 1–100 Unicode characters after trimming.            |
+| Other fields  | Rejected; clients cannot set a user ID, update another user, or change email. |
+
+Invalid input returns `400 Bad Request` and leaves the existing display name
+unchanged. There is no `/users/:id` profile endpoint.
 
 ## Meetings
 

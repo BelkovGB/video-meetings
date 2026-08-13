@@ -4,8 +4,11 @@
 
 - `AuthModule` verifies credentials, hashes passwords, issues JWTs, and exports
   `JwtAuthGuard` and its JWT configuration for protected modules.
-- `UsersModule` owns user persistence. It exposes `UsersSecurityPort` as its
-  security boundary for creating users and finding a user by email.
+- `UsersModule` owns credential-oriented user persistence. It exposes
+  `UsersSecurityPort` as its security boundary for creating users and finding a
+  user by email.
+- `ProfileModule` owns the protected current-user profile HTTP API. It reads and
+  updates only safe profile fields for the authenticated user.
 - `MeetingsModule` owns the meetings HTTP API and uses CQRS for all operations.
 - `FilesModule` owns local meeting-file storage and its protected HTTP API.
 - `PrismaModule` owns the shared Prisma database client.
@@ -44,14 +47,24 @@ and issues JWTs. It does not access Prisma or the `User` model directly.
 Instead, it depends on the `UsersSecurityPort` token exported by `UsersModule`.
 The port offers only the credential-oriented operations authentication needs:
 create a user and find one by email. `UsersModule` implements that contract with
-`UsersService` and owns all Prisma queries. This security pattern keeps password
-hashes within the module-to-module boundary while preventing authentication from
-depending on the users persistence implementation.
+`UsersService`. It owns the Prisma queries that return credential material,
+including password hashes. This security pattern keeps hashes inside the
+module-to-module boundary while preventing authentication from depending on the
+users persistence implementation.
 
-The API exposes no controller for users: user creation and lookup are available
-only through the security port. The HTTP surface is limited to the routes listed
-in `docs/api.md`; the former unconsumed root health route is intentionally not
-part of the application.
+`ProfileModule` is deliberately outside `UsersSecurityPort`: profile reads and
+updates are not credential operations. It imports `AuthModule` only for
+`JwtAuthGuard`, takes the caller ID exclusively from the verified JWT `sub`, and
+uses `PrismaModule` to select or update `id`, `email`, and `displayName`. It
+never selects password hashes, and it has no operation accepting a target user
+ID or an email update. Thus `AuthModule` has no direct Prisma or `User` model
+dependency, `UsersModule` does not expose general user CRUD, and the profile
+HTTP surface is limited to `GET` and `PATCH /users/me` documented in `docs/api.md`.
+
+There is no general users controller: user creation and credential lookup are
+available only through the security port, while the profile controller exposes
+only the authenticated caller's safe profile. The former unconsumed root health
+route is intentionally not part of the application.
 
 ## Ownership and authorization
 
