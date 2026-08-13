@@ -1,18 +1,162 @@
 import assert from "node:assert/strict";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
   alreadyFixedCommitFromAgent,
+  createStateStore,
   createOrReopenReviewIssues,
   executeMode,
+  githubPagedArray,
   issueBodyWithCompletionState,
   issueBodyWithReviewContext,
   issueCompletionState,
+  limitMilestoneReviewFindings,
   normalizeReviewResult,
   reviewFindingFingerprint,
   reviewFindingMarker,
+  run,
+  runCodexWithTurnLimit,
   runContinuousLoop,
 } from "./ralph-loop.mjs";
+
+test("persistent state survives restart and enforces branch identity", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "ralph-state-"));
+  const statePath = path.join(directory, "state.json");
+  const config = {
+    branch: "feature/state",
+    baseBranch: "master",
+    milestone: "State milestone",
+  };
+
+  try {
+    const first = createStateStore(config, "--run", statePath);
+    assert.equal(first.iterationsUsed, 0);
+    first.reserveIteration();
+    first.beginIssue(
+      {
+        number: 42,
+        title: "Resume me",
+        body: "Requirements",
+        url: "https://example.test/issues/42",
+      },
+      "a".repeat(40),
+    );
+
+    const resumed = createStateStore(config, "--run", statePath);
+    assert.equal(resumed.iterationsUsed, 1);
+    assert.equal(resumed.issue.number, 42);
+    assert.equal(resumed.issue.phase, "agent-running");
+    assert.equal(resumed.issue.body, "Requirements");
+    assert.throws(
+      () =>
+        createStateStore(
+          { ...config, branch: "feature/another" },
+          "--run",
+          statePath,
+        ),
+      /относится к другой ветке/,
+    );
+
+    resumed.finish();
+    assert.equal(existsSync(statePath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("check mode does not create persistent state", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "ralph-state-check-"));
+  const statePath = path.join(directory, "state.json");
+  try {
+    const store = createStateStore(
+      { branch: "feature/check", baseBranch: "master", milestone: "Check" },
+      "--check",
+      statePath,
+    );
+    assert.equal(store.state, null);
+    assert.equal(existsSync(statePath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("GitHub pagination combines pages and fails instead of silently truncating", () => {
+  const makePage = (prefix, length) =>
+    Array.from({ length }, (_, index) => ({ id: `${prefix}-${index}` }));
+  const pages = [makePage("first", 100), makePage("second", 1)];
+  const calls = [];
+  const combined = githubPagedArray(
+    "owner/repository",
+    "issues",
+    [["state", "open"]],
+    "test issues",
+    {
+      maxPages: 2,
+      runNetwork: (_name, args) => {
+        const page = Number(args.at(-1).split("=")[1]);
+        calls.push(page);
+        return { stdout: JSON.stringify(pages[page - 1]) };
+      },
+    },
+  );
+  assert.equal(combined.length, 101);
+  assert.deepEqual(calls, [1, 2]);
+
+  assert.throws(
+    () =>
+      githubPagedArray("owner/repository", "issues", [], "bounded issues", {
+        maxPages: 2,
+        runNetwork: () => ({ stdout: JSON.stringify(makePage("full", 100)) }),
+      }),
+    /достиг лимита 200 объектов/,
+  );
+});
+
+function fakeCodexScript(source) {
+  const directory = mkdtempSync(path.join(tmpdir(), "ralph-fake-codex-"));
+  const scriptPath = path.join(directory, "fake-codex.mjs");
+  writeFileSync(scriptPath, source, "utf8");
+
+  if (process.platform === "win32") {
+    writeFileSync(
+      path.join(directory, "codex.cmd"),
+      '@echo off\r\nnode "%~dp0fake-codex.mjs" %*\r\n',
+      "utf8",
+    );
+  } else {
+    const executablePath = path.join(directory, "codex");
+    writeFileSync(executablePath, `#!/bin/sh\nexec node "${scriptPath}" "$@"\n`, "utf8");
+    chmodSync(executablePath, 0o755);
+  }
+
+  return directory;
+}
+
+async function withFakeCodex(source, operation) {
+  const directory = fakeCodexScript(source);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${directory}${path.delimiter}${originalPath ?? ""}`;
+
+  try {
+    return await operation();
+  } finally {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 function context(overrides = {}) {
   return {
@@ -32,16 +176,120 @@ function context(overrides = {}) {
 
 function actions(overrides = {}) {
   return {
+    clearIssueCompletionState: () => {},
+    closeMilestone: () => {},
     issueState: () => "CLOSED",
     openIssues: () => [],
+    refreshIssue: (_repository, _issueNumber, issue) => ({
+      ...issue,
+      state: "OPEN",
+    }),
     printCheck: () => {},
+    runPreflight: () => {},
     runCodex: async () => {},
     createPullRequest: () => ({ number: 10, headRefOid: "head-1" }),
     runMilestoneReview: async () => ({ verdict: "pass", summary: "ok", findings: [] }),
     createOrReopenReviewIssues: () => [],
+    verifyReviewedPullRequestHead: () => {},
+    workingTreeStatus: () => "",
     ...overrides,
   };
 }
+
+function persistentState({ iterationsUsed = 0, issue = null } = {}) {
+  let used = iterationsUsed;
+  let currentIssue = issue;
+
+  return {
+    get iterationsUsed() {
+      return used;
+    },
+    get issue() {
+      return currentIssue;
+    },
+    reserveIteration() {
+      used += 1;
+      return used;
+    },
+    clearIssue() {
+      currentIssue = null;
+    },
+    finish() {
+      currentIssue = null;
+    },
+  };
+}
+
+test("sync command runner enforces its wall-clock timeout", { concurrency: false }, () => {
+  const timeoutMs = 100;
+  const startedAt = Date.now();
+
+  assert.throws(
+    () => run("node", ["-e", "setInterval(() => {}, 1_000)"], { timeoutMs }),
+    (error) => {
+      assert.equal(error.code, "RALPH_COMMAND_TIMEOUT");
+      assert.equal(error.timeoutMs, timeoutMs);
+      assert.match(error.message, /wall-clock timeout 100 ms/);
+      return true;
+    },
+  );
+
+  assert.ok(Date.now() - startedAt < 5_000, "hung command must be terminated promptly");
+});
+
+test("Codex circuit breaker stops a fake process after maxTurns unique steps", { concurrency: false }, async () => {
+  const fakeSource = `
+const events = [
+  { type: "item.completed", item: { id: "step-1", type: "agent_message", text: "first" } },
+  { type: "item.completed", item: { id: "step-2", type: "command_execution", aggregated_output: "second" } },
+];
+for (const event of events) process.stdout.write(JSON.stringify(event) + "\\n");
+setInterval(() => {}, 1_000);
+`;
+
+  await withFakeCodex(fakeSource, async () => {
+    await assert.rejects(
+      runCodexWithTurnLimit(["exec", "--json", "-"], {
+        input: "test prompt",
+        label: "Fake Codex",
+        maxTurns: 1,
+        timeoutMs: 5_000,
+      }),
+      (error) => {
+        assert.equal(error.code, "RALPH_MAX_TURNS");
+        assert.equal(error.turns, 1);
+        assert.match(error.message, /maxTurns=1/);
+        return true;
+      },
+    );
+  });
+});
+
+test("Codex wall timeout stops a hung fake process independently of maxTurns", { concurrency: false }, async () => {
+  const fakeSource = "setInterval(() => {}, 1_000);\n";
+  const timeoutMs = 100;
+  const startedAt = Date.now();
+
+  await withFakeCodex(fakeSource, async () => {
+    await assert.rejects(
+      runCodexWithTurnLimit(["exec", "--json", "-"], {
+        input: "test prompt",
+        label: "Hung fake Codex",
+        maxTurns: 50,
+        timeoutMs,
+      }),
+      (error) => {
+        assert.equal(error.code, "RALPH_CODEX_TIMEOUT");
+        assert.equal(error.timeoutMs, timeoutMs);
+        assert.equal(error.turns, 0);
+        assert.match(error.message, /wall-clock timeout 100 ms/);
+        return true;
+      },
+    );
+  });
+
+  assert.ok(Date.now() - startedAt < 5_000, "hung Codex must be terminated promptly");
+});
 
 test("--check reports state without running an issue or creating a PR", async () => {
   const calls = [];
@@ -50,6 +298,7 @@ test("--check reports state without running an issue or creating a PR", async ()
     actions({
       openIssues: () => [{ number: 1 }],
       printCheck: () => calls.push("check"),
+      runPreflight: () => calls.push("preflight"),
       runCodex: async () => calls.push("codex"),
       createPullRequest: () => calls.push("pr"),
     }),
@@ -57,6 +306,86 @@ test("--check reports state without running an issue or creating a PR", async ()
 
   assert.deepEqual(result, { mode: "check", issues: 1 });
   assert.deepEqual(calls, ["check"]);
+});
+
+test("--once runs preflight before reading and implementing an issue", async () => {
+  const calls = [];
+
+  const result = await executeMode(
+    context({ mode: "--once" }),
+    actions({
+      runPreflight: () => calls.push("preflight"),
+      openIssues: () => {
+        calls.push("issues");
+        return [{ number: 11 }];
+      },
+      runCodex: async () => {
+        calls.push("codex");
+        return { completed: true };
+      },
+    }),
+  );
+
+  assert.deepEqual(result, { mode: "once", completed: 1 });
+  assert.deepEqual(calls, ["preflight", "issues", "codex"]);
+});
+
+test("--run runs preflight once before starting the continuous loop", async () => {
+  const calls = [];
+
+  const result = await executeMode(
+    context(),
+    actions({
+      runPreflight: () => calls.push("preflight"),
+      openIssues: () => {
+        calls.push("issues");
+        return [];
+      },
+      createPullRequest: () => {
+        calls.push("pr");
+        return { number: 10, headRefOid: "head-1" };
+      },
+      runMilestoneReview: async () => {
+        calls.push("review");
+        return { verdict: "pass", summary: "ok", findings: [] };
+      },
+      verifyReviewedPullRequestHead: () => calls.push("verify-head"),
+      closeMilestone: () => calls.push("close"),
+    }),
+  );
+
+  assert.equal(result.verdict, "pass");
+  assert.deepEqual(calls, [
+    "preflight",
+    "issues",
+    "pr",
+    "review",
+    "issues",
+    "verify-head",
+    "close",
+  ]);
+});
+
+test("a failed preflight prevents --run from reading or changing GitHub state", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    executeMode(
+      context(),
+      actions({
+        runPreflight: () => {
+          calls.push("preflight");
+          throw new Error("database is unavailable");
+        },
+        openIssues: () => calls.push("issues"),
+        runCodex: async () => calls.push("codex"),
+        createPullRequest: () => calls.push("pr"),
+      }),
+    ),
+    /database is unavailable/,
+  );
+
+  assert.deepEqual(calls, ["preflight"]);
 });
 
 test("--once completes exactly one open issue", async () => {
@@ -142,6 +471,22 @@ test("continuous loop fixes new review issues even while GitHub list remains sta
   assert.equal(reviewRuns, 2);
 });
 
+test("continuous loop closes the milestone only after a clean PASS review", async () => {
+  let milestoneCloses = 0;
+
+  const result = await runContinuousLoop(
+    context(),
+    actions({
+      closeMilestone: () => {
+        milestoneCloses += 1;
+      },
+    }),
+  );
+
+  assert.equal(result.verdict, "pass");
+  assert.equal(milestoneCloses, 1);
+});
+
 test("continuous loop treats PASS with findings as recovery work", async () => {
   let reviewRuns = 0;
   const completed = [];
@@ -187,6 +532,64 @@ test("continuous loop stops when the shared issue iteration budget is exhausted"
     ),
     /Достигнут лимит 1 итераций/,
   );
+});
+
+test("continuous loop does not reset an iteration budget restored from persistent state", async () => {
+  const stateStore = persistentState({ iterationsUsed: 1 });
+  let codexRuns = 0;
+
+  await assert.rejects(
+    runContinuousLoop(
+      context({
+        config: { branch: "feature/test", milestone: "Test milestone", maxIterations: 1 },
+        stateStore,
+      }),
+      actions({
+        openIssues: () => [{ number: 8, title: "Still open" }],
+        runCodex: async () => {
+          codexRuns += 1;
+          return { completed: true };
+        },
+      }),
+    ),
+    /Достигнут лимит 1 итераций/,
+  );
+
+  assert.equal(stateStore.iterationsUsed, 1);
+  assert.equal(codexRuns, 0);
+});
+
+test("continuous loop prioritizes a persisted recovery issue over a lower issue number", async () => {
+  const stateStore = persistentState({
+    issue: {
+      number: 20,
+      title: "Resume interrupted work",
+      url: "https://example.test/issues/20",
+      phase: "working-tree",
+    },
+  });
+  let visibleIssues = [
+    { number: 2, title: "Lower number" },
+    { number: 20, title: "Resume interrupted work" },
+  ];
+  const completed = [];
+
+  const result = await runContinuousLoop(
+    context({ stateStore }),
+    actions({
+      openIssues: () => [...visibleIssues],
+      runCodex: async (_config, _repository, issue) => {
+        completed.push(issue.number);
+        visibleIssues = visibleIssues.filter((candidate) => candidate.number !== issue.number);
+        if (issue.number === 20) stateStore.clearIssue();
+        return { completed: true };
+      },
+    }),
+  );
+
+  assert.equal(result.verdict, "pass");
+  assert.deepEqual(completed, [20, 2]);
+  assert.equal(result.iterations, 2);
 });
 
 test("continuous loop retries the same issue after an issue-level review finding", async () => {
@@ -269,10 +672,15 @@ test("continuous loop processes an issue that was genuinely reopened", async () 
 });
 
 test("continuous loop rejects FAIL without queued recovery issues", async () => {
+  let milestoneCloses = 0;
+
   await assert.rejects(
     runContinuousLoop(
       context(),
       actions({
+        closeMilestone: () => {
+          milestoneCloses += 1;
+        },
         runMilestoneReview: async () => ({
           verdict: "fail",
           summary: "invalid empty recovery",
@@ -282,6 +690,8 @@ test("continuous loop rejects FAIL without queued recovery issues", async () => 
     ),
     /ни одной issue исправления не создано/,
   );
+
+  assert.equal(milestoneCloses, 0);
 });
 
 test("finding fingerprint is stable for Unicode titles and changes with location", () => {
@@ -450,4 +860,34 @@ test("review result invariants reject empty FAIL and convert PASS with findings"
   assert.equal(normalized.verdict, "fail");
   assert.equal(normalized.findings.length, 1);
   assert.match(normalized.summary, /treated the result as FAIL/);
+});
+
+test("milestone findings are deduplicated, prioritized, and bounded", () => {
+  const pullRequest = { number: 61 };
+  const findings = Array.from({ length: 12 }, (_, index) => ({
+    severity: index === 11 ? "P0" : index >= 8 ? "P1" : "P2",
+    title: `Finding ${index}`,
+    body: `Body ${index}`,
+    file: `file-${index}.ts`,
+    line: index + 1,
+  }));
+  findings.push({ ...findings[11] });
+
+  const limited = limitMilestoneReviewFindings(
+    { verdict: "fail", summary: "Review summary.", findings },
+    pullRequest,
+    10,
+  );
+
+  assert.equal(limited.findings.length, 10);
+  assert.equal(limited.findings[0].severity, "P0");
+  assert.deepEqual(
+    limited.findings.slice(1, 4).map((finding) => finding.severity),
+    ["P1", "P1", "P1"],
+  );
+  assert.equal(
+    limited.findings.filter((finding) => finding.title === "Finding 11").length,
+    1,
+  );
+  assert.match(limited.summary, /2 findings were deferred/);
 });

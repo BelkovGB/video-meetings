@@ -1,11 +1,23 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+
+import {
+  acquireRunLock,
+  commandTimeoutError,
+  initializePersistentLog,
+  readJsonFile,
+  removeFileIfExists,
+  retryTransientOperation,
+  terminateProcessTreeByPid,
+  waitSync,
+  writeJsonAtomic,
+} from "./ralph-runtime.mjs";
 
 // -----------------------------------------------------------------------------
 // Пути проекта и режим запуска
@@ -16,6 +28,21 @@ const projectRoot = path.dirname(scriptDirectory);
 const configPath = path.join(scriptDirectory, "ralph.config.json");
 const mode = process.argv[2] ?? "--check";
 const supportedModes = new Set(["--check", "--once", "--run"]);
+const runtimeDirectory = path.join(projectRoot, ".git", "ralph-loop");
+const runtimeStatePath = path.join(runtimeDirectory, "state.json");
+const runtimeLockPath = path.join(runtimeDirectory, "run.lock");
+const runtimeLogPath = path.join(runtimeDirectory, "run.log");
+const commandRunnerPath = path.join(scriptDirectory, "ralph-command-runner.mjs");
+let runtimeSettings = {
+  commandTimeoutMs: 300_000,
+  validationTimeoutMs: 1_800_000,
+  codexTimeoutMs: 5_400_000,
+  networkRetryAttempts: 3,
+  networkRetryBaseDelayMs: 2_000,
+  maxPages: 20,
+  reviewRetryAttempts: 3,
+};
+let activeStateStore = null;
 
 // -----------------------------------------------------------------------------
 // Запуск внешних команд: Git, GitHub CLI, npm и Codex CLI
@@ -46,30 +73,91 @@ function commandSpec(name, args) {
   return { command, commandArgs };
 }
 
+function outputTail(value, maxLength = 20_000) {
+  const text = String(value ?? "").trim();
+  return text.length > maxLength ? `…${text.slice(-maxLength)}` : text;
+}
+
 function run(name, args, options = {}) {
-  const { command, commandArgs } = commandSpec(name, args);
+  const commandTarget = commandSpec(name, args);
+  const useCommandRunner = process.platform === "win32";
+  const command = useCommandRunner ? process.execPath : commandTarget.command;
+  const commandArgs = useCommandRunner
+    ? [commandRunnerPath]
+    : commandTarget.commandArgs;
   const stdio = options.inherit
-    ? [options.input === undefined ? "inherit" : "pipe", "inherit", "inherit"]
+    ? ["pipe", "inherit", "inherit"]
     : "pipe";
+  const timeoutMs = options.timeoutMs ?? runtimeSettings.commandTimeoutMs;
+  const startedAt = Date.now();
+  console.log(`Команда: ${name} ${args[0] ?? ""}`.trim());
   const result = spawnSync(command, commandArgs, {
     cwd: projectRoot,
     encoding: "utf8",
-    input: options.input,
+    input: useCommandRunner
+      ? JSON.stringify({
+          command: commandTarget.command,
+          args: commandTarget.commandArgs,
+          cwd: projectRoot,
+          input: options.input,
+          timeoutMs,
+        })
+      : options.input,
     stdio,
+    timeout: useCommandRunner ? timeoutMs + 25_000 : timeoutMs,
+    killSignal: "SIGTERM",
+    maxBuffer: 50 * 1024 * 1024,
+    windowsHide: true,
   });
 
+  const commandRunnerTimedOut =
+    useCommandRunner &&
+    result.status === 124 &&
+    String(result.stderr ?? "").includes("RALPH_COMMAND_TIMEOUT:");
+  if (result.error?.code === "ETIMEDOUT" || commandRunnerTimedOut) {
+    throw commandTimeoutError(name, args, timeoutMs, result);
+  }
   if (result.error) {
-    fail(`Не удалось запустить ${name}: ${result.error.message}`);
+    const error = new Error(`Не удалось запустить ${name}: ${result.error.message}`);
+    error.code = result.error.code;
+    error.stdout = result.stdout?.trim() ?? "";
+    error.stderr = result.stderr?.trim() ?? "";
+    throw error;
+  }
+  if (result.status === null) {
+    const error = new Error(
+      `Команда ${name} ${args[0] ?? ""} завершилась без exit code` +
+        `${result.signal ? ` (сигнал ${result.signal})` : ""}.`,
+    );
+    error.code = "RALPH_COMMAND_TERMINATED";
+    error.stdout = outputTail(result.stdout);
+    error.stderr = outputTail(result.stderr);
+    throw error;
   }
 
-  if (result.status !== 0 && !options.allowFailure) {
+  const allowedExitCodes = new Set(options.allowedExitCodes ?? []);
+  if (result.status !== 0 && !options.allowFailure && !allowedExitCodes.has(result.status)) {
     const details = [result.stderr, result.stdout]
       .filter(Boolean)
       .map((value) => value.trim())
       .filter(Boolean)
       .join("\n");
-    fail(`Команда ${name} ${args.join(" ")} завершилась с кодом ${result.status}.${details ? `\n${details}` : ""}`);
+    const error = new Error(
+      `Команда ${name} ${args[0] ?? ""} завершилась с кодом ${result.status}.` +
+        `${details ? `\n${outputTail(details)}` : ""}`,
+    );
+    error.code = "RALPH_COMMAND_FAILED";
+    error.status = result.status;
+    error.stdout = result.stdout?.trim() ?? "";
+    error.stderr = result.stderr?.trim() ?? "";
+    throw error;
   }
+
+  if (options.echoOutput) {
+    if (result.stdout?.trim()) console.log(outputTail(result.stdout, 100_000));
+    if (result.stderr?.trim()) console.error(outputTail(result.stderr, 100_000));
+  }
+  console.log(`Команда ${name} завершена за ${Date.now() - startedAt} ms.`);
 
   return {
     status: result.status,
@@ -78,19 +166,43 @@ function run(name, args, options = {}) {
   };
 }
 
-function terminateProcessTree(child) {
+function runNetwork(name, args, options = {}) {
+  return retryTransientOperation(() => run(name, args, options), {
+    attempts: runtimeSettings.networkRetryAttempts,
+    baseDelayMs: runtimeSettings.networkRetryBaseDelayMs,
+    onRetry: (error, attempt, delay) =>
+      console.error(
+        `Временная ошибка ${name} (попытка ${attempt}): ${error.message}. Повтор через ${delay} ms.`,
+      ),
+  });
+}
+
+function terminateProcessTree(child, force = false) {
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
     return;
   }
 
-  if (process.platform === "win32") {
-    spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-      stdio: "ignore",
-    });
-    return;
-  }
+  terminateProcessTreeByPid(child.pid, force);
+}
 
-  child.kill("SIGTERM");
+async function waitForChildTermination(child, childResult, graceMs) {
+  let timer;
+  const completed = await Promise.race([
+    childResult.then(
+      () => true,
+      () => true,
+    ),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), graceMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (completed) return;
+
+  terminateProcessTree(child, true);
+  await Promise.race([
+    childResult.catch(() => undefined),
+    new Promise((resolve) => setTimeout(resolve, 2_000)),
+  ]);
 }
 
 function printCodexEvent(event, turn, maxTurns) {
@@ -115,10 +227,7 @@ function printCodexEvent(event, turn, maxTurns) {
   if (item.type === "agent_message" && item.text) {
     console.log(item.text);
   } else if (item.type === "command_execution" && item.aggregated_output) {
-    process.stdout.write(item.aggregated_output);
-    if (!item.aggregated_output.endsWith("\n")) {
-      process.stdout.write("\n");
-    }
+    console.log(item.aggregated_output.replace(/\r?\n$/, ""));
   }
 }
 
@@ -131,6 +240,7 @@ async function runCodexWithTurnLimit(args, options) {
   const child = spawn(command, commandArgs, {
     cwd: projectRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
     windowsHide: true,
   });
   child.stdout.setEncoding("utf8");
@@ -142,6 +252,8 @@ async function runCodexWithTurnLimit(args, options) {
   // Счётчик шагов текущей сессии Codex.
   let turns = 0;
   let limitReached = false;
+  let wallTimeoutReached = false;
+  let resolveTurnLimit;
   const seenItemIds = new Set();
 
   const handleLine = (line) => {
@@ -170,11 +282,13 @@ async function runCodexWithTurnLimit(args, options) {
     ) {
       // Проверяем лимит до запуска следующего уникального шага.
       if (turns >= options.maxTurns) {
+        if (limitReached) return;
         limitReached = true;
         console.error(
           `\nCircuit breaker: ${options.label} попытался превысить лимит ${options.maxTurns} шагов.`,
         );
         terminateProcessTree(child);
+        resolveTurnLimit({ code: null, signal: "RALPH_MAX_TURNS" });
         return;
       }
 
@@ -196,16 +310,42 @@ async function runCodexWithTurnLimit(args, options) {
   });
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
-    process.stderr.write(chunk);
+    console.error(chunk.replace(/\r?\n$/, ""));
   });
 
   const childResult = new Promise((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  const turnLimitResult = new Promise((resolve) => {
+    resolveTurnLimit = resolve;
+  });
+  child.stdin.on("error", (error) => {
+    if (error.code !== "EPIPE") {
+      console.error(`Ошибка stdin Codex: ${error.message}`);
+    }
   });
 
   child.stdin.end(options.input);
-  const result = await childResult;
+  const timeoutMs = options.timeoutMs ?? runtimeSettings.codexTimeoutMs;
+  let wallTimer;
+  const wallTimeout = new Promise((resolve) => {
+    wallTimer = setTimeout(() => {
+      wallTimeoutReached = true;
+      console.error(`\nCircuit breaker: ${options.label} превысил ${timeoutMs} ms.`);
+      terminateProcessTree(child);
+      resolve({ code: null, signal: "RALPH_WALL_TIMEOUT" });
+    }, timeoutMs);
+  });
+  let result;
+  try {
+    result = await Promise.race([childResult, wallTimeout, turnLimitResult]);
+  } finally {
+    clearTimeout(wallTimer);
+  }
+  if (limitReached || wallTimeoutReached) {
+    await waitForChildTermination(child, childResult, 10_000);
+  }
   if (stdoutBuffer.trim() !== "") {
     handleLine(stdoutBuffer);
   }
@@ -216,6 +356,14 @@ async function runCodexWithTurnLimit(args, options) {
     );
     error.code = "RALPH_MAX_TURNS";
     error.turns = turns;
+    throw error;
+  }
+
+  if (wallTimeoutReached) {
+    const error = new Error(`${options.label} достиг wall-clock timeout ${timeoutMs} ms.`);
+    error.code = "RALPH_CODEX_TIMEOUT";
+    error.turns = turns;
+    error.timeoutMs = timeoutMs;
     throw error;
   }
 
@@ -271,8 +419,17 @@ function loadConfig() {
   config.maxIterations ??= 20;
   config.maxTurns ??= 50;
   config.maxTestFixAttempts ??= 5;
+  config.runtime ??= {};
+  config.runtime.commandTimeoutMs ??= 300_000;
+  config.runtime.validationTimeoutMs ??= 1_800_000;
+  config.runtime.codexTimeoutMs ??= 5_400_000;
+  config.runtime.networkRetryAttempts ??= 3;
+  config.runtime.networkRetryBaseDelayMs ??= 2_000;
+  config.runtime.maxPages ??= 20;
+  config.runtime.reviewRetryAttempts ??= 3;
   config.developmentModel ??= "gpt-5.6-terra";
   config.rulesFile ??= ".agents/ralph-rules.md";
+  config.preflightScripts ??= [];
   config.validationScripts ??= ["format:check", "lint", "build"];
   config.review ??= {
     enabled: true,
@@ -289,6 +446,7 @@ function loadConfig() {
     outputFile: ".agents/last-milestone-review.json",
   };
   config.milestoneReview.maxTurns ??= config.maxTurns;
+  config.milestoneReview.maxFindings ??= 10;
 
   if (typeof config.active !== "boolean") {
     fail('Поле "active" должно быть true или false.');
@@ -314,8 +472,9 @@ function loadConfig() {
     );
   }
   if (
+    !Array.isArray(config.preflightScripts) ||
     !Array.isArray(config.validationScripts) ||
-    config.validationScripts.some(
+    [...config.preflightScripts, ...config.validationScripts].some(
       (script) =>
         typeof script !== "string" ||
         script.trim() === "" ||
@@ -323,8 +482,37 @@ function loadConfig() {
     )
   ) {
     fail(
-      'Поле "validationScripts" должно быть массивом безопасных имён npm scripts.',
+      'Поля "preflightScripts" и "validationScripts" должны быть массивами безопасных имён npm scripts.',
     );
+  }
+  if (typeof config.runtime !== "object" || config.runtime === null) {
+    fail('Поле "runtime" должно быть объектом.');
+  }
+  for (const field of [
+    "commandTimeoutMs",
+    "validationTimeoutMs",
+    "codexTimeoutMs",
+    "networkRetryBaseDelayMs",
+  ]) {
+    if (!Number.isInteger(config.runtime[field]) || config.runtime[field] < 1) {
+      fail(`Поле "runtime.${field}" должно быть целым числом больше 0.`);
+    }
+  }
+  for (const field of ["networkRetryAttempts", "reviewRetryAttempts"]) {
+    if (
+      !Number.isInteger(config.runtime[field]) ||
+      config.runtime[field] < 1 ||
+      config.runtime[field] > 5
+    ) {
+      fail(`Поле "runtime.${field}" должно быть целым числом от 1 до 5.`);
+    }
+  }
+  if (
+    !Number.isInteger(config.runtime.maxPages) ||
+    config.runtime.maxPages < 1 ||
+    config.runtime.maxPages > 100
+  ) {
+    fail('Поле "runtime.maxPages" должно быть целым числом от 1 до 100.');
   }
   if (typeof config.review !== "object" || config.review === null) {
     fail('Поле "review" должно быть объектом.');
@@ -370,6 +558,13 @@ function loadConfig() {
       'Поле "milestoneReview.maxTurns" должно быть целым числом больше 0.',
     );
   }
+  if (
+    !Number.isInteger(config.milestoneReview.maxFindings) ||
+    config.milestoneReview.maxFindings < 1 ||
+    config.milestoneReview.maxFindings > 50
+  ) {
+    fail('Поле "milestoneReview.maxFindings" должно быть целым числом от 1 до 50.');
+  }
 
   config.rulesPath = resolveProjectFile(config.rulesFile, "rulesFile");
   if (!existsSync(config.rulesPath)) {
@@ -414,6 +609,7 @@ function loadConfig() {
     );
   }
 
+  runtimeSettings = { ...config.runtime };
   return config;
 }
 
@@ -427,6 +623,201 @@ function loadRalphRules(config) {
 }
 
 // -----------------------------------------------------------------------------
+// Состояние AFK-запуска: переживает перезапуск Node и не попадает в Git
+// -----------------------------------------------------------------------------
+
+function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
+  let state = readJsonFile(statePath, null);
+  if (state) {
+    const identityMismatch =
+      state.version !== 1 ||
+      state.branch !== config.branch ||
+      state.baseBranch !== config.baseBranch ||
+      state.milestone !== config.milestone;
+    if (identityMismatch) {
+      if (state.issue === null && state.iterationsUsed === 0) {
+        removeFileIfExists(statePath);
+        state = null;
+      } else {
+        fail(
+          `Сохранённое состояние ${statePath} относится к другой ветке, базе или milestone. ` +
+            "Завершите предыдущий AFK-запуск или удалите state вручную после проверки.",
+        );
+      }
+    }
+  }
+  if (!state && selectedMode !== "--check") {
+    state = {
+      version: 1,
+      runId: randomUUID(),
+      status: "active",
+      branch: config.branch,
+      baseBranch: config.baseBranch,
+      milestone: config.milestone,
+      iterationsUsed: 0,
+      issue: null,
+      updatedAt: new Date().toISOString(),
+    };
+    writeJsonAtomic(statePath, state);
+  }
+
+  const persist = () => {
+    if (!state) return;
+    state.updatedAt = new Date().toISOString();
+    writeJsonAtomic(statePath, state);
+  };
+
+  return {
+    get state() {
+      return state;
+    },
+    get issue() {
+      return state?.issue ?? null;
+    },
+    beginIssue(issue, startingCommit, continuation = false) {
+      if (!state) return;
+      if (state.issue && state.issue.number !== issue.number) {
+        fail(
+          `State ожидает issue #${state.issue.number}, но очередь выбрала #${issue.number}.`,
+        );
+      }
+      state.issue ??= {
+        number: issue.number,
+        title: issue.title,
+        url: issue.url,
+        body: issue.body ?? "",
+        startingCommit,
+        phase: "agent-running",
+        validationFixAttempts: 0,
+        agentAttempts: 0,
+        lastFailure: null,
+        commit: null,
+        pushedHead: null,
+        expectedTree: null,
+        commitMessage: null,
+      };
+      state.issue.phase = "agent-running";
+      state.issue.agentAttempts += 1;
+      state.issue.continuation = continuation;
+      persist();
+      return state.issue;
+    },
+    updateIssue(values) {
+      if (!state?.issue) return;
+      Object.assign(state.issue, values);
+      persist();
+    },
+    clearIssue() {
+      if (!state) return;
+      state.issue = null;
+      persist();
+    },
+    get iterationsUsed() {
+      return state?.iterationsUsed ?? 0;
+    },
+    reserveIteration() {
+      if (!state) return null;
+      state.iterationsUsed += 1;
+      persist();
+      return state.iterationsUsed;
+    },
+    allowsDirtyRecovery(currentBranch, currentHead) {
+      return Boolean(
+        state?.issue &&
+          currentBranch === config.branch &&
+          currentHead === state.issue.startingCommit &&
+          ["agent-running", "working-tree", "validating", "staging"].includes(
+            state.issue.phase,
+          ),
+      );
+    },
+    finish() {
+      state = null;
+      removeFileIfExists(statePath);
+    },
+  };
+}
+
+function commitTrailerForIssue(issue) {
+  return `Ralph-Issue: #${issue.number}`;
+}
+
+function validateRecoveredCommit(issue, storedIssue, currentHead) {
+  const commitCount = Number(
+    run("git", ["rev-list", "--count", `${storedIssue.startingCommit}..${currentHead}`])
+      .stdout,
+  );
+  const parent = run("git", ["show", "-s", "--format=%P", currentHead]).stdout;
+  const tree = run("git", ["rev-parse", `${currentHead}^{tree}`]).stdout;
+  const trailer = run("git", [
+    "show",
+    "-s",
+    "--format=%(trailers:key=Ralph-Issue,valueonly)",
+    currentHead,
+  ]).stdout;
+  if (
+    commitCount !== 1 ||
+    parent !== storedIssue.startingCommit ||
+    !storedIssue.expectedTree ||
+    tree !== storedIssue.expectedTree ||
+    trailer !== `#${issue.number}`
+  ) {
+    fail(
+      `Issue #${issue.number}: HEAD изменился во время staging, но новый commit не совпал ` +
+        "с сохранёнными parent/tree/trailer. Автоматический reset запрещён.",
+    );
+  }
+  return currentHead;
+}
+
+function reconcileStateAfterCrash(config, stateStore = activeStateStore) {
+  const storedIssue = stateStore?.issue;
+  if (!storedIssue || storedIssue.phase !== "staging") return;
+
+  const currentHead = run("git", ["rev-parse", "HEAD"]).stdout;
+  const changes = run("git", ["status", "--porcelain"]).stdout;
+  if (currentHead !== storedIssue.startingCommit) {
+    if (changes !== "") {
+      fail(
+        `Issue #${storedIssue.number}: после crash найден новый commit и дополнительные изменения. ` +
+          "Ralph не будет автоматически смешивать или сбрасывать их.",
+      );
+    }
+    const commit = validateRecoveredCommit(storedIssue, storedIssue, currentHead);
+    stateStore.updateIssue({ phase: "committed", commit, lastFailure: null });
+    console.log(`Issue #${storedIssue.number}: распознан commit ${commit} после crash.`);
+    return;
+  }
+
+  if (!storedIssue.expectedTree || !storedIssue.commitMessage) return;
+  const indexTree = run("git", ["write-tree"]).stdout;
+  const unstaged = run("git", ["diff", "--quiet"], { allowFailure: true });
+  const untracked = run("git", ["ls-files", "--others", "--exclude-standard"]).stdout;
+  if (indexTree !== storedIssue.expectedTree || unstaged.status !== 0 || untracked !== "") {
+    return;
+  }
+
+  run(
+    "git",
+    [
+      "commit",
+      "-m",
+      storedIssue.commitMessage,
+      "-m",
+      commitTrailerForIssue(storedIssue),
+    ],
+    { echoOutput: true, timeoutMs: config.runtime.validationTimeoutMs },
+  );
+  const commit = validateRecoveredCommit(
+    storedIssue,
+    storedIssue,
+    run("git", ["rev-parse", "HEAD"]).stdout,
+  );
+  stateStore.updateIssue({ phase: "committed", commit, lastFailure: null });
+  console.log(`Issue #${storedIssue.number}: staging завершён commit ${commit} после crash.`);
+}
+
+// -----------------------------------------------------------------------------
 // Проверка инструментов, Git-репозитория и рабочей ветки
 // -----------------------------------------------------------------------------
 
@@ -434,7 +825,7 @@ function verifyTools() {
   run("git", ["--version"]);
   run("gh", ["--version"]);
   run("codex", ["--version"]);
-  run("gh", ["auth", "status"]);
+  runNetwork("gh", ["auth", "status"]);
 }
 
 function verifyRepository(config, requireClean) {
@@ -446,8 +837,19 @@ function verifyRepository(config, requireClean) {
   run("git", ["check-ref-format", "--branch", config.branch]);
   let currentBranch = run("git", ["branch", "--show-current"]).stdout;
   const changes = run("git", ["status", "--porcelain"]).stdout;
-  if (requireClean && changes !== "") {
+  const currentHead = run("git", ["rev-parse", "HEAD"]).stdout;
+  const recoveryAllowed = activeStateStore?.allowsDirtyRecovery(
+    currentBranch,
+    currentHead,
+  );
+  if (requireClean && changes !== "" && !recoveryAllowed) {
     fail("Рабочее дерево не чистое. Закоммитьте или уберите текущие изменения перед запуском Ralph Loop.");
+  }
+  if (changes !== "" && recoveryAllowed) {
+    console.log(
+      `Найдена незавершённая работа Ralph для issue #${activeStateStore.issue.number}; ` +
+        "AFK продолжит существующий diff без сброса.",
+    );
   }
 
   if (currentBranch !== config.branch) {
@@ -474,21 +876,23 @@ function verifyRepository(config, requireClean) {
       run("git", ["switch", config.branch], { inherit: true });
     } else {
       const remoteBranchExists =
-        run(
+        runNetwork(
           "git",
           ["ls-remote", "--exit-code", "--heads", "origin", config.branch],
-          { allowFailure: true },
+          { allowedExitCodes: [2] },
         ).status === 0;
 
       if (remoteBranchExists) {
-        run("git", ["fetch", "origin", config.branch], { inherit: true });
+        runNetwork("git", ["fetch", "origin", config.branch], { echoOutput: true });
         run(
           "git",
           ["switch", "--track", "-c", config.branch, `origin/${config.branch}`],
           { inherit: true },
         );
       } else {
-        run("git", ["fetch", "origin", config.baseBranch], { inherit: true });
+        runNetwork("git", ["fetch", "origin", config.baseBranch], {
+          echoOutput: true,
+        });
         run("git", [
           "show-ref",
           "--verify",
@@ -513,7 +917,7 @@ function verifyRepository(config, requireClean) {
 }
 
 function verifyBaseHistory(config) {
-  run("git", ["fetch", "origin", config.baseBranch], { inherit: true });
+  runNetwork("git", ["fetch", "origin", config.baseBranch], { echoOutput: true });
   const baseRef = `origin/${config.baseBranch}`;
   run("git", ["show-ref", "--verify", "--quiet", `refs/remotes/${baseRef}`]);
   const mergeBase = run("git", ["merge-base", "HEAD", baseRef], {
@@ -531,10 +935,45 @@ function verifyBaseHistory(config) {
 
 function repositoryName() {
   const repository = parseJson(
-    run("gh", ["repo", "view", "--json", "nameWithOwner"]).stdout,
+    runNetwork("gh", ["repo", "view", "--json", "nameWithOwner"]).stdout,
     "gh repo view",
   );
   return repository.nameWithOwner;
+}
+
+function githubPagedArray(
+  repository,
+  resource,
+  fields,
+  source,
+  dependencies = {},
+) {
+  const execute = dependencies.runNetwork ?? runNetwork;
+  const maxPages = dependencies.maxPages ?? runtimeSettings.maxPages;
+  const items = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const args = [
+      "api",
+      "--method",
+      "GET",
+      `repos/${repository}/${resource}`,
+      ...fields.flatMap(([name, value]) => ["-f", `${name}=${value}`]),
+      "-F",
+      "per_page=100",
+      "-F",
+      `page=${page}`,
+    ];
+    const currentPage = parseJson(execute("gh", args).stdout, `${source}, page ${page}`);
+    if (!Array.isArray(currentPage)) {
+      fail(`${source} вернул не массив на странице ${page}.`);
+    }
+    items.push(...currentPage);
+    if (currentPage.length < 100) return items;
+  }
+  fail(
+    `${source} достиг лимита ${maxPages * 100} объектов. ` +
+      "Увеличьте runtime.maxPages после проверки объёма.",
+  );
 }
 
 // -----------------------------------------------------------------------------
@@ -542,11 +981,10 @@ function repositoryName() {
 // -----------------------------------------------------------------------------
 
 function verifyMilestone(repository, title) {
-  const milestones = parseJson(
-    run("gh", [
-      "api",
-      `repos/${repository}/milestones?state=all&per_page=100`,
-    ]).stdout,
+  const milestones = githubPagedArray(
+    repository,
+    "milestones",
+    [["state", "all"]],
     "GitHub milestones API",
   );
   const matches = milestones.filter((milestone) => milestone.title === title);
@@ -562,19 +1000,13 @@ function verifyMilestone(repository, title) {
 }
 
 function openIssues(repository, milestone) {
-  const issues = parseJson(
-    run("gh", [
-      "api",
-      "--method",
-      "GET",
-      `repos/${repository}/issues`,
-      "-f",
-      "state=open",
-      "-F",
-      `milestone=${milestone.number}`,
-      "-F",
-      "per_page=100",
-    ]).stdout,
+  const issues = githubPagedArray(
+    repository,
+    "issues",
+    [
+      ["state", "open"],
+      ["milestone", milestone.number],
+    ],
     "GitHub milestone issues API",
   );
 
@@ -624,34 +1056,88 @@ function renderPrompt(config, issue, rules) {
 // Проверка состояния issue и повторное открытие при ошибке
 // -----------------------------------------------------------------------------
 
-function issueState(repository, issueNumber) {
-  const issue = parseJson(
-    run("gh", ["api", `repos/${repository}/issues/${issueNumber}`]).stdout,
+function issueDetails(repository, issueNumber) {
+  return parseJson(
+    runNetwork("gh", ["api", `repos/${repository}/issues/${issueNumber}`]).stdout,
     `GitHub issue ${issueNumber}`,
   );
+}
+
+function issueState(repository, issueNumber) {
+  const issue = issueDetails(repository, issueNumber);
   return issue.state?.toUpperCase();
+}
+
+function refreshIssue(repository, issueNumber) {
+  const issue = issueDetails(repository, issueNumber);
+  return {
+    number: issue.number,
+    title: issue.title,
+    body: issue.body ?? "",
+    url: issue.html_url,
+    state: issue.state?.toUpperCase(),
+  };
+}
+
+function patchIssue(repository, issueNumber, values) {
+  return parseJson(
+    runNetwork(
+      "gh",
+      [
+        "api",
+        "--method",
+        "PATCH",
+        `repos/${repository}/issues/${issueNumber}`,
+        "--input",
+        "-",
+      ],
+      { input: JSON.stringify(values) },
+    ).stdout,
+    `GitHub update issue ${issueNumber}`,
+  );
+}
+
+function postIssueCommentOnce(repository, issueNumber, body, marker) {
+  const comments = githubPagedArray(
+    repository,
+    `issues/${issueNumber}/comments`,
+    [],
+    `GitHub comments for issue #${issueNumber}`,
+  );
+  if (
+    comments.some(
+      (comment) => typeof comment.body === "string" && comment.body.includes(marker),
+    )
+  ) {
+    console.log(`Комментарий ${marker} уже опубликован в issue #${issueNumber}.`);
+    return;
+  }
+  run(
+    "gh",
+    [
+      "api",
+      "--method",
+      "POST",
+      `repos/${repository}/issues/${issueNumber}/comments`,
+      "--input",
+      "-",
+    ],
+    { input: JSON.stringify({ body: `${marker}\n${body}`.slice(0, 60_000) }) },
+  );
 }
 
 function reopenIssueWithComment(repository, issue, comment) {
   if (issueState(repository, issue.number) === "CLOSED") {
-    run("gh", [
-      "issue",
-      "reopen",
-      String(issue.number),
-      "--repo",
-      repository,
-    ]);
+    patchIssue(repository, issue.number, { state: "open" });
   }
 
-  run("gh", [
-    "issue",
-    "comment",
-    String(issue.number),
-    "--repo",
+  const fingerprint = createHash("sha256").update(comment).digest("hex").slice(0, 20);
+  postIssueCommentOnce(
     repository,
-    "--body",
-    comment.slice(0, 60_000),
-  ]);
+    issue.number,
+    comment,
+    `<!-- ralph-issue-comment id:${fingerprint} -->`,
+  );
 }
 
 function formatReviewComment(review) {
@@ -703,18 +1189,9 @@ function issueBodyWithReviewContext(issue, review) {
 }
 
 function updateIssueReviewContext(repository, issue, review) {
-  const updatedBody = issueBodyWithReviewContext(issue, review);
-
-  run("gh", [
-    "issue",
-    "edit",
-    String(issue.number),
-    "--repo",
-    repository,
-    "--body",
-    updatedBody,
-  ]);
-  issue.body = updatedBody;
+  const latest = issueDetails(repository, issue.number);
+  const updatedBody = issueBodyWithReviewContext({ ...issue, body: latest.body }, review);
+  issue.body = patchIssue(repository, issue.number, { body: updatedBody }).body;
 }
 
 function issueBodyWithoutCompletionState(issue) {
@@ -739,35 +1216,24 @@ function issueBodyWithCompletionState(issue, status, commit) {
 }
 
 function setIssueCompletionState(repository, issue, status, commit) {
-  const updatedBody = issueBodyWithCompletionState(issue, status, commit);
-  run("gh", [
-    "issue",
-    "edit",
-    String(issue.number),
-    "--repo",
-    repository,
-    "--body",
-    updatedBody,
-  ]);
-  issue.body = updatedBody;
+  const latest = issueDetails(repository, issue.number);
+  const updatedBody = issueBodyWithCompletionState(
+    { ...issue, body: latest.body },
+    status,
+    commit,
+  );
+  issue.body = patchIssue(repository, issue.number, { body: updatedBody }).body;
 }
 
 function clearIssueCompletionState(repository, issue) {
-  const updatedBody = issueBodyWithoutCompletionState(issue);
-  if (updatedBody === (issue.body ?? "").trim()) {
+  const latest = issueDetails(repository, issue.number);
+  const updatedBody = issueBodyWithoutCompletionState({ ...issue, body: latest.body });
+  if (updatedBody === (latest.body ?? "").trim()) {
+    issue.body = latest.body ?? "";
     return;
   }
 
-  run("gh", [
-    "issue",
-    "edit",
-    String(issue.number),
-    "--repo",
-    repository,
-    "--body",
-    updatedBody,
-  ]);
-  issue.body = updatedBody;
+  issue.body = patchIssue(repository, issue.number, { body: updatedBody }).body;
 }
 
 // -----------------------------------------------------------------------------
@@ -779,6 +1245,8 @@ async function runIndependentReview(config, repository, issue, commit) {
     return { verdict: "pass", summary: "Independent review is disabled.", findings: [] };
   }
 
+  const reviewedHead = run("git", ["rev-parse", "HEAD"]).stdout;
+  const reviewedBranch = run("git", ["branch", "--show-current"]).stdout;
   if (existsSync(config.review.outputPath)) {
     unlinkSync(config.review.outputPath);
   }
@@ -787,97 +1255,59 @@ async function runIndependentReview(config, repository, issue, commit) {
 
   console.log(`\n=== Independent Codex review for issue #${issue.number} ===\n`);
 
-  try {
-    await runCodexWithTurnLimit(
-      [
-        "exec",
-        "--sandbox",
-        "read-only",
-        "--json",
-        "--model",
-        config.review.model,
-        "--output-schema",
-        config.review.schemaPath,
-        "--output-last-message",
-        config.review.outputPath,
-        "-",
-      ],
-      {
-        input: reviewPrompt,
-        maxTurns: config.maxTurns,
-        label: `Review issue #${issue.number}`,
-      },
-    );
-  } catch (error) {
-    reopenIssueWithComment(
-      repository,
-      issue,
-      `## Ralph Loop: independent review did not complete\n\n${error.message}\n\nIssue reopened because the required review was not completed.`,
-    );
-    fail(`Независимый review issue #${issue.number} не завершился.`);
-  }
+  await runCodexWithTurnLimit(
+    [
+      "exec",
+      "--sandbox",
+      "read-only",
+      "--json",
+      "--model",
+      config.review.model,
+      "--output-schema",
+      config.review.schemaPath,
+      "--output-last-message",
+      config.review.outputPath,
+      "-",
+    ],
+    {
+      input: reviewPrompt,
+      maxTurns: config.maxTurns,
+      timeoutMs: config.runtime.codexTimeoutMs,
+      label: `Review issue #${issue.number}`,
+    },
+  );
 
   if (!existsSync(config.review.outputPath)) {
-    reopenIssueWithComment(
-      repository,
-      issue,
-      "## Ralph Loop: independent review did not produce a result\n\nIssue reopened because Codex did not create the expected structured review output.",
-    );
     fail(`Review issue #${issue.number} не создал файл результата.`);
   }
 
-  let review;
-  try {
-    review = parseJson(
-      readFileSync(config.review.outputPath, "utf8"),
-      config.review.outputPath,
-    );
-  } catch (error) {
-    reopenIssueWithComment(
-      repository,
-      issue,
-      `## Ralph Loop: independent review output is invalid\n\n${error.message}\n\nIssue reopened because the review result could not be verified.`,
-    );
-    throw error;
-  }
+  let review = parseJson(
+    readFileSync(config.review.outputPath, "utf8"),
+    config.review.outputPath,
+  );
 
   if (
     !["pass", "fail"].includes(review.verdict) ||
     typeof review.summary !== "string" ||
     !Array.isArray(review.findings)
   ) {
-    reopenIssueWithComment(
-      repository,
-      issue,
-      "## Ralph Loop: independent review output has an unexpected shape\n\nIssue reopened because the review result could not be verified.",
-    );
     fail(`Review issue #${issue.number} вернул некорректный результат.`);
   }
 
-  try {
-    review = normalizeReviewResult(review);
-  } catch (error) {
-    reopenIssueWithComment(
-      repository,
-      issue,
-      "## Ralph Loop: independent review returned FAIL without findings\n\nThe result contains no actionable finding, so implementation cannot continue safely. The pending commit is preserved and review will be retried on the next run.",
-    );
-    fail(`Review issue #${issue.number} вернул FAIL без findings: ${error.message}`);
-  }
+  review = normalizeReviewResult(review);
 
   const changes = run("git", ["status", "--porcelain"]).stdout;
-  if (changes !== "") {
-    reopenIssueWithComment(
-      repository,
-      issue,
-      "## Ralph Loop: review unexpectedly changed the working tree\n\nIssue reopened because an independent review must be read-only.",
-    );
+  const headAfterReview = run("git", ["rev-parse", "HEAD"]).stdout;
+  const branchAfterReview = run("git", ["branch", "--show-current"]).stdout;
+  if (
+    changes !== "" ||
+    headAfterReview !== reviewedHead ||
+    branchAfterReview !== reviewedBranch
+  ) {
     fail(`Review issue #${issue.number} изменил рабочее дерево.`);
   }
 
   if (review.verdict !== "pass" || review.findings.length > 0) {
-    updateIssueReviewContext(repository, issue, review);
-    reopenIssueWithComment(repository, issue, formatReviewComment(review));
     console.log(
       `Review issue #${issue.number}: FAIL — найдено замечаний: ${review.findings.length}.`,
     );
@@ -934,32 +1364,87 @@ function closeIssue(config, repository, issue, commit) {
   const completion = config.review.enabled
     ? "Ralph Loop validations and independent review passed."
     : "Ralph Loop validations passed; independent review is disabled in config.";
-  run("gh", [
-    "issue",
-    "comment",
-    String(issue.number),
-    "--repo",
+  const commentMarker = `<!-- ralph-issue-complete commit:${commit} -->`;
+  postIssueCommentOnce(
     repository,
-    "--body",
+    issue.number,
     `Implemented in commit ${commit}. ${completion}`,
-  ]);
-
-  const closedIssue = parseJson(
-    run("gh", [
-      "api",
-      "--method",
-      "PATCH",
-      `repos/${repository}/issues/${issue.number}`,
-      "-f",
-      "state=closed",
-      "-f",
-      "state_reason=completed",
-    ]).stdout,
-    `GitHub close issue ${issue.number}`,
+    commentMarker,
   );
+
+  const closedIssue = patchIssue(repository, issue.number, {
+    state: "closed",
+    state_reason: "completed",
+  });
   if (closedIssue.state?.toUpperCase() !== "CLOSED") {
     fail(`Issue #${issue.number} не закрылась после успешной реализации.`);
   }
+}
+
+function verifyPushedHead(config, expectedHead) {
+  const currentBranch = run("git", ["branch", "--show-current"]).stdout;
+  const localHead = run("git", ["rev-parse", "HEAD"]).stdout;
+  const changes = run("git", ["status", "--porcelain"]).stdout;
+  const remote = runNetwork("git", [
+    "ls-remote",
+    "--heads",
+    "origin",
+    `refs/heads/${config.branch}`,
+  ]).stdout;
+  const remoteHead = remote.split(/\s+/)[0] ?? "";
+  if (
+    currentBranch !== config.branch ||
+    localHead !== expectedHead ||
+    remoteHead !== expectedHead ||
+    changes !== ""
+  ) {
+    fail(
+      `Проверка pushed HEAD не прошла: branch=${currentBranch}, local=${localHead}, ` +
+        `remote=${remoteHead || "пусто"}, expected=${expectedHead}, dirty=${changes !== ""}.`,
+    );
+  }
+  return expectedHead;
+}
+
+function pushBranchAndVerify(config) {
+  const localHead = run("git", ["rev-parse", "HEAD"]).stdout;
+  try {
+    runNetwork("git", ["push", "--set-upstream", "origin", config.branch], {
+      echoOutput: true,
+    });
+  } catch (pushError) {
+    try {
+      verifyPushedHead(config, localHead);
+      console.log(
+        `Push вернул ошибку, но remote уже содержит ${localHead}; продолжаем идемпотентно.`,
+      );
+    } catch {
+      throw pushError;
+    }
+  }
+  return verifyPushedHead(config, localHead);
+}
+
+async function runReviewWithRetries(config, operation, label) {
+  let lastError;
+  for (let attempt = 1; attempt <= config.runtime.reviewRetryAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (error.nonRetryable || attempt === config.runtime.reviewRetryAttempts) throw error;
+      const delay = Math.min(
+        config.runtime.networkRetryBaseDelayMs * 2 ** (attempt - 1),
+        30_000,
+      );
+      console.error(
+        `${label} технически не завершился (попытка ${attempt}): ${error.message}. ` +
+          `Повтор через ${delay} ms.`,
+      );
+      waitSync(delay);
+    }
+  }
+  throw lastError;
 }
 
 async function reviewAndCloseCommittedIssue(
@@ -969,8 +1454,18 @@ async function reviewAndCloseCommittedIssue(
   commit,
   markPending = true,
 ) {
+  const pushedHead = pushBranchAndVerify(config);
+  activeStateStore?.updateIssue({
+    phase: "pushed",
+    commit,
+    pushedHead,
+    lastFailure: null,
+  });
+
   if (!config.review.enabled) {
+    verifyPushedHead(config, pushedHead);
     closeIssue(config, repository, issue, commit);
+    activeStateStore?.clearIssue();
     return {
       completed: true,
       commit,
@@ -981,11 +1476,40 @@ async function reviewAndCloseCommittedIssue(
   if (markPending) {
     setIssueCompletionState(repository, issue, "pending-review", commit);
   }
-  const review = await runIndependentReview(config, repository, issue, commit);
+  activeStateStore?.updateIssue({ phase: "reviewing" });
+  let review;
+  try {
+    review = await runReviewWithRetries(
+      config,
+      () => runIndependentReview(config, repository, issue, commit),
+      `Review issue #${issue.number}`,
+    );
+  } catch (error) {
+    activeStateStore?.updateIssue({
+      phase: "pushed",
+      lastFailure: error.message,
+    });
+    try {
+      reopenIssueWithComment(
+        repository,
+        issue,
+        `## Ralph Loop: independent review did not complete\n\n${error.message}\n\nThe pushed commit is preserved. AFK will retry the review on the next run.`,
+      );
+    } catch (commentError) {
+      console.error(
+        `Не удалось опубликовать техническую ошибку review issue #${issue.number}: ${commentError.message}`,
+      );
+    }
+    throw error;
+  }
   if (review.verdict !== "pass" || review.findings.length > 0) {
+    updateIssueReviewContext(repository, issue, review);
+    reopenIssueWithComment(repository, issue, formatReviewComment(review));
+    activeStateStore?.clearIssue();
     return { completed: false, commit, review };
   }
 
+  verifyPushedHead(config, pushedHead);
   // Удаляем recovery-marker до закрытия: позднее ручное reopen должно снова
   // пройти обычную реализацию, а не использовать старый commit как актуальный.
   clearIssueCompletionState(repository, issue);
@@ -1002,6 +1526,7 @@ async function reviewAndCloseCommittedIssue(
     }
     throw error;
   }
+  activeStateStore?.clearIssue();
   return { completed: true, commit, review };
 }
 
@@ -1052,14 +1577,46 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       );
     }
     const commit = verifiedIssueCommit(alreadyFixedCommit, issue);
-    runConfiguredValidation(config);
+    activeStateStore?.updateIssue({ phase: "validating" });
+    try {
+      runConfiguredValidation(config);
+    } catch (error) {
+      const attempts = (activeStateStore?.issue?.validationFixAttempts ?? 0) + 1;
+      activeStateStore?.updateIssue({
+        phase: "working-tree",
+        validationFixAttempts: attempts,
+        lastFailure: error.message,
+      });
+      if (attempts >= config.maxTestFixAttempts) throw error;
+      console.error(
+        `Issue #${issue.number}: validation не прошла (${attempts}/${config.maxTestFixAttempts}); ` +
+          "Ralph передаст ошибку Terra на следующей итерации.",
+      );
+      return { completed: false, validationFailed: true };
+    }
     if (run("git", ["status", "--porcelain"]).stdout !== "") {
       fail(`Issue #${issue.number}: проверки already-fixed решения изменили рабочее дерево.`);
     }
     return reviewAndCloseCommittedIssue(config, repository, issue, commit);
   }
 
-  runConfiguredValidation(config);
+  activeStateStore?.updateIssue({ phase: "validating" });
+  try {
+    runConfiguredValidation(config);
+  } catch (error) {
+    const attempts = (activeStateStore?.issue?.validationFixAttempts ?? 0) + 1;
+    activeStateStore?.updateIssue({
+      phase: "working-tree",
+      validationFixAttempts: attempts,
+      lastFailure: error.message,
+    });
+    if (attempts >= config.maxTestFixAttempts) throw error;
+    console.error(
+      `Issue #${issue.number}: validation не прошла (${attempts}/${config.maxTestFixAttempts}); ` +
+        "Ralph продолжит исправление существующего diff.",
+    );
+    return { completed: false, validationFailed: true };
+  }
   const changesAfterValidation = run("git", ["status", "--porcelain"]).stdout;
   if (changesAfterValidation !== changes) {
     fail(
@@ -1067,6 +1624,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
         "Проверьте generated-файлы перед повторным запуском.",
     );
   }
+  activeStateStore?.updateIssue({ phase: "staging" });
   run("git", ["add", "--all"]);
 
   const stagedDiff = run("git", ["diff", "--cached", "--quiet"], {
@@ -1080,7 +1638,20 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   }
 
   const commitMessage = commitMessageFromAgent(lastAgentMessage, issue);
-  run("git", ["commit", "-m", commitMessage], { inherit: true });
+  const expectedTree = run("git", ["write-tree"]).stdout;
+  activeStateStore?.updateIssue({
+    phase: "staging",
+    expectedTree,
+    commitMessage,
+  });
+  run(
+    "git",
+    ["commit", "-m", commitMessage, "-m", commitTrailerForIssue(issue)],
+    {
+      echoOutput: true,
+      timeoutMs: config.runtime.validationTimeoutMs,
+    },
+  );
 
   const commitCount = Number(
     run("git", ["rev-list", "--count", `${startingCommit}..HEAD`]).stdout,
@@ -1094,6 +1665,18 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   }
 
   const commit = run("git", ["rev-parse", "HEAD"]).stdout;
+  const committedTree = run("git", ["rev-parse", `${commit}^{tree}`]).stdout;
+  if (committedTree !== expectedTree) {
+    fail(
+      `Issue #${issue.number}: tree созданного commit не совпал с проверенным staged tree.`,
+    );
+  }
+  activeStateStore?.updateIssue({
+    phase: "committed",
+    commit,
+    pushedHead: null,
+    lastFailure: null,
+  });
   return reviewAndCloseCommittedIssue(config, repository, issue, commit);
 }
 
@@ -1102,6 +1685,30 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 // -----------------------------------------------------------------------------
 
 async function runCodex(config, repository, issue, rules) {
+  const storedIssue =
+    activeStateStore?.issue?.number === issue.number ? activeStateStore.issue : null;
+  if (
+    storedIssue?.commit &&
+    ["committed", "pushed", "reviewing"].includes(storedIssue.phase)
+  ) {
+    if (run("git", ["status", "--porcelain"]).stdout !== "") {
+      fail(`Issue #${issue.number}: committed recovery требует чистое рабочее дерево.`);
+    }
+    const commit = verifiedIssueCommit(storedIssue.commit, issue);
+    console.log(
+      `Issue #${issue.number}: продолжаем pipeline с сохранённого commit ${commit} ` +
+        `(phase=${storedIssue.phase}).`,
+    );
+    const resumePhase = storedIssue.phase;
+    try {
+      runConfiguredValidation(config);
+    } catch (error) {
+      activeStateStore.updateIssue({ phase: resumePhase, lastFailure: error.message });
+      throw error;
+    }
+    return reviewAndCloseCommittedIssue(config, repository, issue, commit);
+  }
+
   const completion = issueCompletionState(issue);
   if (completion?.status === "pending-review") {
     return resumeIssueCompletion(config, repository, issue, completion);
@@ -1112,7 +1719,15 @@ async function runCodex(config, repository, issue, rules) {
     clearIssueCompletionState(repository, issue);
   }
 
-  const startingCommit = run("git", ["rev-parse", "HEAD"]).stdout;
+  const currentHead = run("git", ["rev-parse", "HEAD"]).stdout;
+  const continuation = Boolean(storedIssue);
+  const startingCommit = storedIssue?.startingCommit ?? currentHead;
+  if (startingCommit !== currentHead) {
+    fail(
+      `Issue #${issue.number}: recovery ожидал HEAD ${startingCommit}, но найден ${currentHead}.`,
+    );
+  }
+  activeStateStore?.beginIssue(issue, startingCommit, continuation);
   let codexResult;
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
   try {
@@ -1129,20 +1744,32 @@ async function runCodex(config, repository, issue, rules) {
         "-",
       ],
       {
-        input: renderPrompt(config, issue, rules),
+        input:
+          renderPrompt(config, issue, rules) +
+          (continuation
+            ? `\n\n## AFK recovery\n\nЭто продолжение незавершённой сессии Ralph. Не сбрасывай существующие изменения. Изучи текущий git diff, продолжи реализацию той же issue и исправь последний сбой оркестратора:\n\n${storedIssue.lastFailure ?? "процесс завершился до фиксации результата"}`
+            : ""),
         maxTurns: config.maxTurns,
+        timeoutMs: config.runtime.codexTimeoutMs,
         label: `Codex issue #${issue.number}`,
       },
     );
   } catch (error) {
-    if (error.code === "RALPH_MAX_TURNS") {
+    activeStateStore?.updateIssue({
+      phase: "working-tree",
+      lastFailure: error.message,
+    });
+    if (["RALPH_MAX_TURNS", "RALPH_CODEX_TIMEOUT"].includes(error.code)) {
       reopenIssueWithComment(
         repository,
         issue,
-        `## Ralph Loop: maxTurns circuit breaker\n\nThe Codex session reached the hard limit of **${config.maxTurns} observable steps** and was stopped before it could start another step.\n\nReview the current branch and working tree before restarting Ralph Loop.`,
+        `## Ralph Loop: Codex circuit breaker\n\nThe Codex session was stopped by **${error.code}** after ${error.turns ?? "an unknown number of"} observable steps. Existing work is preserved and AFK will continue the same issue while the shared iteration budget allows.`,
       );
     }
-    throw error;
+    console.error(
+      `Issue #${issue.number}: Terra-сессия не завершилась; существующий diff сохранён: ${error.message}`,
+    );
+    return { completed: false, agentFailed: true };
   }
 
   return commitAndCompleteIssue(
@@ -1160,7 +1787,7 @@ async function runCodex(config, repository, issue, rules) {
 
 function existingPullRequest(config, repository) {
   const pullRequests = parseJson(
-    run("gh", [
+    runNetwork("gh", [
       "pr",
       "list",
       "--repo",
@@ -1169,6 +1796,8 @@ function existingPullRequest(config, repository) {
       "open",
       "--head",
       config.branch,
+      "--limit",
+      "100",
       "--json",
       "number,url",
     ]).stdout,
@@ -1179,7 +1808,7 @@ function existingPullRequest(config, repository) {
 
 function pullRequestDetails(repository, pullRequest) {
   return parseJson(
-    run("gh", [
+    runNetwork("gh", [
       "pr",
       "view",
       String(pullRequest),
@@ -1215,10 +1844,56 @@ function verifyPullRequestTarget(config, pullRequest) {
   return pullRequest;
 }
 
+function verifyReviewedPullRequestHead(config, repository, pullRequest) {
+  const refreshed = verifyPullRequestTarget(
+    config,
+    pullRequestDetails(repository, pullRequest.number),
+  );
+  if (refreshed.headRefOid !== pullRequest.headRefOid) {
+    fail(
+      `PR #${pullRequest.number} изменился во время milestone review: ` +
+        `${pullRequest.headRefOid} -> ${refreshed.headRefOid}. Нужен review нового HEAD.`,
+    );
+  }
+  verifyPushedHead(config, pullRequest.headRefOid);
+  return refreshed;
+}
+
+function runConfiguredScripts(config, scripts, label) {
+  for (const script of scripts) {
+    console.log(`\n=== ${label}: npm run ${script} ===\n`);
+    try {
+      run("npm", ["run", script], {
+        echoOutput: true,
+        timeoutMs: config.runtime.validationTimeoutMs,
+      });
+    } catch (error) {
+      error.code = error.code === "RALPH_COMMAND_TIMEOUT" ? error.code : "RALPH_VALIDATION_FAILED";
+      error.script = script;
+      throw error;
+    }
+  }
+}
+
+function runPreflight(config) {
+  runConfiguredScripts(config, config.preflightScripts, "Preflight");
+}
+
 function runConfiguredValidation(config) {
+  // Повторяем preflight перед E2E: текущая issue могла добавить новую migration.
+  runPreflight(config);
   for (const script of config.validationScripts) {
     console.log(`\n=== npm run ${script} ===\n`);
-    run("npm", ["run", script], { inherit: true });
+    try {
+      run("npm", ["run", script], {
+        echoOutput: true,
+        timeoutMs: config.runtime.validationTimeoutMs,
+      });
+    } catch (error) {
+      error.code = error.code === "RALPH_COMMAND_TIMEOUT" ? error.code : "RALPH_VALIDATION_FAILED";
+      error.script = script;
+      throw error;
+    }
   }
 }
 
@@ -1234,7 +1909,7 @@ function createPullRequest(config, repository) {
       "Нельзя обновить PR: проектные проверки изменили чистое рабочее дерево.",
     );
   }
-  run("git", ["fetch", "origin", config.baseBranch], { inherit: true });
+  runNetwork("git", ["fetch", "origin", config.baseBranch], { echoOutput: true });
   const commitCount = Number(
     run("git", [
       "rev-list",
@@ -1246,9 +1921,7 @@ function createPullRequest(config, repository) {
     fail(`В ветке ${config.branch} нет коммитов поверх origin/${config.baseBranch}.`);
   }
 
-  run("git", ["push", "--set-upstream", "origin", config.branch], {
-    inherit: true,
-  });
+  pushBranchAndVerify(config);
 
   const existing = existingPullRequest(config, repository);
   if (existing) {
@@ -1280,21 +1953,82 @@ function createPullRequest(config, repository) {
   return verifyPullRequestTarget(config, pullRequestDetails(repository, url));
 }
 
+function closeMilestone(repository, milestone) {
+  const beforeClose = openIssues(repository, milestone).filter(
+    (issue) => issueState(repository, issue.number) === "OPEN",
+  );
+  if (beforeClose.length > 0) {
+    fail(
+      `Milestone #${milestone.number} нельзя закрыть: появились открытые issues ` +
+        beforeClose.map((issue) => `#${issue.number}`).join(", "),
+    );
+  }
+  const current = parseJson(
+    runNetwork("gh", ["api", `repos/${repository}/milestones/${milestone.number}`])
+      .stdout,
+    `GitHub milestone ${milestone.number}`,
+  );
+  if (current.state === "closed") {
+    console.log(`Milestone #${milestone.number} уже закрыт.`);
+    return current;
+  }
+
+  const closed = parseJson(
+    runNetwork("gh", [
+      "api",
+      "--method",
+      "PATCH",
+      `repos/${repository}/milestones/${milestone.number}`,
+      "-f",
+      "state=closed",
+    ]).stdout,
+    `GitHub close milestone ${milestone.number}`,
+  );
+  if (closed.state !== "closed") {
+    fail(`Milestone #${milestone.number} не закрылся после PASS.`);
+  }
+  console.log(`Milestone #${milestone.number} закрыт после чистого PASS.`);
+  const afterClose = openIssues(repository, milestone).filter(
+    (issue) => issueState(repository, issue.number) === "OPEN",
+  );
+  if (afterClose.length > 0) {
+    runNetwork("gh", [
+      "api",
+      "--method",
+      "PATCH",
+      `repos/${repository}/milestones/${milestone.number}`,
+      "-f",
+      "state=open",
+    ]);
+    fail(
+      `После закрытия milestone появились issues ${afterClose
+        .map((issue) => `#${issue.number}`)
+        .join(", ")}; milestone снова открыт.`,
+    );
+  }
+  return closed;
+}
+
 // -----------------------------------------------------------------------------
 // Итоговое ревью всего milestone на Sol и публикация результата в PR
 // -----------------------------------------------------------------------------
 
-function milestoneReviewMarker(config, pullRequest) {
-  return `<!-- ralph-milestone-review head:${pullRequest.headRefOid} model:${config.milestoneReview.model} -->`;
+function milestoneReviewMarker(config, milestone, pullRequest) {
+  const milestoneId = createHash("sha256")
+    .update(
+      `${milestone.number}\n${milestone.title}\n${milestone.description ?? ""}\n${config.baseBranch}`,
+    )
+    .digest("hex")
+    .slice(0, 16);
+  return `<!-- ralph-milestone-review milestone:${milestoneId} head:${pullRequest.headRefOid} model:${config.milestoneReview.model} -->`;
 }
 
-function milestonePassWasPublished(config, repository, pullRequest) {
-  const marker = milestoneReviewMarker(config, pullRequest);
-  const reviews = parseJson(
-    run("gh", [
-      "api",
-      `repos/${repository}/pulls/${pullRequest.number}/reviews?per_page=100`,
-    ]).stdout,
+function milestonePassWasPublished(config, repository, milestone, pullRequest) {
+  const marker = milestoneReviewMarker(config, milestone, pullRequest);
+  const reviews = githubPagedArray(
+    repository,
+    `pulls/${pullRequest.number}/reviews`,
+    [],
     `GitHub reviews for PR #${pullRequest.number}`,
   );
 
@@ -1305,6 +2039,30 @@ function milestonePassWasPublished(config, repository, pullRequest) {
       review.body.includes("**Verdict:** **PASS**")
     );
   });
+}
+
+function limitMilestoneReviewFindings(review, pullRequest, maxFindings) {
+  const priorities = { P0: 0, P1: 1, P2: 2, P3: 3 };
+  const unique = new Map();
+  for (const finding of review.findings) {
+    unique.set(reviewFindingFingerprint(pullRequest, finding), finding);
+  }
+  const sorted = [...unique.values()].sort((left, right) => {
+    const severity = (priorities[left.severity] ?? 99) - (priorities[right.severity] ?? 99);
+    if (severity !== 0) return severity;
+    return `${left.file}:${left.line}:${left.title}`.localeCompare(
+      `${right.file}:${right.line}:${right.title}`,
+    );
+  });
+  const omitted = Math.max(0, sorted.length - maxFindings);
+  return {
+    ...review,
+    summary:
+      omitted > 0
+        ? `${review.summary} Ralph queued the first ${maxFindings} unique findings by severity; ${omitted} findings were deferred to the next full review.`
+        : review.summary,
+    findings: sorted.slice(0, maxFindings),
+  };
 }
 
 function formatMilestoneReview(config, milestone, pullRequest, review) {
@@ -1325,7 +2083,7 @@ function formatMilestoneReview(config, milestone, pullRequest, review) {
       ? "The pull request remains draft so a human can make the final merge decision."
       : "Ralph Loop will create or reopen one milestone issue per finding, run the implementation loop, push the fixes, and review the new head again.";
 
-  return `${milestoneReviewMarker(config, pullRequest)}
+  return `${milestoneReviewMarker(config, milestone, pullRequest)}
 ## Ralph Loop: milestone review
 
 - **Model:** \`${config.milestoneReview.model}\`
@@ -1343,6 +2101,23 @@ ${nextStep}`;
 }
 
 function postPullRequestReview(repository, pullRequest, body) {
+  const marker = body.match(/<!-- ralph-[^\r\n>]+ -->/)?.[0];
+  if (marker) {
+    const reviews = githubPagedArray(
+      repository,
+      `pulls/${pullRequest.number}/reviews`,
+      [],
+      `GitHub reviews for PR #${pullRequest.number}`,
+    );
+    if (
+      reviews.some(
+        (review) => typeof review.body === "string" && review.body.includes(marker),
+      )
+    ) {
+      console.log(`Review с marker ${marker} уже опубликован в PR #${pullRequest.number}.`);
+      return;
+    }
+  }
   run(
     "gh",
     [
@@ -1362,10 +2137,14 @@ function postPullRequestReview(repository, pullRequest, body) {
 function postMilestoneReviewFailure(
   config,
   repository,
+  milestone,
   pullRequest,
   message,
 ) {
-  const marker = `<!-- ralph-milestone-review-failed head:${pullRequest.headRefOid} model:${config.milestoneReview.model} -->`;
+  const marker = milestoneReviewMarker(config, milestone, pullRequest).replace(
+    "ralph-milestone-review ",
+    "ralph-milestone-review-failed ",
+  );
   postPullRequestReview(
     repository,
     pullRequest,
@@ -1388,7 +2167,7 @@ async function runMilestoneReview(
     };
   }
 
-  if (milestonePassWasPublished(config, repository, pullRequest)) {
+  if (milestonePassWasPublished(config, repository, milestone, pullRequest)) {
     console.log(
       `Milestone уже проверен моделью ${config.milestoneReview.model} для commit ${pullRequest.headRefOid}.`,
     );
@@ -1397,10 +2176,6 @@ async function runMilestoneReview(
       summary: "PASS review for this head was already published.",
       findings: [],
     };
-  }
-
-  if (existsSync(config.milestoneReview.outputPath)) {
-    unlinkSync(config.milestoneReview.outputPath);
   }
 
   const milestoneDescription =
@@ -1418,82 +2193,95 @@ Report only actionable findings introduced by this PR. Use verdict "fail" when a
     `\n=== Milestone review for PR #${pullRequest.number} (${config.milestoneReview.model}) ===\n`,
   );
 
-  try {
-    await runCodexWithTurnLimit(
-      [
-        "exec",
-        "--sandbox",
-        "read-only",
-        "--json",
-        "--model",
-        config.milestoneReview.model,
-        "--output-schema",
-        config.milestoneReview.schemaPath,
-        "--output-last-message",
-        config.milestoneReview.outputPath,
-        "-",
-      ],
-      {
-        input: reviewPrompt,
-        maxTurns: config.milestoneReview.maxTurns,
-        label: `Milestone review PR #${pullRequest.number}`,
-      },
-    );
-  } catch (error) {
-    postMilestoneReviewFailure(
-      config,
-      repository,
-      pullRequest,
-      error.message,
-    );
-    fail(`Milestone review PR #${pullRequest.number} не завершился.`);
-  }
-
-  if (!existsSync(config.milestoneReview.outputPath)) {
-    const message = "Codex did not create the expected structured review output.";
-    postMilestoneReviewFailure(config, repository, pullRequest, message);
-    fail(`Milestone review PR #${pullRequest.number} не создал файл результата.`);
-  }
-
   let review;
   try {
-    review = parseJson(
-      readFileSync(config.milestoneReview.outputPath, "utf8"),
-      config.milestoneReview.outputPath,
-    );
-  } catch (error) {
-    postMilestoneReviewFailure(
+    review = await runReviewWithRetries(
       config,
-      repository,
-      pullRequest,
-      error.message,
+      async () => {
+        if (run("git", ["status", "--porcelain"]).stdout !== "") {
+          const error = new Error("Milestone review требует чистое рабочее дерево.");
+          error.nonRetryable = true;
+          throw error;
+        }
+        const reviewedHead = run("git", ["rev-parse", "HEAD"]).stdout;
+        const reviewedBranch = run("git", ["branch", "--show-current"]).stdout;
+        if (existsSync(config.milestoneReview.outputPath)) {
+          unlinkSync(config.milestoneReview.outputPath);
+        }
+
+        await runCodexWithTurnLimit(
+          [
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--json",
+            "--model",
+            config.milestoneReview.model,
+            "--output-schema",
+            config.milestoneReview.schemaPath,
+            "--output-last-message",
+            config.milestoneReview.outputPath,
+            "-",
+          ],
+          {
+            input: reviewPrompt,
+            maxTurns: config.milestoneReview.maxTurns,
+            timeoutMs: config.runtime.codexTimeoutMs,
+            label: `Milestone review PR #${pullRequest.number}`,
+          },
+        );
+        if (!existsSync(config.milestoneReview.outputPath)) {
+          fail(`Milestone review PR #${pullRequest.number} не создал файл результата.`);
+        }
+
+        const candidate = parseJson(
+          readFileSync(config.milestoneReview.outputPath, "utf8"),
+          config.milestoneReview.outputPath,
+        );
+        if (
+          !["pass", "fail"].includes(candidate.verdict) ||
+          typeof candidate.summary !== "string" ||
+          !Array.isArray(candidate.findings)
+        ) {
+          fail(`Milestone review PR #${pullRequest.number} вернул некорректный результат.`);
+        }
+        const normalized = normalizeReviewResult(candidate);
+        const changed = run("git", ["status", "--porcelain"]).stdout !== "";
+        const headChanged = run("git", ["rev-parse", "HEAD"]).stdout !== reviewedHead;
+        const branchChanged =
+          run("git", ["branch", "--show-current"]).stdout !== reviewedBranch;
+        if (changed || headChanged || branchChanged) {
+          const error = new Error(
+            `Milestone review PR #${pullRequest.number} изменил Git-состояние.`,
+          );
+          error.nonRetryable = true;
+          throw error;
+        }
+        return normalized;
+      },
+      `Milestone review PR #${pullRequest.number}`,
     );
-    throw error;
-  }
-
-  if (
-    !["pass", "fail"].includes(review.verdict) ||
-    typeof review.summary !== "string" ||
-    !Array.isArray(review.findings)
-  ) {
-    const message = "Codex returned a review result with an unexpected shape.";
-    postMilestoneReviewFailure(config, repository, pullRequest, message);
-    fail(`Milestone review PR #${pullRequest.number} вернул некорректный результат.`);
-  }
-
-  try {
-    review = normalizeReviewResult(review);
   } catch (error) {
-    postMilestoneReviewFailure(config, repository, pullRequest, error.message);
-    fail(`Milestone review PR #${pullRequest.number} вернул FAIL без findings.`);
+    try {
+      postMilestoneReviewFailure(
+        config,
+        repository,
+        milestone,
+        pullRequest,
+        error.message,
+      );
+    } catch (commentError) {
+      console.error(
+        `Не удалось опубликовать ошибку milestone review: ${commentError.message}`,
+      );
+    }
+    fail(`Milestone review PR #${pullRequest.number} не завершился: ${error.message}`);
   }
-
-  const changes = run("git", ["status", "--porcelain"]).stdout;
-  if (changes !== "") {
-    const message = "The read-only milestone review changed the working tree.";
-    postMilestoneReviewFailure(config, repository, pullRequest, message);
-    fail(`Milestone review PR #${pullRequest.number} изменил рабочее дерево.`);
-  }
+  review = limitMilestoneReviewFindings(
+    review,
+    pullRequest,
+    config.milestoneReview.maxFindings,
+  );
 
   postPullRequestReview(
     repository,
@@ -1525,19 +2313,13 @@ function reviewFindingMarker(pullRequest, finding) {
 }
 
 function milestoneIssues(repository, milestone) {
-  const issues = parseJson(
-    run("gh", [
-      "api",
-      "--method",
-      "GET",
-      `repos/${repository}/issues`,
-      "-f",
-      "state=all",
-      "-F",
-      `milestone=${milestone.number}`,
-      "-F",
-      "per_page=100",
-    ]).stdout,
+  const issues = githubPagedArray(
+    repository,
+    "issues",
+    [
+      ["state", "all"],
+      ["milestone", milestone.number],
+    ],
     `GitHub issues for milestone ${milestone.title}`,
   );
 
@@ -1584,18 +2366,24 @@ The existing draft PR will be updated and reviewed again after all review findin
 
 function createReviewFindingIssue(config, repository, milestone, pullRequest, finding) {
   const issue = parseJson(
-    run("gh", [
-      "api",
-      `repos/${repository}/issues`,
-      "--method",
-      "POST",
-      "-f",
-      `title=${findingIssueTitle(finding)}`,
-      "-f",
-      `body=${findingIssueBody(config, pullRequest, finding)}`,
-      "-F",
-      `milestone=${milestone.number}`,
-    ]).stdout,
+    run(
+      "gh",
+      [
+        "api",
+        `repos/${repository}/issues`,
+        "--method",
+        "POST",
+        "--input",
+        "-",
+      ],
+      {
+        input: JSON.stringify({
+          title: findingIssueTitle(finding),
+          body: findingIssueBody(config, pullRequest, finding),
+          milestone: milestone.number,
+        }),
+      },
+    ).stdout,
     "GitHub issue creation",
   );
   console.log(`Создана issue #${issue.number} из milestone finding: ${issue.html_url}`);
@@ -1609,33 +2397,23 @@ function createReviewFindingIssue(config, repository, milestone, pullRequest, fi
 }
 
 function reopenReviewFindingIssue(repository, issue, pullRequest) {
-  run("gh", ["issue", "reopen", String(issue.number), "--repo", repository]);
-  run("gh", [
-    "issue",
-    "comment",
-    String(issue.number),
-    "--repo",
+  patchIssue(repository, issue.number, { state: "open" });
+  const marker = `<!-- ralph-finding-reopened head:${pullRequest.headRefOid} issue:${issue.number} -->`;
+  postIssueCommentOnce(
     repository,
-    "--body",
+    issue.number,
     `The milestone review found this issue again at PR head ${pullRequest.headRefOid}. Reopened for another fix iteration.`,
-  ]);
+    marker,
+  );
   console.log(`Переоткрыта issue #${issue.number}: finding всё ещё присутствует.`);
 }
 
 function updateReviewFindingIssue(config, repository, issue, pullRequest, finding) {
-  run("gh", [
-    "issue",
-    "edit",
-    String(issue.number),
-    "--repo",
-    repository,
-    "--title",
-    findingIssueTitle(finding),
-    "--body",
-    findingIssueBody(config, pullRequest, finding),
-  ]);
-  issue.title = findingIssueTitle(finding);
-  issue.body = findingIssueBody(config, pullRequest, finding);
+  const title = findingIssueTitle(finding);
+  const body = findingIssueBody(config, pullRequest, finding);
+  const updated = patchIssue(repository, issue.number, { title, body });
+  issue.title = updated.title;
+  issue.body = updated.body;
 }
 
 function createOrReopenReviewIssues(
@@ -1739,7 +2517,8 @@ function printCheck(config, repository, milestone, repositoryState, issues) {
 
 async function runContinuousLoop(context, actions) {
   const { config, repository, milestone, rules } = context;
-  let iteration = 0;
+  const stateStore = context.stateStore ?? activeStateStore;
+  let iteration = stateStore?.iterationsUsed ?? 0;
   const pendingIssues = new Map();
   const completedIssueNumbers = new Set();
 
@@ -1759,9 +2538,36 @@ async function runContinuousLoop(context, actions) {
       }
       issuesByNumber.set(issue.number, issue);
     }
-    const issues = [...issuesByNumber.values()].sort(
-      (left, right) => left.number - right.number,
-    );
+    const recoveryIssue = stateStore?.issue;
+    if (recoveryIssue && !issuesByNumber.has(recoveryIssue.number)) {
+      if (actions.issueState(repository, recoveryIssue.number) === "OPEN") {
+        issuesByNumber.set(recoveryIssue.number, {
+          number: recoveryIssue.number,
+          title: recoveryIssue.title,
+          url: recoveryIssue.url,
+          body: recoveryIssue.body ?? "",
+        });
+      } else {
+        if (actions.workingTreeStatus() !== "") {
+          fail(
+            `Сохранённая issue #${recoveryIssue.number} закрыта, но её рабочее дерево ` +
+              "содержит изменения. Ralph не будет переносить их в следующую issue.",
+          );
+        }
+        actions.clearIssueCompletionState(repository, recoveryIssue);
+        console.log(
+          `Сохранённая issue #${recoveryIssue.number} уже закрыта; локальная recovery-фаза очищена.`,
+        );
+        stateStore.clearIssue();
+      }
+    }
+    const issues = [...issuesByNumber.values()].sort((left, right) => {
+      if (recoveryIssue) {
+        if (left.number === recoveryIssue.number) return -1;
+        if (right.number === recoveryIssue.number) return 1;
+      }
+      return left.number - right.number;
+    });
     if (issues.length === 0) {
       const pullRequest = actions.createPullRequest(config, repository);
       const review = await actions.runMilestoneReview(
@@ -1771,6 +2577,21 @@ async function runContinuousLoop(context, actions) {
         pullRequest,
       );
       if (review.verdict === "pass" && review.findings.length === 0) {
+        const appearedIssues = actions
+          .openIssues(repository, milestone)
+          .filter((issue) => actions.issueState(repository, issue.number) === "OPEN");
+        if (appearedIssues.length > 0) {
+          for (const issue of appearedIssues) pendingIssues.set(issue.number, issue);
+          console.log(
+            `Во время milestone review появились issues: ${appearedIssues
+              .map((issue) => `#${issue.number}`)
+              .join(", ")}. Ralph продолжает цикл.`,
+          );
+          continue;
+        }
+        actions.verifyReviewedPullRequestHead(config, repository, pullRequest);
+        actions.closeMilestone(repository, milestone);
+        stateStore?.finish();
         return { verdict: "pass", iterations: iteration, pullRequest };
       }
 
@@ -1794,15 +2615,50 @@ async function runContinuousLoop(context, actions) {
       continue;
     }
 
-    if (iteration >= config.maxIterations) {
+    let currentIssue = issues[0];
+    const refreshedIssue = actions.refreshIssue(
+      repository,
+      currentIssue.number,
+      currentIssue,
+    );
+    if (refreshedIssue.state !== "OPEN") {
+      if (stateStore?.issue?.number === currentIssue.number) {
+        if (actions.workingTreeStatus() !== "") {
+          fail(
+            `Issue #${currentIssue.number} закрылась во время работы, но локальный diff не пуст. ` +
+              "Ralph остановлен, чтобы не смешать изменения со следующей задачей.",
+          );
+        }
+        actions.clearIssueCompletionState(repository, currentIssue);
+        stateStore.clearIssue();
+      }
+      pendingIssues.delete(currentIssue.number);
+      completedIssueNumbers.add(currentIssue.number);
+      continue;
+    }
+    currentIssue = refreshedIssue;
+    const completion = issueCompletionState(currentIssue);
+    const storedPhase =
+      stateStore?.issue?.number === currentIssue.number
+        ? stateStore.issue.phase
+        : null;
+    const needsDevelopmentIteration =
+      completion?.status !== "pending-review" &&
+      !["committed", "pushed", "reviewing"].includes(storedPhase);
+
+    if (needsDevelopmentIteration && iteration >= config.maxIterations) {
       fail(
         `Достигнут лимит ${config.maxIterations} итераций; осталось открытых issues: ${issues.length}. PR остаётся draft.`,
       );
     }
 
-    iteration += 1;
-    console.log(`Итерация ${iteration}/${config.maxIterations}; осталось issues: ${issues.length}.`);
-    const currentIssue = issues[0];
+    if (needsDevelopmentIteration) {
+      iteration = stateStore?.reserveIteration() ?? iteration + 1;
+    }
+    console.log(
+      `${needsDevelopmentIteration ? "Итерация" : "Resume"} ${iteration}/${config.maxIterations}; ` +
+        `осталось issues: ${issues.length}.`,
+    );
     const result = await actions.runCodex(config, repository, currentIssue, rules);
     if (result?.completed === false) {
       pendingIssues.set(currentIssue.number, currentIssue);
@@ -1815,18 +2671,37 @@ async function runContinuousLoop(context, actions) {
 
 async function executeMode(context, actions) {
   const { mode: selectedMode, config, repository, milestone, repositoryState, rules } = context;
-  const issues = actions.openIssues(repository, milestone);
 
   if (selectedMode === "--check") {
+    const issues = actions.openIssues(repository, milestone);
     actions.printCheck(config, repository, milestone, repositoryState, issues);
     return { mode: "check", issues: issues.length };
   }
 
+  actions.runPreflight(config);
+
   if (selectedMode === "--once") {
+    const issues = actions.openIssues(repository, milestone);
     if (!issues[0]) {
       console.log("Открытых issues нет. Для push и создания PR запустите --run.");
+      context.stateStore?.finish();
       return { mode: "once", completed: 0 };
     }
+    const completion = issueCompletionState(issues[0]);
+    const storedPhase =
+      context.stateStore?.issue?.number === issues[0].number
+        ? context.stateStore.issue.phase
+        : null;
+    const needsDevelopmentIteration =
+      completion?.status !== "pending-review" &&
+      !["committed", "pushed", "reviewing"].includes(storedPhase);
+    if (
+      needsDevelopmentIteration &&
+      (context.stateStore?.iterationsUsed ?? 0) >= config.maxIterations
+    ) {
+      fail(`Достигнут лимит ${config.maxIterations} итераций.`);
+    }
+    if (needsDevelopmentIteration) context.stateStore?.reserveIteration();
     const result = await actions.runCodex(config, repository, issues[0], rules);
     if (result?.completed === false) {
       console.log(
@@ -1834,6 +2709,7 @@ async function executeMode(context, actions) {
       );
       return { mode: "once", completed: 0, reviewFailed: true };
     }
+    context.stateStore?.finish();
     console.log(`Issue #${issues[0].number} завершена. Цикл остановлен после одной итерации.`);
     return { mode: "once", completed: 1 };
   }
@@ -1843,13 +2719,19 @@ async function executeMode(context, actions) {
 
 function defaultActions() {
   return {
+    closeMilestone,
+    clearIssueCompletionState,
     issueState,
     openIssues,
+    refreshIssue,
     printCheck,
+    runPreflight,
     runCodex,
     createPullRequest,
     runMilestoneReview,
     createOrReopenReviewIssues,
+    verifyReviewedPullRequestHead,
+    workingTreeStatus: () => run("git", ["status", "--porcelain"]).stdout,
   };
 }
 
@@ -1867,16 +2749,50 @@ async function main() {
     return;
   }
 
-  const rules = loadRalphRules(config);
-  verifyTools();
-  const repositoryState = verifyRepository(config, mode !== "--check");
-  verifyBaseHistory(config);
-  const repository = repositoryName();
-  const milestone = verifyMilestone(repository, config.milestone);
-  return executeMode(
-    { mode, config, repository, milestone, repositoryState, rules },
-    defaultActions(),
-  );
+  const restoreConsole = initializePersistentLog(runtimeLogPath, {
+    mode,
+    branch: config.branch,
+    milestone: config.milestone,
+  });
+  let releaseLock;
+  try {
+    releaseLock = acquireRunLock(runtimeLockPath, {
+      mode,
+      projectRoot,
+      branch: config.branch,
+    });
+    activeStateStore = createStateStore(config, mode);
+    const rules = loadRalphRules(config);
+    verifyTools();
+    const repositoryState = verifyRepository(config, mode !== "--check");
+    if (mode !== "--check") {
+      reconcileStateAfterCrash(config, activeStateStore);
+    }
+    verifyBaseHistory(config);
+    const repository = repositoryName();
+    const milestone = verifyMilestone(repository, config.milestone);
+    return await executeMode(
+      {
+        mode,
+        config,
+        repository,
+        milestone,
+        repositoryState,
+        rules,
+        stateStore: activeStateStore,
+      },
+      defaultActions(),
+    );
+  } catch (error) {
+    console.error(`AFK pipeline error: ${error.message}`);
+    throw error;
+  } finally {
+    try {
+      releaseLock?.();
+    } finally {
+      restoreConsole();
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -1898,14 +2814,18 @@ if (isMainModule) {
 
 export {
   alreadyFixedCommitFromAgent,
+  createStateStore,
   createOrReopenReviewIssues,
   executeMode,
   issueBodyWithCompletionState,
+  githubPagedArray,
   issueBodyWithReviewContext,
   issueCompletionState,
+  limitMilestoneReviewFindings,
   normalizeReviewResult,
   reviewFindingMarker,
   reviewFindingFingerprint,
+  run,
   runCodexWithTurnLimit,
   runContinuousLoop,
 };
