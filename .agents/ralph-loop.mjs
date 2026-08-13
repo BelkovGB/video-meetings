@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -511,6 +512,23 @@ function verifyRepository(config, requireClean) {
   return { currentBranch, clean: changes === "" };
 }
 
+function verifyBaseHistory(config) {
+  run("git", ["fetch", "origin", config.baseBranch], { inherit: true });
+  const baseRef = `origin/${config.baseBranch}`;
+  run("git", ["show-ref", "--verify", "--quiet", `refs/remotes/${baseRef}`]);
+  const mergeBase = run("git", ["merge-base", "HEAD", baseRef], {
+    allowFailure: true,
+  });
+  if (mergeBase.status !== 0 || mergeBase.stdout === "") {
+    fail(
+      `Ветка ${config.branch} не имеет общей истории с ${baseRef}. ` +
+        `Исправьте baseBranch до запуска реализации или создания PR.`,
+    );
+  }
+
+  return mergeBase.stdout;
+}
+
 function repositoryName() {
   const repository = parseJson(
     run("gh", ["repo", "view", "--json", "nameWithOwner"]).stdout,
@@ -656,7 +674,7 @@ function formatReviewComment(review) {
 
 async function runIndependentReview(config, repository, issue, commit) {
   if (!config.review.enabled) {
-    return;
+    return { verdict: "pass", summary: "Independent review is disabled.", findings: [] };
   }
 
   if (existsSync(config.review.outputPath)) {
@@ -734,11 +752,6 @@ async function runIndependentReview(config, repository, issue, commit) {
     fail(`Review issue #${issue.number} вернул некорректный результат.`);
   }
 
-  if (review.verdict !== "pass" || review.findings.length > 0) {
-    reopenIssueWithComment(repository, issue, formatReviewComment(review));
-    fail(`Review issue #${issue.number} нашёл ${review.findings.length} замечаний.`);
-  }
-
   const changes = run("git", ["status", "--porcelain"]).stdout;
   if (changes !== "") {
     reopenIssueWithComment(
@@ -749,7 +762,16 @@ async function runIndependentReview(config, repository, issue, commit) {
     fail(`Review issue #${issue.number} изменил рабочее дерево.`);
   }
 
+  if (review.verdict !== "pass" || review.findings.length > 0) {
+    reopenIssueWithComment(repository, issue, formatReviewComment(review));
+    console.log(
+      `Review issue #${issue.number}: FAIL — найдено замечаний: ${review.findings.length}.`,
+    );
+    return review;
+  }
+
   console.log(`Review issue #${issue.number}: PASS — ${review.summary}`);
+  return review;
 }
 
 // -----------------------------------------------------------------------------
@@ -813,6 +835,13 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   }
 
   runConfiguredValidation(config);
+  const changesAfterValidation = run("git", ["status", "--porcelain"]).stdout;
+  if (changesAfterValidation !== changes) {
+    fail(
+      `Issue #${issue.number}: проектные проверки изменили рабочее дерево. ` +
+        "Проверьте generated-файлы перед повторным запуском.",
+    );
+  }
   run("git", ["add", "--all"]);
 
   const stagedDiff = run("git", ["diff", "--cached", "--quiet"], {
@@ -840,8 +869,12 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   }
 
   const commit = run("git", ["rev-parse", "HEAD"]).stdout;
-  await runIndependentReview(config, repository, issue, commit);
+  const review = await runIndependentReview(config, repository, issue, commit);
+  if (review.verdict !== "pass" || review.findings.length > 0) {
+    return { completed: false, commit, review };
+  }
   closeIssue(config, repository, issue, commit);
+  return { completed: true, commit, review };
 }
 
 // -----------------------------------------------------------------------------
@@ -882,7 +915,7 @@ async function runCodex(config, repository, issue, rules) {
     throw error;
   }
 
-  await commitAndCompleteIssue(
+  return commitAndCompleteIssue(
     config,
     repository,
     issue,
@@ -966,6 +999,11 @@ function createPullRequest(config, repository) {
   }
 
   runConfiguredValidation(config);
+  if (run("git", ["status", "--porcelain"]).stdout !== "") {
+    fail(
+      "Нельзя обновить PR: проектные проверки изменили чистое рабочее дерево.",
+    );
+  }
   run("git", ["fetch", "origin", config.baseBranch], { inherit: true });
   const commitCount = Number(
     run("git", [
@@ -1020,7 +1058,7 @@ function milestoneReviewMarker(config, pullRequest) {
   return `<!-- ralph-milestone-review head:${pullRequest.headRefOid} model:${config.milestoneReview.model} -->`;
 }
 
-function milestoneWasReviewed(config, repository, pullRequest) {
+function milestonePassWasPublished(config, repository, pullRequest) {
   const marker = milestoneReviewMarker(config, pullRequest);
   const reviews = parseJson(
     run("gh", [
@@ -1030,9 +1068,13 @@ function milestoneWasReviewed(config, repository, pullRequest) {
     `GitHub reviews for PR #${pullRequest.number}`,
   );
 
-  return reviews.some(
-    (review) => typeof review.body === "string" && review.body.includes(marker),
-  );
+  return reviews.some((review) => {
+    return (
+      typeof review.body === "string" &&
+      review.body.includes(marker) &&
+      review.body.includes("**Verdict:** **PASS**")
+    );
+  });
 }
 
 function formatMilestoneReview(config, milestone, pullRequest, review) {
@@ -1048,6 +1090,11 @@ function formatMilestoneReview(config, milestone, pullRequest, review) {
     : "No actionable findings.";
   const verdict = review.verdict === "pass" ? "PASS" : "FINDINGS";
 
+  const nextStep =
+    review.verdict === "pass"
+      ? "The pull request remains draft so a human can make the final merge decision."
+      : "Ralph Loop will create or reopen one milestone issue per finding, run the implementation loop, push the fixes, and review the new head again.";
+
   return `${milestoneReviewMarker(config, pullRequest)}
 ## Ralph Loop: milestone review
 
@@ -1062,7 +1109,7 @@ ${review.summary}
 
 ${findings}
 
-This is an automated whole-PR review. The pull request remains draft so a human can decide whether to fix the findings or merge later.`;
+${nextStep}`;
 }
 
 function postPullRequestReview(repository, pullRequest, body) {
@@ -1104,14 +1151,22 @@ async function runMilestoneReview(
 ) {
   if (!config.milestoneReview.enabled) {
     console.log("Milestone review выключен в конфиге.");
-    return;
+    return {
+      verdict: "pass",
+      summary: "Milestone review is disabled in config.",
+      findings: [],
+    };
   }
 
-  if (milestoneWasReviewed(config, repository, pullRequest)) {
+  if (milestonePassWasPublished(config, repository, pullRequest)) {
     console.log(
       `Milestone уже проверен моделью ${config.milestoneReview.model} для commit ${pullRequest.headRefOid}.`,
     );
-    return;
+    return {
+      verdict: "pass",
+      summary: "PASS review for this head was already published.",
+      findings: [],
+    };
   }
 
   if (existsSync(config.milestoneReview.outputPath)) {
@@ -1211,6 +1266,194 @@ Report only actionable findings introduced by this PR. Use verdict "fail" when a
   console.log(
     `Milestone review опубликован в ${pullRequest.url}: ${review.verdict.toUpperCase()} (${review.findings.length} findings).`,
   );
+  return review;
+}
+
+// -----------------------------------------------------------------------------
+// Преобразование замечаний milestone-review в GitHub issues
+// -----------------------------------------------------------------------------
+
+function reviewFindingFingerprint(pullRequest, finding) {
+  const normalizedTitle = finding.title
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  const source = [pullRequest.number, finding.severity, finding.file, normalizedTitle].join("\n");
+  return createHash("sha256").update(source).digest("hex").slice(0, 20);
+}
+
+function reviewFindingMarker(pullRequest, finding) {
+  return `<!-- ralph-milestone-finding pr:${pullRequest.number} id:${reviewFindingFingerprint(pullRequest, finding)} -->`;
+}
+
+function milestoneIssues(repository, milestone) {
+  return parseJson(
+    run("gh", [
+      "issue",
+      "list",
+      "--repo",
+      repository,
+      "--milestone",
+      milestone.title,
+      "--state",
+      "all",
+      "--limit",
+      "100",
+      "--json",
+      "number,title,body,state,url",
+    ]).stdout,
+    `GitHub issues for milestone ${milestone.title}`,
+  );
+}
+
+function findingIssueTitle(finding) {
+  const title = `[${finding.severity}] ${finding.title}`.replace(/\s+/g, " ").trim();
+  return title.slice(0, 240);
+}
+
+function findingIssueBody(config, pullRequest, finding) {
+  const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
+  return `${reviewFindingMarker(pullRequest, finding)}
+## Context
+
+**Source:** automated milestone review of PR #${pullRequest.number}
+**Milestone:** ${config.milestone}
+**Reviewed head:** \`${pullRequest.headRefOid}\`
+**Severity:** ${finding.severity}
+**Location:** \`${location}\`
+
+## Finding
+
+${finding.body}
+
+## Definition of done
+
+- Fix the root cause without weakening existing behavior or tests.
+- Add or update regression coverage for the failure path.
+- Run the relevant checks from AGENTS.md and the Ralph configuration.
+- Keep the change focused on this finding; do not create a pull request.
+
+The existing draft PR will be updated and reviewed again after all review findings are resolved.`;
+}
+
+function createReviewFindingIssue(config, repository, milestone, pullRequest, finding) {
+  const issue = parseJson(
+    run("gh", [
+      "api",
+      `repos/${repository}/issues`,
+      "--method",
+      "POST",
+      "-f",
+      `title=${findingIssueTitle(finding)}`,
+      "-f",
+      `body=${findingIssueBody(config, pullRequest, finding)}`,
+      "-F",
+      `milestone=${milestone.number}`,
+    ]).stdout,
+    "GitHub issue creation",
+  );
+  console.log(`Создана issue #${issue.number} из milestone finding: ${issue.html_url}`);
+  return {
+    number: issue.number,
+    title: issue.title,
+    body: issue.body,
+    state: issue.state?.toUpperCase() ?? "OPEN",
+    url: issue.html_url,
+  };
+}
+
+function reopenReviewFindingIssue(repository, issue, pullRequest) {
+  run("gh", ["issue", "reopen", String(issue.number), "--repo", repository]);
+  run("gh", [
+    "issue",
+    "comment",
+    String(issue.number),
+    "--repo",
+    repository,
+    "--body",
+    `The milestone review found this issue again at PR head ${pullRequest.headRefOid}. Reopened for another fix iteration.`,
+  ]);
+  console.log(`Переоткрыта issue #${issue.number}: finding всё ещё присутствует.`);
+}
+
+function updateReviewFindingIssue(config, repository, issue, pullRequest, finding) {
+  run("gh", [
+    "issue",
+    "edit",
+    String(issue.number),
+    "--repo",
+    repository,
+    "--title",
+    findingIssueTitle(finding),
+    "--body",
+    findingIssueBody(config, pullRequest, finding),
+  ]);
+  issue.title = findingIssueTitle(finding);
+  issue.body = findingIssueBody(config, pullRequest, finding);
+}
+
+function createOrReopenReviewIssues(
+  config,
+  repository,
+  milestone,
+  pullRequest,
+  review,
+  dependencies = {
+    milestoneIssues,
+    createReviewFindingIssue,
+    updateReviewFindingIssue,
+    reopenReviewFindingIssue,
+  },
+) {
+  if (review.verdict !== "fail") {
+    return [];
+  }
+  if (review.findings.length === 0) {
+    fail("Milestone review вернул FAIL без findings; задачи исправления создать невозможно.");
+  }
+
+  const existingIssues = dependencies.milestoneIssues(repository, milestone);
+  const queuedIssues = [];
+  const queuedNumbers = new Set();
+  for (const finding of review.findings) {
+    const marker = reviewFindingMarker(pullRequest, finding);
+    let issue = existingIssues.find(
+      (candidate) => typeof candidate.body === "string" && candidate.body.includes(marker),
+    );
+
+    if (!issue) {
+      issue = dependencies.createReviewFindingIssue(
+        config,
+        repository,
+        milestone,
+        pullRequest,
+        finding,
+      );
+      existingIssues.push(issue);
+    } else {
+      dependencies.updateReviewFindingIssue(
+        config,
+        repository,
+        issue,
+        pullRequest,
+        finding,
+      );
+      if (issue.state === "CLOSED") {
+        dependencies.reopenReviewFindingIssue(repository, issue, pullRequest);
+        issue.state = "OPEN";
+      } else {
+        console.log(`Issue #${issue.number} для finding уже открыта; дубликат не создан.`);
+      }
+    }
+
+    if (!queuedNumbers.has(issue.number)) {
+      queuedNumbers.add(issue.number);
+      queuedIssues.push(issue);
+    }
+  }
+
+  return queuedIssues;
 }
 
 // -----------------------------------------------------------------------------
@@ -1249,6 +1492,99 @@ function printCheck(config, repository, milestone, repositoryState, issues) {
 // Главный цикл Ralph Loop: --check, --once и --run
 // -----------------------------------------------------------------------------
 
+async function runContinuousLoop(context, actions) {
+  const { config, repository, milestone, rules } = context;
+  let iteration = 0;
+
+  while (true) {
+    const issues = actions.openIssues(repository, config.milestone);
+    if (issues.length === 0) {
+      const pullRequest = actions.createPullRequest(config, repository);
+      const review = await actions.runMilestoneReview(
+        config,
+        repository,
+        milestone,
+        pullRequest,
+      );
+      if (review.verdict === "pass") {
+        return { verdict: "pass", iterations: iteration, pullRequest };
+      }
+
+      const reviewIssues = actions.createOrReopenReviewIssues(
+        config,
+        repository,
+        milestone,
+        pullRequest,
+        review,
+      );
+      if (reviewIssues.length === 0) {
+        fail("Milestone review завершился с FAIL, но ни одной issue исправления не создано.");
+      }
+      const visibleIssueNumbers = new Set(
+        actions.openIssues(repository, config.milestone).map((issue) => issue.number),
+      );
+      if (!reviewIssues.some((issue) => visibleIssueNumbers.has(issue.number))) {
+        fail(
+          "Issues из milestone-review созданы, но не появились в очереди открытых задач.",
+        );
+      }
+      console.log(
+        `Milestone review создал или переоткрыл ${reviewIssues.length} issues. Ralph продолжает цикл исправлений.`,
+      );
+      continue;
+    }
+
+    if (iteration >= config.maxIterations) {
+      fail(
+        `Достигнут лимит ${config.maxIterations} итераций; осталось открытых issues: ${issues.length}. PR остаётся draft.`,
+      );
+    }
+
+    iteration += 1;
+    console.log(`Итерация ${iteration}/${config.maxIterations}; осталось issues: ${issues.length}.`);
+    await actions.runCodex(config, repository, issues[0], rules);
+  }
+}
+
+async function executeMode(context, actions) {
+  const { mode: selectedMode, config, repository, milestone, repositoryState, rules } = context;
+  const issues = actions.openIssues(repository, config.milestone);
+
+  if (selectedMode === "--check") {
+    actions.printCheck(config, repository, milestone, repositoryState, issues);
+    return { mode: "check", issues: issues.length };
+  }
+
+  if (selectedMode === "--once") {
+    if (!issues[0]) {
+      console.log("Открытых issues нет. Для push и создания PR запустите --run.");
+      return { mode: "once", completed: 0 };
+    }
+    const result = await actions.runCodex(config, repository, issues[0], rules);
+    if (result?.completed === false) {
+      console.log(
+        `Issue #${issues[0].number} осталась открытой после review. Цикл остановлен после одной итерации.`,
+      );
+      return { mode: "once", completed: 0, reviewFailed: true };
+    }
+    console.log(`Issue #${issues[0].number} завершена. Цикл остановлен после одной итерации.`);
+    return { mode: "once", completed: 1 };
+  }
+
+  return runContinuousLoop(context, actions);
+}
+
+function defaultActions() {
+  return {
+    openIssues,
+    printCheck,
+    runCodex,
+    createPullRequest,
+    runMilestoneReview,
+    createOrReopenReviewIssues,
+  };
+}
+
 async function main() {
   // Проверяем, что передан поддерживаемый режим запуска.
   if (!supportedModes.has(mode)) {
@@ -1266,43 +1602,13 @@ async function main() {
   const rules = loadRalphRules(config);
   verifyTools();
   const repositoryState = verifyRepository(config, mode !== "--check");
+  verifyBaseHistory(config);
   const repository = repositoryName();
   const milestone = verifyMilestone(repository, config.milestone);
-  let issues = openIssues(repository, config.milestone);
-
-  if (mode === "--check") {
-    printCheck(config, repository, milestone, repositoryState, issues);
-    return;
-  }
-
-  // Выполняем ровно одну issue без автоматического перехода к следующей.
-  if (mode === "--once") {
-    if (!issues[0]) {
-      console.log("Открытых issues нет. Для push и создания PR запустите --run.");
-      return;
-    }
-    await runCodex(config, repository, issues[0], rules);
-    console.log(`Issue #${issues[0].number} завершена. Цикл остановлен после одной итерации.`);
-    return;
-  }
-
-  // Счётчик итераций: одна итерация соответствует обработке одной issue.
-  for (let iteration = 1; iteration <= config.maxIterations; iteration += 1) {
-    // Перед каждой итерацией заново получаем актуальные открытые issues.
-    issues = openIssues(repository, config.milestone);
-    if (issues.length === 0) {
-      // Все issues закрыты: создаём PR и запускаем итоговое Sol-review.
-      const pullRequest = createPullRequest(config, repository);
-      await runMilestoneReview(config, repository, milestone, pullRequest);
-      return;
-    }
-
-    console.log(`Итерация ${iteration}/${config.maxIterations}; осталось issues: ${issues.length}.`);
-    await runCodex(config, repository, issues[0], rules);
-  }
-
-  // Проверяем общий лимит итераций и не создаём PR при досрочной остановке.
-  fail(`Достигнут лимит ${config.maxIterations} итераций. PR не создан.`);
+  return executeMode(
+    { mode, config, repository, milestone, repositoryState, rules },
+    defaultActions(),
+  );
 }
 
 // -----------------------------------------------------------------------------
@@ -1322,4 +1628,11 @@ if (isMainModule) {
   }
 }
 
-export { runCodexWithTurnLimit };
+export {
+  createOrReopenReviewIssues,
+  executeMode,
+  reviewFindingMarker,
+  reviewFindingFingerprint,
+  runCodexWithTurnLimit,
+  runContinuousLoop,
+};

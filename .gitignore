@@ -17,6 +17,7 @@ apps/web/next-env.d.ts
 .agents/*
 !.agents/RALPH.md
 !.agents/ralph-loop.mjs
+!.agents/ralph-loop.test.mjs
 !.agents/ralph-rules.md
 !.agents/ralph.config.json
 !.agents/review.schema.json
