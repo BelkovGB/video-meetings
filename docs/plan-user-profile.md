@@ -19,15 +19,12 @@ a display name through the API.
 
 **Tasks**:
 
-- [ ] Add API end-to-end tests for reading and updating the current user's
-      profile, display-name validation, unauthenticated access, and attempts to
-      target another user.
-- [ ] Add optional display-name persistence for existing and newly registered
-      users without changing registration requirements.
-- [ ] Expose JWT-protected current-profile read and update operations that return
-      only safe profile fields and keep email read-only.
-- [ ] Apply trimming and the 1–100 Unicode-character rule without overwriting a
-      saved name when validation fails.
+- [ ] Implement the core current-user profile API as one complete TDD slice: add
+      end-to-end coverage; persist an optional display name for existing and new
+      users without changing registration; expose JWT-protected read and update
+      operations that return only safe profile fields and keep email read-only;
+      trim names and enforce the 1–100 Unicode-character rule without
+      overwriting a saved value when validation fails.
 - [ ] Document the profile operations and the resulting Users/Auth module
       boundaries in the API documentation.
 
