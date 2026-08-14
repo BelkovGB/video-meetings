@@ -1,11 +1,16 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { PrismaClient } from '@prisma/client';
+import { createHmac } from 'node:crypto';
+import { resolve } from 'node:path';
+import { loadEnvFile } from 'node:process';
 
 type Session = {
   accessToken: string;
   email: string;
   userId: string;
 };
+
+loadEnvFile(resolve(__dirname, '../../../.env'));
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 const password = 'secure-password-123';
@@ -22,6 +27,27 @@ function getUserId(accessToken: string): string {
   };
 
   return payload.sub;
+}
+
+function createExpiredAccessToken(accessToken: string): string {
+  const [header, encodedPayload] = accessToken.split('.');
+  const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString()) as Record<
+    string,
+    unknown
+  >;
+  const jwtSecret = process.env.JWT_SECRET;
+
+  if (!jwtSecret) {
+    throw new Error('JWT_SECRET is required to create an expired access token');
+  }
+
+  const expiredPayload = Buffer.from(
+    JSON.stringify({ ...payload, exp: Math.floor(Date.now() / 1000) - 60 }),
+  ).toString('base64url');
+  const signingInput = `${header}.${expiredPayload}`;
+  const signature = createHmac('sha256', jwtSecret).update(signingInput).digest('base64url');
+
+  return `${signingInput}.${signature}`;
 }
 
 async function register(request: APIRequestContext, prefix: string): Promise<Session> {
@@ -84,11 +110,18 @@ test('redirects to login without loading profile data when authentication is mis
 
 test('clears an expired session and redirects to login without showing profile data', async ({
   page,
+  request,
 }) => {
-  await page.addInitScript(() => {
-    window.sessionStorage.setItem('accessToken', 'expired.access.token');
-    window.sessionStorage.setItem('userEmail', 'private@example.com');
-  });
+  const session = await register(request, 'expired-profile-session');
+  const expiredAccessToken = createExpiredAccessToken(session.accessToken);
+
+  await page.addInitScript(
+    ({ accessToken }) => {
+      window.sessionStorage.setItem('accessToken', accessToken);
+      window.sessionStorage.setItem('userEmail', 'private@example.com');
+    },
+    { accessToken: expiredAccessToken },
+  );
 
   await page.goto('/profile');
 
