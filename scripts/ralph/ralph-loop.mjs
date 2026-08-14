@@ -129,11 +129,42 @@ function createEnvironment(variableNames, source = process.env) {
 }
 
 function sanitizedChildEnvironment(source = process.env) {
-  return createEnvironment(sanitizedChildEnvironmentVariables, source);
+  return createEnvironment(credentialFreeEnvironmentVariables, source);
 }
 
 function credentialFreeEnvironment(source = process.env) {
   return createEnvironment(credentialFreeEnvironmentVariables, source);
+}
+
+function createSandboxedCodexEnvironment(source = process.env) {
+  const root = mkdtempSync(path.join(tmpdir(), 'ralph-codex-'));
+  const home = path.join(root, 'home');
+  const temp = path.join(root, 'tmp');
+  const config = path.join(root, 'config');
+  const cache = path.join(root, 'cache');
+  const codexHome = path.join(root, 'codex');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(temp, { recursive: true });
+  mkdirSync(config, { recursive: true });
+  mkdirSync(cache, { recursive: true });
+  mkdirSync(codexHome, { recursive: true });
+
+  return {
+    root,
+    env: {
+      ...credentialFreeEnvironment(source),
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: config,
+      LOCALAPPDATA: config,
+      XDG_CONFIG_HOME: config,
+      XDG_CACHE_HOME: cache,
+      CODEX_HOME: codexHome,
+      TEMP: temp,
+      TMP: temp,
+      TMPDIR: temp,
+    },
+  };
 }
 
 function run(name, args, options = {}) {
@@ -293,13 +324,24 @@ function printCodexEvent(event, turn, maxTurns) {
 
 async function runCodexWithTurnLimit(args, options) {
   const { command, commandArgs } = commandSpec('codex', args);
-  const child = spawn(command, commandArgs, {
-    cwd: projectRoot,
-    env: options.env ?? sanitizedChildEnvironment(),
-    stdio: ['pipe', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
-    windowsHide: true,
-  });
+  const childEnvironment = createSandboxedCodexEnvironment(options.env ?? process.env);
+  let child;
+  try {
+    child = spawn(command, commandArgs, {
+      cwd: projectRoot,
+      env: childEnvironment.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    });
+  } catch (error) {
+    rmSync(childEnvironment.root, { recursive: true, force: true });
+    throw error;
+  }
+  const cleanupChildEnvironment = () =>
+    rmSync(childEnvironment.root, { recursive: true, force: true });
+  child.once('error', cleanupChildEnvironment);
+  child.once('close', cleanupChildEnvironment);
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
 
@@ -462,6 +504,18 @@ function resolveProjectFile(file, field) {
 
 function trustedFileHash(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex');
+}
+
+function freezeValidationDockerfile(dockerfilePath) {
+  const snapshotDirectory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-dockerfile-'));
+  const snapshotPath = path.join(snapshotDirectory, 'Dockerfile.validation');
+  try {
+    copyFileSync(dockerfilePath, snapshotPath);
+    return { snapshotDirectory, snapshotPath };
+  } catch (error) {
+    rmSync(snapshotDirectory, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function assertTrustedControlFilesUnchanged(config) {
@@ -629,6 +683,9 @@ function loadConfig() {
   if (lstatSync(config.validationContainer.dockerfilePath).isSymbolicLink()) {
     fail('Dockerfile изоляции валидации не должен быть symbolic link.');
   }
+  const frozenDockerfile = freezeValidationDockerfile(config.validationContainer.dockerfilePath);
+  config.validationContainer.frozenDockerfilePath = frozenDockerfile.snapshotPath;
+  config.validationContainer.frozenDockerfileDirectory = frozenDockerfile.snapshotDirectory;
   config.trustedControlFileHashes = new Map(
     [
       approvedIssueSnapshotsPath,
@@ -2154,10 +2211,10 @@ function validationInputHash(snapshotPath, hash = createHash('sha256'), relative
 
 function validationImageForSnapshot(config, snapshotPath) {
   const inputsHash = validationInputHash(snapshotPath);
-  if (config.validationContainer.dockerfilePath) {
-    inputsHash
-      .update('Dockerfile.validation\0')
-      .update(readFileSync(config.validationContainer.dockerfilePath));
+  const dockerfilePath =
+    config.validationContainer.frozenDockerfilePath ?? config.validationContainer.dockerfilePath;
+  if (dockerfilePath) {
+    inputsHash.update('Dockerfile.validation\0').update(readFileSync(dockerfilePath));
   }
   const inputHash = inputsHash.digest('hex').slice(0, 16);
   const imageRepository = config.validationContainer.image.split('@', 1)[0];
@@ -2166,7 +2223,8 @@ function validationImageForSnapshot(config, snapshotPath) {
 
 function ensureValidationImage(config, snapshotPath, dependencies = {}) {
   const execute = dependencies.run ?? run;
-  const { dockerfilePath } = config.validationContainer;
+  const dockerfilePath =
+    config.validationContainer.frozenDockerfilePath ?? config.validationContainer.dockerfilePath;
   const image = validationImageForSnapshot(config, snapshotPath);
   if (preparedValidationImages.has(image)) return image;
   const existingImage = execute('docker', ['image', 'inspect', image], {
@@ -3035,55 +3093,63 @@ async function main() {
   }
 
   const config = loadConfig();
-
-  // Проверяем, включён ли Ralph Loop.
-  if (!config.active) {
-    console.log('Ralph Loop выключен: active=false.');
-    return;
-  }
-
-  const restoreConsole = initializePersistentLog(runtimeLogPath, {
-    mode,
-    branch: config.branch,
-    milestone: config.milestone,
-  });
-  let releaseLock;
   try {
-    releaseLock = acquireRunLock(runtimeLockPath, {
-      mode,
-      projectRoot,
-      branch: config.branch,
-    });
-    activeStateStore = createStateStore(config, mode);
-    const rules = loadRalphRules(config);
-    verifyTools();
-    const repositoryState = verifyRepository(config, mode !== '--check');
-    if (mode !== '--check') {
-      reconcileStateAfterCrash(config, activeStateStore);
+    // Проверяем, включён ли Ralph Loop.
+    if (!config.active) {
+      console.log('Ralph Loop выключен: active=false.');
+      return;
     }
-    verifyBaseHistory(config);
-    const repository = repositoryName();
-    const milestone = verifyMilestone(repository, config.milestone);
-    return await executeMode(
-      {
-        mode,
-        config,
-        repository,
-        milestone,
-        repositoryState,
-        rules,
-        stateStore: activeStateStore,
-      },
-      defaultActions(),
-    );
-  } catch (error) {
-    console.error(`AFK pipeline error: ${error.message}`);
-    throw error;
-  } finally {
+
+    const restoreConsole = initializePersistentLog(runtimeLogPath, {
+      mode,
+      branch: config.branch,
+      milestone: config.milestone,
+    });
+    let releaseLock;
     try {
-      releaseLock?.();
+      releaseLock = acquireRunLock(runtimeLockPath, {
+        mode,
+        projectRoot,
+        branch: config.branch,
+      });
+      activeStateStore = createStateStore(config, mode);
+      const rules = loadRalphRules(config);
+      verifyTools();
+      const repositoryState = verifyRepository(config, mode !== '--check');
+      if (mode !== '--check') {
+        reconcileStateAfterCrash(config, activeStateStore);
+      }
+      verifyBaseHistory(config);
+      const repository = repositoryName();
+      const milestone = verifyMilestone(repository, config.milestone);
+      return await executeMode(
+        {
+          mode,
+          config,
+          repository,
+          milestone,
+          repositoryState,
+          rules,
+          stateStore: activeStateStore,
+        },
+        defaultActions(),
+      );
+    } catch (error) {
+      console.error(`AFK pipeline error: ${error.message}`);
+      throw error;
     } finally {
-      restoreConsole();
+      try {
+        releaseLock?.();
+      } finally {
+        restoreConsole();
+      }
+    }
+  } finally {
+    if (config.validationContainer.frozenDockerfileDirectory) {
+      rmSync(config.validationContainer.frozenDockerfileDirectory, {
+        recursive: true,
+        force: true,
+      });
     }
   }
 }

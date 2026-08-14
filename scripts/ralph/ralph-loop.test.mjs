@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   assertTrustedIssue,
@@ -101,6 +102,15 @@ test('Ralph configuration pins approved AFK inputs before starting an agent sess
     /[\\/]scripts[\\/]ralph[\\/]Dockerfile\.validation$/,
   );
   assert.equal(existsSync(config.validationContainer.dockerfilePath), true);
+  assert.match(config.validationContainer.frozenDockerfilePath, /ralph-validation-dockerfile-/);
+  assert.notEqual(
+    config.validationContainer.frozenDockerfilePath,
+    config.validationContainer.dockerfilePath,
+  );
+  assert.equal(
+    readFileSync(config.validationContainer.frozenDockerfilePath, 'utf8'),
+    readFileSync(config.validationContainer.dockerfilePath, 'utf8'),
+  );
 });
 
 test('Ralph rejects a modified approved snapshot ledger before an AFK session starts', () => {
@@ -232,6 +242,70 @@ test('validation image cache hit returns the existing image without rebuilding i
     assert.deepEqual(calls, [['docker', ['image', 'inspect', expectedImage]]]);
   } finally {
     rmSync(snapshot, { recursive: true, force: true });
+  }
+});
+
+test('validation image build uses frozen trusted inputs and ignores injected lifecycle hooks', () => {
+  const packagePath = new URL('../../package.json', import.meta.url);
+  const dockerfilePath = new URL('./Dockerfile.validation', import.meta.url);
+  const originalPackage = readFileSync(packagePath, 'utf8');
+  const originalDockerfile = readFileSync(dockerfilePath, 'utf8');
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-frozen-inputs-'));
+  const frozenDockerfilePath = path.join(directory, 'Dockerfile.validation');
+  const lifecycleMarkerPath = path.join(directory, 'lifecycle-ran');
+  let snapshot;
+
+  try {
+    writeFileSync(frozenDockerfilePath, originalDockerfile, 'utf8');
+    const packageJson = JSON.parse(originalPackage);
+    packageJson.scripts = {
+      ...packageJson.scripts,
+      postinstall: `write ${lifecycleMarkerPath}`,
+    };
+    writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
+    writeFileSync(
+      dockerfilePath,
+      `${originalDockerfile}\nRUN touch /tmp/attacker-controlled\n`,
+      'utf8',
+    );
+    snapshot = createTrustedValidationDependencySnapshot();
+
+    const image = ensureValidationImage(
+      {
+        runtime: { validationTimeoutMs: 5_000 },
+        validationContainer: {
+          image: `ralph-validation:frozen-${Date.now()}`,
+          dockerfilePath: fileURLToPath(dockerfilePath),
+          frozenDockerfilePath,
+        },
+      },
+      snapshot,
+      {
+        run: (command, args) => {
+          assert.equal(command, 'docker');
+          if (args[0] === 'image') return { status: 1, stdout: '' };
+
+          assert.equal(args[0], 'build');
+          assert.equal(args[args.indexOf('--file') + 1], frozenDockerfilePath);
+          assert.equal(readFileSync(frozenDockerfilePath, 'utf8'), originalDockerfile);
+          const buildPackage = JSON.parse(
+            readFileSync(path.join(snapshot, 'package.json'), 'utf8'),
+          );
+          if (buildPackage.scripts?.postinstall?.includes(lifecycleMarkerPath)) {
+            writeFileSync(lifecycleMarkerPath, 'ran', 'utf8');
+          }
+          return { status: 0, stdout: '' };
+        },
+      },
+    );
+
+    assert.match(image, /^ralph-validation:frozen-[0-9]+-inputs-[a-f0-9]{16}$/);
+    assert.equal(existsSync(lifecycleMarkerPath), false);
+  } finally {
+    if (snapshot) rmSync(snapshot, { recursive: true, force: true });
+    writeFileSync(packagePath, originalPackage, 'utf8');
+    writeFileSync(dockerfilePath, originalDockerfile, 'utf8');
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -537,6 +611,11 @@ test('child environments remove inherited credentials before untrusted work runs
   const source = {
     PATH: process.env.PATH ?? '',
     HOME: 'C:\\Users\\agent',
+    USERPROFILE: 'C:\\Users\\agent',
+    APPDATA: 'C:\\Users\\agent\\AppData\\Roaming',
+    LOCALAPPDATA: 'C:\\Users\\agent\\AppData\\Local',
+    XDG_CONFIG_HOME: 'C:\\Users\\agent\\.config',
+    XDG_CACHE_HOME: 'C:\\Users\\agent\\.cache',
     CODEX_HOME: 'C:\\Users\\agent\\.codex',
     GH_TOKEN: 'github-secret',
     GITHUB_TOKEN: 'github-actions-secret',
@@ -545,11 +624,7 @@ test('child environments remove inherited credentials before untrusted work runs
   };
 
   assert.deepEqual(credentialFreeEnvironment(source), { PATH: source.PATH });
-  assert.deepEqual(sanitizedChildEnvironment(source), {
-    PATH: source.PATH,
-    HOME: source.HOME,
-    CODEX_HOME: source.CODEX_HOME,
-  });
+  assert.deepEqual(sanitizedChildEnvironment(source), { PATH: source.PATH });
 
   const originalGhToken = process.env.GH_TOKEN;
   const originalJwtSecret = process.env.JWT_SECRET;
@@ -571,7 +646,17 @@ process.stdout.write(JSON.stringify({
   item: {
     id: 'environment',
     type: 'agent_message',
-    text: JSON.stringify({ ghToken: process.env.GH_TOKEN, jwtSecret: process.env.JWT_SECRET }),
+    text: JSON.stringify({
+      ghToken: process.env.GH_TOKEN,
+      jwtSecret: process.env.JWT_SECRET,
+      home: process.env.HOME,
+      userProfile: process.env.USERPROFILE,
+      appData: process.env.APPDATA,
+      localAppData: process.env.LOCALAPPDATA,
+      xdgConfigHome: process.env.XDG_CONFIG_HOME,
+      xdgCacheHome: process.env.XDG_CACHE_HOME,
+      codexHome: process.env.CODEX_HOME,
+    }),
   },
 }) + '\\n');
 `,
@@ -582,7 +667,21 @@ process.stdout.write(JSON.stringify({
           maxTurns: 1,
           timeoutMs: 5_000,
         });
-        assert.deepEqual(JSON.parse(result.lastAgentMessage), {});
+        const childEnvironment = JSON.parse(result.lastAgentMessage);
+        assert.equal(childEnvironment.ghToken, undefined);
+        assert.equal(childEnvironment.jwtSecret, undefined);
+        for (const [key, value] of Object.entries({
+          home: source.HOME,
+          userProfile: source.USERPROFILE,
+          appData: source.APPDATA,
+          localAppData: source.LOCALAPPDATA,
+          xdgConfigHome: source.XDG_CONFIG_HOME,
+          xdgCacheHome: source.XDG_CACHE_HOME,
+          codexHome: source.CODEX_HOME,
+        })) {
+          assert.notEqual(childEnvironment[key], value);
+          assert.match(childEnvironment[key], /ralph-codex-/);
+        }
       },
     );
   } finally {
