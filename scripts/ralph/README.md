@@ -17,6 +17,7 @@ credential helpers are never available to generated scripts.
 
 The dependency image generates Prisma Client while network access is available
 and then proves that client regeneration and migrations succeed with networking
-disabled. Runtime validations mount the reviewed source snapshot, reuse that
-pinned client and Linux engine, and build both workspaces without downloading
+disabled. Runtime validations mount the reviewed source snapshot, initialize a
+disposable Git repository without host metadata or credentials, reuse the pinned
+client and Linux engine, and build both workspaces without downloading
 binaries from mutable product scripts.

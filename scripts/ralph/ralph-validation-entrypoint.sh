@@ -7,6 +7,13 @@ if [ "$#" -lt 1 ]; then
 fi
 
 cp -R /source/. /workspace/
+cd /workspace
+git init --quiet
+git config user.name "Ralph Validation"
+git config user.email "ralph-validation@invalid"
+git add --all
+git commit --quiet --message "validation snapshot"
+
 cp -R /opt/ralph-dependencies/node_modules /workspace/
 cp /workspace/.env.example /workspace/.env
 
@@ -26,7 +33,6 @@ trap 'pg_ctl --pgdata="$PGDATA" --wait stop >/dev/null 2>&1 || true' EXIT
 psql --dbname=postgres --command 'CREATE ROLE video_meetings LOGIN;' >/dev/null
 psql --dbname=postgres --command 'CREATE DATABASE video_meetings OWNER video_meetings;' >/dev/null
 
-cd /workspace
 for script in "$@"; do
   npm run "$script"
 done

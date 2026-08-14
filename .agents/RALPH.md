@@ -24,9 +24,10 @@ Codex не использует Claude Code `Stop` hook. В этом проек�
 
 Перед автономной работой Ralph выполняет scripts из `preflightScripts` в
 отдельных непривилегированных validation-контейнерах без сети и host credentials.
-Контейнер сам запускает временный PostgreSQL; `db:ready` сохраняется как
-healthcheck-контракт через безопасный Docker shim, а `db:migrate` применяет уже
-существующие Prisma migrations. Prisma Client и Linux engine заранее создаются
+Контейнер сам запускает временный PostgreSQL и создаёт одноразовый локальный
+Git-репозиторий из проверяемого snapshot без host metadata или credentials;
+`db:ready` сохраняется как healthcheck-контракт через безопасный Docker shim, а
+`db:migrate` применяет уже существующие Prisma migrations. Prisma Client и Linux engine заранее создаются
 при сборке образа, после чего образ без сети повторно генерирует client и
 применяет migrations. Полная сборка выполняется позднее с проверяемым снимком
 исходников в таком же контейнере без сети. Если окружение не готово, разработка

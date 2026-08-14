@@ -387,6 +387,8 @@ test('validation image provisions the configured database from a pinned Dockerfi
     /RUN --network=none cp \.env\.example \.env[\s\S]+npm run prisma:generate --workspace @video-meetings\/api[\s\S]+\/usr\/local\/bin\/ralph-validation db:migrate/,
   );
   assert.match(entrypoint, /cp -R \/opt\/ralph-dependencies\/node_modules \/workspace\//);
+  assert.match(entrypoint, /git init --quiet/);
+  assert.match(entrypoint, /git commit --quiet --message "validation snapshot"/);
   assert.doesNotMatch(entrypoint, /npm ci/);
   assert.match(entrypoint, /unix_socket_directories=\/tmp/);
   assert.match(entrypoint, /cat "\$PGLOG" >&2/);
