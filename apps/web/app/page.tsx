@@ -117,6 +117,8 @@ export default function DashboardPage() {
     const email = sessionStorage.getItem('userEmail') ?? getEmailFromToken(token);
     const displayName = sessionStorage.getItem('userDisplayName')?.trim();
     setIdentity(displayName || email);
+    let isDashboardActive = true;
+    const currentUserRequest = new AbortController();
 
     const clearSessionAndRedirectToLogin = () => {
       sessionStorage.removeItem('accessToken');
@@ -129,7 +131,12 @@ export default function DashboardPage() {
       try {
         const response = await fetch(`${apiUrl}/users/me`, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: currentUserRequest.signal,
         });
+
+        if (!isDashboardActive) {
+          return;
+        }
 
         if (response.status === 401) {
           clearSessionAndRedirectToLogin();
@@ -141,6 +148,9 @@ export default function DashboardPage() {
         }
 
         const profile = (await response.json()) as CurrentUserProfile;
+        if (!isDashboardActive) {
+          return;
+        }
         const savedDisplayName = profile.displayName?.trim();
 
         if (savedDisplayName) {
@@ -180,6 +190,11 @@ export default function DashboardPage() {
 
     void hydrateCurrentUserIdentity();
     void loadMeetings();
+
+    return () => {
+      isDashboardActive = false;
+      currentUserRequest.abort();
+    };
   }, [loadAttempts, router]);
 
   const retryLoadingMeetings = () => {

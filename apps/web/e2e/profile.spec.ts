@@ -170,6 +170,65 @@ test('synchronizes the saved display name with the dashboard identity and keeps 
   );
 });
 
+test('does not let stale dashboard hydration overwrite a newly saved display name', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-stale-identity-sync');
+  let releaseStaleDashboardResponse: (() => void) | undefined;
+  const staleDashboardResponse = new Promise<void>((resolve) => {
+    releaseStaleDashboardResponse = resolve;
+  });
+  let isFirstProfileRequest = true;
+  let failNextDashboardHydration = false;
+
+  await page.route('**/users/me', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+
+    if (isFirstProfileRequest) {
+      isFirstProfileRequest = false;
+      await staleDashboardResponse;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ email: session.email, displayName: null }),
+      });
+      return;
+    }
+
+    if (failNextDashboardHydration) {
+      await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' });
+      return;
+    }
+
+    await route.continue();
+  });
+  await authenticate(page, session);
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText(
+    session.email,
+  );
+  await page.getByRole('link', { name: 'Открыть профиль' }).click();
+
+  const displayNameInput = page.getByLabel('Отображаемое имя');
+  await displayNameInput.fill('Мария');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+  await expect(page.locator('#display-name-status')).toHaveText('Имя «Мария» сохранено.');
+
+  releaseStaleDashboardResponse?.();
+  await expect(page.evaluate(() => window.sessionStorage.getItem('userDisplayName'))).resolves.toBe(
+    'Мария',
+  );
+
+  failNextDashboardHydration = true;
+  await page.getByRole('link', { name: 'К встречам' }).click();
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText('Мария');
+});
+
 test('hydrates a previously saved display name after a new login', async ({ page, request }) => {
   const session = await register(request, 'profile-login-identity');
   await prisma.user.update({ where: { id: session.userId }, data: { displayName: 'Нина' } });
