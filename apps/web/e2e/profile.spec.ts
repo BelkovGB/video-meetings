@@ -76,7 +76,7 @@ test.afterAll(async () => {
   await prisma.$disconnect();
 });
 
-test('opens the profile from the account and shows the current safe details', async ({
+test('manages the display name while preserving saved profile details', async ({
   page,
   request,
 }) => {
@@ -89,13 +89,56 @@ test('opens the profile from the account and shows the current safe details', as
 
   await expect(page).toHaveURL('/profile');
   await expect(page.getByRole('heading', { name: 'Профиль' })).toBeVisible();
-  await expect(page.getByLabel('Ваши данные').getByText('Алексей', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Отображаемое имя')).toHaveValue('Алексей');
   await expect(page.getByLabel('Email')).toHaveText(session.email);
   await expect(page.getByRole('button', { name: /изменить email/i })).toHaveCount(0);
 
   const meetingsLink = page.getByRole('link', { name: 'К встречам' });
   await meetingsLink.focus();
   await expect(meetingsLink).toBeFocused();
+  const displayNameInput = page.getByLabel('Отображаемое имя');
+  await displayNameInput.fill('   ');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+
+  await expect(page.locator('#display-name-error')).toHaveText('Введите имя от 1 до 100 символов.');
+  await expect(displayNameInput).toBeFocused();
+  await expect(page.getByText('Алексей', { exact: true })).toHaveCount(1);
+
+  await displayNameInput.fill('x'.repeat(101));
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+  await expect(page.locator('#display-name-error')).toHaveText('Введите имя от 1 до 100 символов.');
+  await expect(page.getByText('Алексей', { exact: true })).toHaveCount(1);
+
+  await page.route('**/users/me', async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.continue();
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Имя отклонено сервером.' }),
+    });
+  });
+
+  await displayNameInput.fill('Отклонённое имя');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+  await expect(page.getByRole('button', { name: 'Сохраняем имя…' })).toBeDisabled();
+  await expect(displayNameInput).toBeDisabled();
+  await expect(page.locator('#display-name-error')).toHaveText('Имя отклонено сервером.');
+  await expect(displayNameInput).toBeFocused();
+  await expect(page.getByText('Алексей', { exact: true })).toHaveCount(1);
+
+  await page.unroute('**/users/me');
+  await displayNameInput.fill('  Новое имя  ');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+
+  await expect(page.locator('#display-name-status')).toHaveText('Имя «Новое имя» сохранено.');
+  await expect(page.locator('#display-name-status')).toBeFocused();
+  await expect(displayNameInput).toHaveValue('Новое имя');
+  await expect(page.getByText('Новое имя', { exact: true })).toHaveCount(1);
 });
 
 test('redirects to login without loading profile data when authentication is missing', async ({
