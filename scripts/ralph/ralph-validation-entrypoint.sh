@@ -34,5 +34,9 @@ psql --dbname=postgres --command 'CREATE ROLE video_meetings LOGIN;' >/dev/null
 psql --dbname=postgres --command 'CREATE DATABASE video_meetings OWNER video_meetings;' >/dev/null
 
 for script in "$@"; do
-  npm run "$script"
+  if [ "$script" = "test:e2e:web" ]; then
+    CI=1 npm run "$script"
+  else
+    npm run "$script"
+  fi
 done

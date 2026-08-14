@@ -389,6 +389,7 @@ test('validation image provisions the configured database from a pinned Dockerfi
   assert.match(entrypoint, /cp -R \/opt\/ralph-dependencies\/node_modules \/workspace\//);
   assert.match(entrypoint, /git init --quiet/);
   assert.match(entrypoint, /git commit --quiet --message "validation snapshot"/);
+  assert.match(entrypoint, /CI=1 npm run "\$script"/);
   assert.doesNotMatch(entrypoint, /npm ci/);
   assert.match(entrypoint, /unix_socket_directories=\/tmp/);
   assert.match(entrypoint, /cat "\$PGLOG" >&2/);

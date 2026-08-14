@@ -20,4 +20,6 @@ and then proves that client regeneration and migrations succeed with networking
 disabled. Runtime validations mount the reviewed source snapshot, initialize a
 disposable Git repository without host metadata or credentials, reuse the pinned
 client and Linux engine, and build both workspaces without downloading
-binaries from mutable product scripts.
+binaries from mutable product scripts. Web E2E runs in Playwright CI mode with
+one worker and retries so the constrained container does not overload the Next.js
+development server.
