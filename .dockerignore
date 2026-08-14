@@ -1,0 +1,11 @@
+.git
+node_modules
+.env
+.env.*
+!.env.example
+.next
+dist
+coverage
+apps/api/var
+apps/web/test-results
+apps/web/playwright-report

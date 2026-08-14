@@ -3,6 +3,9 @@ node_modules/
 .next/
 dist/
 coverage/
+/var/
+apps/api/var/
+/screenshot
 
 # Environment and local tooling
 .env*
@@ -10,3 +13,14 @@ coverage/
 .DS_Store
 *.log
 *.tsbuildinfo
+apps/web/next-env.d.ts
+.agents/*
+!.agents/RALPH.md
+!.agents/ralph-loop.mjs
+!.agents/ralph-rules.md
+!.agents/ralph.config.json
+!.agents/review.schema.json
+.playwright-mcp/
+.playwright-cli/
+apps/web/test-results/
+apps/web/playwright-report/

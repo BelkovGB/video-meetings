@@ -9,7 +9,15 @@
     "dev": "concurrently -n web,api -c cyan,green \"npm run dev --workspace @video-meetings/web\" \"npm run dev --workspace @video-meetings/api\"",
     "build": "npm run build --workspaces --if-present",
     "start": "concurrently -n web,api -c cyan,green \"npm run start --workspace @video-meetings/web\" \"npm run start --workspace @video-meetings/api\"",
+    "db:up": "docker compose up -d postgres",
+    "db:ready": "docker compose up -d --wait --wait-timeout 120 postgres",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
+    "db:migrate": "npm run prisma --workspace @video-meetings/api -- migrate deploy --schema ./prisma/schema.prisma",
     "lint": "npm run lint --workspaces --if-present",
+    "test:e2e:api": "npm run test:e2e --workspace @video-meetings/api",
+    "test:e2e:web": "npm run test:e2e --workspace @video-meetings/web",
+    "test:ralph": "node --test scripts/ralph/ralph-loop.test.mjs scripts/ralph/ralph-runtime.test.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepare": "husky"
@@ -23,6 +31,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^17.3.0",
     "prettier": "^3.9.6",
+    "typescript": "5.9.3",
     "typescript-eslint": "^8.65.0"
   },
   "engines": {
