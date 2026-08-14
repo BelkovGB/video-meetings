@@ -2400,7 +2400,6 @@ function validationContainerRunArgs(config, scripts, snapshotPath) {
     '--env',
     'HOME=/tmp',
     config.validationContainer.image,
-    'ralph-validation',
     ...scriptList,
   ];
 }

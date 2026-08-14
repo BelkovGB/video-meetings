@@ -1088,7 +1088,7 @@ test('validation containers use a constrained workspace and a disabled network',
     args.includes('type=bind,source=C:\\workspace\\validation-snapshot,target=/source,readonly'),
   );
   assert.ok(args.includes('ralph-validation:test'));
-  assert.deepEqual(args.slice(-2), ['ralph-validation', 'test:ralph']);
+  assert.deepEqual(args.slice(-2), ['ralph-validation:test', 'test:ralph']);
 });
 
 test('child environments remove inherited credentials before untrusted work runs', async () => {
