@@ -40,7 +40,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..', '..');
 const configPath = path.join(projectRoot, '.agents', 'ralph.config.json');
 const approvedIssueSnapshotsHash =
-  'c0e278f489ab9e9b20c7d21232b9bb50e1e268eed0ba338966091da84777701e';
+  'd9deffd06e73d40bd0c2f0db3411d836300d34b74dd9be505fc1c4cac829fdc3';
 const mode = process.argv[2] ?? '--check';
 const supportedModes = new Set(['--check', '--once', '--run']);
 const runtimeDirectory = path.join(projectRoot, '.git', 'ralph-loop');
@@ -1550,9 +1550,15 @@ function issueContentHash(issue) {
     .digest('hex');
 }
 
+function rejectUntrustedIssue(message) {
+  const error = new Error(message);
+  error.code = 'RALPH_UNTRUSTED_ISSUE';
+  throw error;
+}
+
 function assertTrustedIssue(config, issue, repository) {
   if (isRalphInfrastructureIssue(issue)) {
-    fail(
+    rejectUntrustedIssue(
       `Issue #${issue.number} относится к Ralph-инфраструктуре. ` +
         'Ralph выполняет только продуктовые задачи video-meetings; настройка цикла выполняется вручную.',
     );
@@ -1565,14 +1571,14 @@ function assertTrustedIssue(config, issue, repository) {
       .map((trustedAuthor) => trustedAuthor.toLowerCase()),
   );
   if (!trustedAuthors.has(author.toLowerCase())) {
-    fail(
+    rejectUntrustedIssue(
       `Issue #${issue.number} authored by "${author || 'unknown'}" is not trusted. ` +
         'Only the repository owner or authors configured in trustedIssueAuthors may provide AFK instructions.',
     );
   }
   const snapshot = config.approvedIssueSnapshots?.[String(issue.number)];
   if (!snapshot) {
-    fail(
+    rejectUntrustedIssue(
       `Issue #${issue.number} has no approved immutable snapshot. ` +
         'Add its exact title and body to approvedIssueSnapshots before AFK execution.',
     );
@@ -1582,7 +1588,7 @@ function assertTrustedIssue(config, issue, repository) {
     body: issueBodyWithoutRalphMetadata(issue),
   };
   if (issueContentHash(issueAuthoredContent) !== issueContentHash(snapshot)) {
-    fail(
+    rejectUntrustedIssue(
       `Issue #${issue.number} does not match the approved immutable snapshot. ` +
         'Its mutable GitHub title or body changed after approval; review and explicitly update the snapshot.',
     );
@@ -3423,7 +3429,9 @@ async function runContinuousLoop(context, actions) {
     } catch (error) {
       if (
         needsDevelopmentIteration &&
-        ['RALPH_CODEX_AUTH', 'RALPH_AGENT_WRITE_ACCESS'].includes(error.code)
+        ['RALPH_CODEX_AUTH', 'RALPH_AGENT_WRITE_ACCESS', 'RALPH_UNTRUSTED_ISSUE'].includes(
+          error.code,
+        )
       ) {
         iteration = stateStore?.releaseIteration() ?? Math.max(0, iteration - 1);
       }
@@ -3471,7 +3479,20 @@ async function executeMode(context, actions) {
       fail(`Достигнут лимит ${config.maxIterations} итераций.`);
     }
     if (needsDevelopmentIteration) context.stateStore?.reserveIteration();
-    const result = await actions.runCodex(config, repository, issues[0], rules);
+    let result;
+    try {
+      result = await actions.runCodex(config, repository, issues[0], rules);
+    } catch (error) {
+      if (
+        needsDevelopmentIteration &&
+        ['RALPH_CODEX_AUTH', 'RALPH_AGENT_WRITE_ACCESS', 'RALPH_UNTRUSTED_ISSUE'].includes(
+          error.code,
+        )
+      ) {
+        context.stateStore?.releaseIteration();
+      }
+      throw error;
+    }
     if (result?.completed === false) {
       console.log(
         `Issue #${issues[0].number} осталась открытой после review. Цикл остановлен после одной итерации.`,

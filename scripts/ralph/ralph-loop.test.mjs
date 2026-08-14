@@ -1785,6 +1785,48 @@ test('continuous loop refunds an iteration when the agent cannot write the works
   assert.equal(stateStore.iterationsUsed, 0);
 });
 
+test('continuous loop refunds an iteration when issue approval fails before development', async () => {
+  const stateStore = persistentState();
+  const approvalError = new Error('missing immutable snapshot');
+  approvalError.code = 'RALPH_UNTRUSTED_ISSUE';
+
+  await assert.rejects(
+    runContinuousLoop(
+      context({ stateStore }),
+      actions({
+        openIssues: () => [{ number: 26, title: 'Unapproved product issue' }],
+        runCodex: async () => {
+          throw approvalError;
+        },
+      }),
+    ),
+    (error) => error.code === 'RALPH_UNTRUSTED_ISSUE',
+  );
+
+  assert.equal(stateStore.iterationsUsed, 0);
+});
+
+test('once mode refunds an iteration when issue approval fails before development', async () => {
+  const stateStore = persistentState();
+  const approvalError = new Error('missing immutable snapshot');
+  approvalError.code = 'RALPH_UNTRUSTED_ISSUE';
+
+  await assert.rejects(
+    executeMode(
+      context({ mode: '--once', stateStore }),
+      actions({
+        openIssues: () => [{ number: 26, title: 'Unapproved product issue' }],
+        runCodex: async () => {
+          throw approvalError;
+        },
+      }),
+    ),
+    (error) => error.code === 'RALPH_UNTRUSTED_ISSUE',
+  );
+
+  assert.equal(stateStore.iterationsUsed, 0);
+});
+
 test('continuous loop prioritizes a persisted recovery issue over a lower issue number', async () => {
   const stateStore = persistentState({
     issue: {
