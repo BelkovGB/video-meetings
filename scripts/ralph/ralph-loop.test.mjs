@@ -32,6 +32,7 @@ import {
   runContinuousLoop,
   sanitizedChildEnvironment,
   validationContainerRunArgs,
+  validationImageForSnapshot,
 } from './ralph-loop.mjs';
 
 test('only an approved immutable issue snapshot can supply an AFK implementation prompt', () => {
@@ -107,6 +108,29 @@ test('validation image provisions the configured database and preinstalls Prisma
   assert.doesNotMatch(entrypoint, /npm ci/);
   assert.match(entrypoint, /CREATE ROLE video_meetings LOGIN/);
   assert.match(entrypoint, /CREATE DATABASE video_meetings OWNER video_meetings/);
+});
+
+test('validation image cache is invalidated when the workspace lockfile changes', () => {
+  const firstSnapshot = mkdtempSync(path.join(tmpdir(), 'ralph-validation-lock-first-'));
+  const secondSnapshot = mkdtempSync(path.join(tmpdir(), 'ralph-validation-lock-second-'));
+  const config = { validationContainer: { image: 'ralph-validation:test' } };
+
+  try {
+    writeFileSync(path.join(firstSnapshot, 'package-lock.json'), '{"lockfileVersion":3}\n');
+    writeFileSync(
+      path.join(secondSnapshot, 'package-lock.json'),
+      '{"lockfileVersion":3,"packages":{}}\n',
+    );
+
+    const firstImage = validationImageForSnapshot(config, firstSnapshot);
+    const secondImage = validationImageForSnapshot(config, secondSnapshot);
+
+    assert.match(firstImage, /^ralph-validation:test-lock-[a-f0-9]{16}$/);
+    assert.notEqual(firstImage, secondImage);
+  } finally {
+    rmSync(firstSnapshot, { recursive: true, force: true });
+    rmSync(secondSnapshot, { recursive: true, force: true });
+  }
 });
 
 test('implementation prompt delegates full validation to the outer orchestrator', () => {

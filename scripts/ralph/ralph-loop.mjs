@@ -2056,9 +2056,17 @@ function createValidationWorkspaceSnapshot() {
   }
 }
 
-function ensureValidationImage(config) {
-  const { image, dockerfilePath } = config.validationContainer;
-  if (preparedValidationImages.has(image)) return;
+function validationImageForSnapshot(config, snapshotPath) {
+  const lockfile = readFileSync(path.join(snapshotPath, 'package-lock.json'));
+  const lockfileHash = createHash('sha256').update(lockfile).digest('hex').slice(0, 16);
+  const imageRepository = config.validationContainer.image.split('@', 1)[0];
+  return `${imageRepository}-lock-${lockfileHash}`;
+}
+
+function ensureValidationImage(config, snapshotPath) {
+  const { dockerfilePath } = config.validationContainer;
+  const image = validationImageForSnapshot(config, snapshotPath);
+  if (preparedValidationImages.has(image)) return image;
   const existingImage = run('docker', ['image', 'inspect', image], {
     allowFailure: true,
     allowedExitCodes: [1],
@@ -2071,34 +2079,37 @@ function ensureValidationImage(config) {
   if (existingImage.status !== 1) {
     fail(`Не удалось проверить образ изоляции валидации ${image}.`);
   }
-  if (run('git', ['status', '--porcelain']).stdout !== '') {
-    fail(
-      `Нельзя собрать отсутствующий образ изоляции ${image} из незакоммиченного дерева. ` +
-        'Восстановите доверенный образ до продолжения AFK recovery.',
-    );
-  }
   console.log(`\n=== Validation isolation: docker build ${image} ===\n`);
-  run('docker', ['build', '--file', dockerfilePath, '--tag', image, projectRoot], {
+  run('docker', ['build', '--file', dockerfilePath, '--tag', image, snapshotPath], {
     echoOutput: true,
     timeoutMs: config.runtime.validationTimeoutMs,
     env: credentialFreeEnvironment(),
   });
   preparedValidationImages.add(image);
+  return image;
 }
 
 function runConfiguredScripts(config, scripts, label, { includePreflight = true } = {}) {
   if (scripts.length === 0) return;
-  ensureValidationImage(config);
   for (const script of scripts) {
     const snapshotPath = createValidationWorkspaceSnapshot();
     console.log(`\n=== ${label}: isolated npm run ${script} ===\n`);
     try {
       const isolatedScripts = includePreflight ? [...config.preflightScripts, script] : [script];
-      run('docker', validationContainerRunArgs(config, isolatedScripts, snapshotPath), {
-        echoOutput: true,
-        timeoutMs: config.runtime.validationTimeoutMs,
-        env: credentialFreeEnvironment(),
-      });
+      const image = ensureValidationImage(config, snapshotPath);
+      run(
+        'docker',
+        validationContainerRunArgs(
+          { ...config, validationContainer: { ...config.validationContainer, image } },
+          isolatedScripts,
+          snapshotPath,
+        ),
+        {
+          echoOutput: true,
+          timeoutMs: config.runtime.validationTimeoutMs,
+          env: credentialFreeEnvironment(),
+        },
+      );
     } catch (error) {
       error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
       error.script = script;
@@ -3021,4 +3032,5 @@ export {
   runContinuousLoop,
   sanitizedChildEnvironment,
   validationContainerRunArgs,
+  validationImageForSnapshot,
 };
