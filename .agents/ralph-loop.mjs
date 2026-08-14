@@ -1017,6 +1017,7 @@ function openIssues(repository, milestone) {
       title: issue.title,
       body: issue.body,
       url: issue.html_url,
+      updatedAt: issue.updated_at,
     }))
     .sort((left, right) => left.number - right.number);
 }
@@ -1052,6 +1053,26 @@ function renderPrompt(config, issue, rules) {
   return `${prompt}\n\n## Текущая issue\n\n- Number: #${issue.number}\n- Title: ${issue.title}\n- URL: ${issue.url}\n\n### Body и критерии готовности\n\n${issueBody}\n\n---\n\n${renderedRules}`;
 }
 
+function buildIndependentReviewPrompt(issue, commit) {
+  const issueBody = issue.body?.trim() || "(empty)";
+
+  return `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; inspect it as evidence, but verify that the current HEAD still satisfies the issue and has not regressed it.
+
+Issue body:
+${issueBody}
+
+Complete the entire audit before deciding the verdict. Do not stop after the first problem. Return every distinct, actionable finding you can substantiate in this single response, without duplicates and without inventing findings to fill a quota.
+
+Audit all of these areas:
+- every requirement and definition-of-done item from the issue body;
+- correctness, edge cases, regressions, security, and test coverage;
+- interactions between all files changed for the issue, not only the most obvious file;
+- public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant;
+- whether tests assert the real externally observable behavior rather than only an implementation detail.
+
+Only report findings caused by the claimed implementation, regressions at current HEAD, or work required by the issue. Ignore unrelated pre-existing debt. Use verdict \"fail\" when at least one actionable finding exists; otherwise use \"pass\" with an empty findings array. Do not edit files.`;
+}
+
 // -----------------------------------------------------------------------------
 // Проверка состояния issue и повторное открытие при ошибке
 // -----------------------------------------------------------------------------
@@ -1076,6 +1097,7 @@ function refreshIssue(repository, issueNumber) {
     body: issue.body ?? "",
     url: issue.html_url,
     state: issue.state?.toUpperCase(),
+    updatedAt: issue.updated_at,
   };
 }
 
@@ -1251,7 +1273,7 @@ async function runIndependentReview(config, repository, issue, commit) {
     unlinkSync(config.review.outputPath);
   }
 
-  const reviewPrompt = `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; inspect it as evidence, but verify that the current HEAD still satisfies the issue and has not regressed it.\n\nIssue body:\n${issue.body?.trim() || "(empty)"}\n\nCheck correctness, regressions, security, edge cases, tests, and every requirement from the issue body. Use verdict \"fail\" when at least one actionable finding exists; otherwise use \"pass\" with an empty findings array. Do not edit files.`;
+  const reviewPrompt = buildIndependentReviewPrompt(issue, commit);
 
   console.log(`\n=== Independent Codex review for issue #${issue.number} ===\n`);
 
@@ -1341,6 +1363,42 @@ function alreadyFixedCommitFromAgent(lastAgentMessage) {
       .trimEnd()
       .match(/(?:^|\r?\n)ALREADY_FIXED:\s*([0-9a-f]{7,40})\s*$/i)?.[1] ?? null
   );
+}
+
+function linkedCommitForIssue(issue, execute = run) {
+  const issueUpdatedAt = Date.parse(issue.updatedAt ?? "");
+  if (!Number.isFinite(issueUpdatedAt)) return null;
+
+  const candidate = execute(
+    "git",
+    [
+      "log",
+      "-1",
+      "--format=%H%x09%cI",
+      "--fixed-strings",
+      "--grep",
+      commitTrailerForIssue(issue),
+      "HEAD",
+    ],
+    { allowFailure: true },
+  );
+  if (candidate.status !== 0 || candidate.stdout === "") return null;
+
+  const [commit, committedAtText] = candidate.stdout.split("\t");
+  const committedAt = Date.parse(committedAtText);
+  if (!/^[0-9a-f]{40}$/i.test(commit) || !Number.isFinite(committedAt)) return null;
+
+  // Старый trailer не должен автоматически закрывать issue, которую позднее
+  // переоткрыли или дополнили новым review-контекстом.
+  if (committedAt <= issueUpdatedAt) return null;
+
+  const trailer = execute("git", [
+    "show",
+    "-s",
+    "--format=%(trailers:key=Ralph-Issue,valueonly)",
+    commit,
+  ]).stdout;
+  return trailer === `#${issue.number}` ? commit : null;
 }
 
 function verifiedIssueCommit(commit, issue) {
@@ -1728,6 +1786,22 @@ async function runCodex(config, repository, issue, rules) {
     );
   }
   activeStateStore?.beginIssue(issue, startingCommit, continuation);
+
+  const linkedCommit = issue.linkedCommit ?? linkedCommitForIssue(issue);
+  if (!continuation && linkedCommit) {
+    console.log(
+      `Issue #${issue.number}: найден свежий commit ${linkedCommit} с trailer ` +
+        `${commitTrailerForIssue(issue)}; повторная Terra-сессия не требуется.`,
+    );
+    return commitAndCompleteIssue(
+      config,
+      repository,
+      issue,
+      startingCommit,
+      `ALREADY_FIXED: ${linkedCommit}`,
+    );
+  }
+
   let codexResult;
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
   try {
@@ -2023,6 +2097,20 @@ function milestoneReviewMarker(config, milestone, pullRequest) {
   return `<!-- ralph-milestone-review milestone:${milestoneId} head:${pullRequest.headRefOid} model:${config.milestoneReview.model} -->`;
 }
 
+function milestonePassReviewIsClean(body, marker) {
+  if (typeof body !== "string" || !body.includes(marker)) {
+    return false;
+  }
+
+  const normalized = body.replace(/\r\n/g, "\n").trim();
+  return (
+    normalized.includes("**Verdict:** **PASS**") &&
+    /### Findings\s*\n\s*No actionable findings\.\s*\n\s*The pull request remains draft so a human can make the final merge decision\.\s*$/.test(
+      normalized,
+    )
+  );
+}
+
 function milestonePassWasPublished(config, repository, milestone, pullRequest) {
   const marker = milestoneReviewMarker(config, milestone, pullRequest);
   const reviews = githubPagedArray(
@@ -2032,13 +2120,7 @@ function milestonePassWasPublished(config, repository, milestone, pullRequest) {
     `GitHub reviews for PR #${pullRequest.number}`,
   );
 
-  return reviews.some((review) => {
-    return (
-      typeof review.body === "string" &&
-      review.body.includes(marker) &&
-      review.body.includes("**Verdict:** **PASS**")
-    );
-  });
+  return reviews.some((review) => milestonePassReviewIsClean(review.body, marker));
 }
 
 function limitMilestoneReviewFindings(review, pullRequest, maxFindings) {
@@ -2642,9 +2724,13 @@ async function runContinuousLoop(context, actions) {
       stateStore?.issue?.number === currentIssue.number
         ? stateStore.issue.phase
         : null;
+    const linkedCommit =
+      !completion && !storedPhase ? actions.linkedCommitForIssue?.(currentIssue) : null;
+    if (linkedCommit) currentIssue.linkedCommit = linkedCommit;
     const needsDevelopmentIteration =
       completion?.status !== "pending-review" &&
-      !["committed", "pushed", "reviewing"].includes(storedPhase);
+      !["committed", "pushed", "reviewing"].includes(storedPhase) &&
+      !linkedCommit;
 
     if (needsDevelopmentIteration && iteration >= config.maxIterations) {
       fail(
@@ -2730,6 +2816,7 @@ function defaultActions() {
     createPullRequest,
     runMilestoneReview,
     createOrReopenReviewIssues,
+    linkedCommitForIssue,
     verifyReviewedPullRequestHead,
     workingTreeStatus: () => run("git", ["status", "--porcelain"]).stdout,
   };
@@ -2814,6 +2901,7 @@ if (isMainModule) {
 
 export {
   alreadyFixedCommitFromAgent,
+  buildIndependentReviewPrompt,
   createStateStore,
   createOrReopenReviewIssues,
   executeMode,
@@ -2822,8 +2910,11 @@ export {
   issueBodyWithReviewContext,
   issueCompletionState,
   limitMilestoneReviewFindings,
+  linkedCommitForIssue,
+  milestonePassReviewIsClean,
   normalizeReviewResult,
   reviewFindingMarker,
+  renderPrompt,
   reviewFindingFingerprint,
   run,
   runCodexWithTurnLimit,

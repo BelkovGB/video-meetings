@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -12,6 +13,7 @@ import test from "node:test";
 
 import {
   alreadyFixedCommitFromAgent,
+  buildIndependentReviewPrompt,
   createStateStore,
   createOrReopenReviewIssues,
   executeMode,
@@ -20,13 +22,89 @@ import {
   issueBodyWithReviewContext,
   issueCompletionState,
   limitMilestoneReviewFindings,
+  linkedCommitForIssue,
+  milestonePassReviewIsClean,
   normalizeReviewResult,
   reviewFindingFingerprint,
   reviewFindingMarker,
+  renderPrompt,
   run,
   runCodexWithTurnLimit,
   runContinuousLoop,
 } from "./ralph-loop.mjs";
+
+test("implementation prompt delegates full validation to the outer orchestrator", () => {
+  const rules = readFileSync(new URL("./ralph-rules.md", import.meta.url), "utf8");
+  const prompt = renderPrompt(
+    {
+      milestone: "Efficiency",
+      branch: "feature/efficiency",
+      prompt: "Implement issue #{issue_number} in {milestone}.",
+      maxTurns: 50,
+      maxTestFixAttempts: 5,
+    },
+    {
+      number: 7,
+      title: "Avoid duplicate validation",
+      body: "Run focused tests.",
+      url: "https://example.test/issues/7",
+    },
+    rules,
+  );
+
+  assert.match(prompt, /Не запускай весь список `validationScripts`/);
+  assert.match(prompt, /оркестратор\s+выполнит его снаружи sandbox/);
+  assert.match(prompt, /npm\.cmd/);
+  assert.match(prompt, /Не повторяй тот же полный\s+прогон с увеличенным таймаутом/);
+});
+
+test("issue review prompt requires one exhaustive in-scope audit", () => {
+  const prompt = buildIndependentReviewPrompt(
+    {
+      number: 62,
+      title: "Rate-limit authentication",
+      body: "Document and test the public contract.",
+    },
+    "a".repeat(40),
+  );
+
+  assert.match(prompt, /Do not stop after the first problem/);
+  assert.match(prompt, /Return every distinct, actionable finding/);
+  assert.match(prompt, /public API response contracts, documentation, configuration/);
+  assert.match(prompt, /Ignore unrelated pre-existing debt/);
+});
+
+test("cached milestone PASS is trusted only with an empty canonical findings section", () => {
+  const marker =
+    "<!-- ralph-milestone-review milestone:abc head:def model:gpt-5.6-sol -->";
+  const cleanReview = `${marker}
+## Ralph Loop: milestone review
+
+- **Verdict:** **PASS**
+
+Everything is ready.
+
+### Findings
+
+No actionable findings.
+
+The pull request remains draft so a human can make the final merge decision.`;
+  const malformedReview = `${marker}
+## Ralph Loop: milestone review
+
+- **Verdict:** **PASS**
+
+### Findings
+
+- **P2 — Cached defect** (file.ts:10)
+  This finding must prevent cached PASS reuse.
+
+The pull request remains draft so a human can make the final merge decision.`;
+
+  assert.equal(milestonePassReviewIsClean(cleanReview, marker), true);
+  assert.equal(milestonePassReviewIsClean(malformedReview, marker), false);
+  assert.equal(milestonePassReviewIsClean(cleanReview, "<!-- another marker -->"), false);
+});
 
 test("persistent state survives restart and enforces branch identity", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "ralph-state-"));
@@ -426,6 +504,39 @@ test("--once reports an issue-level review failure without claiming completion",
   );
 
   assert.deepEqual(result, { mode: "once", completed: 0, reviewFailed: true });
+});
+
+test("continuous loop does not spend a development iteration for a linked commit", async () => {
+  const commit = "e".repeat(40);
+  let open = true;
+  let receivedIssue;
+  const stateStore = persistentState();
+
+  const result = await runContinuousLoop(
+    context({ stateStore }),
+    actions({
+      openIssues: () =>
+        open
+          ? [
+              {
+                number: 64,
+                title: "Already implemented",
+                updatedAt: "2026-08-14T09:31:03Z",
+              },
+            ]
+          : [],
+      linkedCommitForIssue: () => commit,
+      runCodex: async (_config, _repository, issue) => {
+        receivedIssue = issue;
+        open = false;
+        return { completed: true };
+      },
+    }),
+  );
+
+  assert.equal(receivedIssue.linkedCommit, commit);
+  assert.equal(result.iterations, 0);
+  assert.equal(stateStore.iterationsUsed, 0);
 });
 
 test("continuous loop fixes new review issues even while GitHub list remains stale", async () => {
@@ -842,6 +953,46 @@ test("already-fixed marker accepts a commit SHA only on its own final line", () 
     null,
   );
   assert.equal(alreadyFixedCommitFromAgent(undefined), null);
+});
+
+test("fresh Ralph-Issue trailer links an existing commit without another Terra run", () => {
+  const commit = "a".repeat(40);
+  const commands = [];
+  const execute = (_command, args) => {
+    commands.push(args);
+    if (args[0] === "log") {
+      return { status: 0, stdout: `${commit}\t2026-08-14T12:39:45+03:00` };
+    }
+    return { status: 0, stdout: "#64" };
+  };
+
+  assert.equal(
+    linkedCommitForIssue(
+      { number: 64, updatedAt: "2026-08-14T09:31:03Z" },
+      execute,
+    ),
+    commit,
+  );
+  assert.deepEqual(commands[0].slice(-3), ["--grep", "Ralph-Issue: #64", "HEAD"]);
+});
+
+test("Ralph-Issue trailer older than the latest issue update is not reused", () => {
+  const execute = (_command, args) => ({
+    status: 0,
+    stdout:
+      args[0] === "log"
+        ? `${"b".repeat(40)}\t2026-08-14T09:00:00Z`
+        : "#64",
+  });
+
+  assert.equal(
+    linkedCommitForIssue(
+      { number: 64, updatedAt: "2026-08-14T09:31:03Z" },
+      execute,
+    ),
+    null,
+  );
+  assert.equal(linkedCommitForIssue({ number: 64 }, execute), null);
 });
 
 test("review result invariants reject empty FAIL and convert PASS with findings", () => {
