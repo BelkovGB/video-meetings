@@ -32,6 +32,7 @@ import {
   run,
   runCodex,
   runCodexWithTurnLimit,
+  runConfiguredScripts,
   runContinuousLoop,
   sanitizedChildEnvironment,
   validationContainerRunArgs,
@@ -85,6 +86,56 @@ test('only an approved immutable issue snapshot can supply an AFK implementation
   );
 });
 
+test('Ralph accepts its own lifecycle metadata while preserving approved requirements and review findings', () => {
+  const approvedIssue = {
+    number: 66,
+    title: 'Keep AFK instructions immutable',
+    body: 'Implement exactly this approved requirement.',
+  };
+  const config = {
+    trustedIssueAuthors: ['BelkovGB'],
+    approvedIssueSnapshots: {
+      66: { title: approvedIssue.title, body: approvedIssue.body },
+    },
+  };
+  const commit = 'a'.repeat(40);
+  const issueWithReviewContext = {
+    ...approvedIssue,
+    authorLogin: 'BelkovGB',
+    authorAssociation: 'OWNER',
+    body: issueBodyWithReviewContext(
+      { body: issueBodyWithCompletionState(approvedIssue, 'pending-review', commit) },
+      {
+        summary: 'Independent review found a regression.',
+        findings: [
+          { severity: 'P1', title: 'Repair recovery', file: 'loop.mjs', line: 1, body: 'Fix it.' },
+        ],
+      },
+    ),
+  };
+
+  const trustedIssue = assertTrustedIssue(
+    config,
+    issueWithReviewContext,
+    'BelkovGB/video-meetings',
+  );
+
+  assert.match(trustedIssue.body, /Independent review found a regression/);
+  assert.equal(issueCompletionState(trustedIssue), null);
+  assert.throws(
+    () =>
+      assertTrustedIssue(
+        config,
+        {
+          ...issueWithReviewContext,
+          body: `${issueWithReviewContext.body}\nUnapproved instruction.`,
+        },
+        'BelkovGB/video-meetings',
+      ),
+    /does not match the approved immutable snapshot/,
+  );
+});
+
 test('Ralph configuration pins approved AFK inputs before starting an agent session', () => {
   const config = loadConfig();
 
@@ -111,6 +162,15 @@ test('Ralph configuration pins approved AFK inputs before starting an agent sess
     readFileSync(config.validationContainer.frozenDockerfilePath, 'utf8'),
     readFileSync(config.validationContainer.dockerfilePath, 'utf8'),
   );
+  for (const relativePath of [
+    '.agents/ralph.config.json',
+    '.agents/ralph-rules.md',
+    '.agents/RALPH.md',
+    'scripts/ralph/ralph-runtime.mjs',
+    'scripts/ralph/ralph-validation-entrypoint.sh',
+  ]) {
+    assert.equal(config.trustedControlFileHashes.has(path.join(process.cwd(), relativePath)), true);
+  }
 });
 
 test('Ralph rejects a modified approved snapshot ledger before an AFK session starts', () => {
@@ -305,6 +365,58 @@ test('validation image build uses frozen trusted inputs and ignores injected lif
     if (snapshot) rmSync(snapshot, { recursive: true, force: true });
     writeFileSync(packagePath, originalPackage, 'utf8');
     writeFileSync(dockerfilePath, originalDockerfile, 'utf8');
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('validation orchestration builds from trusted inputs and never runs injected lifecycle hooks', () => {
+  const packagePath = new URL('../../package.json', import.meta.url);
+  const originalPackage = readFileSync(packagePath, 'utf8');
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-orchestration-'));
+  const lifecycleMarkerPath = path.join(directory, 'lifecycle-ran');
+  const calls = [];
+
+  try {
+    const packageJson = JSON.parse(originalPackage);
+    packageJson.scripts = {
+      ...packageJson.scripts,
+      postinstall: `write ${lifecycleMarkerPath}`,
+    };
+    writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
+
+    runConfiguredScripts(
+      {
+        preflightScripts: [],
+        runtime: { validationTimeoutMs: 5_000 },
+        validationContainer: {
+          image: `ralph-validation:orchestration-${Date.now()}`,
+          dockerfilePath: fileURLToPath(new URL('./Dockerfile.validation', import.meta.url)),
+        },
+      },
+      ['test:ralph'],
+      'Validation',
+      {
+        run: (command, args) => {
+          calls.push([command, args]);
+          if (args[0] === 'image') return { status: 1, stdout: '' };
+          if (args[0] === 'build') {
+            const buildPackage = JSON.parse(
+              readFileSync(path.join(args.at(-1), 'package.json'), 'utf8'),
+            );
+            if (buildPackage.scripts?.postinstall?.includes(lifecycleMarkerPath)) {
+              writeFileSync(lifecycleMarkerPath, 'ran', 'utf8');
+            }
+          }
+          return { status: 0, stdout: '' };
+        },
+      },
+    );
+
+    assert.equal(existsSync(lifecycleMarkerPath), false);
+    assert.equal(calls.filter(([, args]) => args[0] === 'build').length, 1);
+    assert.equal(calls.filter(([, args]) => args[0] === 'run').length, 1);
+  } finally {
+    writeFileSync(packagePath, originalPackage, 'utf8');
     rmSync(directory, { recursive: true, force: true });
   }
 });

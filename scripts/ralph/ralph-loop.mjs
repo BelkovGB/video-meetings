@@ -39,7 +39,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..', '..');
 const configPath = path.join(projectRoot, '.agents', 'ralph.config.json');
 const approvedIssueSnapshotsHash =
-  'c61fb0bf7dfd9dd5f53adcb3ab44a63c8e1a2142cca280dd73e93c7841ad0253';
+  '490d4bb1d9727a20f89c0116327a219ea46f121debf98b750a25ee6d67ba5d30';
 const mode = process.argv[2] ?? '--check';
 const supportedModes = new Set(['--check', '--once', '--run']);
 const runtimeDirectory = path.join(projectRoot, '.git', 'ralph-loop');
@@ -686,13 +686,6 @@ function loadConfig() {
   const frozenDockerfile = freezeValidationDockerfile(config.validationContainer.dockerfilePath);
   config.validationContainer.frozenDockerfilePath = frozenDockerfile.snapshotPath;
   config.validationContainer.frozenDockerfileDirectory = frozenDockerfile.snapshotDirectory;
-  config.trustedControlFileHashes = new Map(
-    [
-      approvedIssueSnapshotsPath,
-      config.validationContainer.dockerfilePath,
-      fileURLToPath(import.meta.url),
-    ].map((file) => [file, trustedFileHash(file)]),
-  );
   if (
     !Array.isArray(config.preflightScripts) ||
     !Array.isArray(config.validationScripts) ||
@@ -803,6 +796,29 @@ function loadConfig() {
       config.milestoneReview.schemaPath,
     );
   }
+
+  const trustedControlFiles = [
+    configPath,
+    config.rulesPath,
+    config.approvedIssueSnapshotsPath,
+    config.validationContainer.dockerfilePath,
+    commandRunnerPath,
+    path.join(scriptDirectory, 'ralph-runtime.mjs'),
+    path.join(scriptDirectory, 'ralph-validation-docker-shim.sh'),
+    path.join(scriptDirectory, 'ralph-validation-entrypoint.sh'),
+    fileURLToPath(import.meta.url),
+    path.join(projectRoot, '.agents', 'RALPH.md'),
+  ];
+  if (config.review.enabled) trustedControlFiles.push(config.review.schemaPath);
+  if (config.milestoneReview.enabled) trustedControlFiles.push(config.milestoneReview.schemaPath);
+  config.trustedControlFileHashes = new Map(
+    [...new Set(trustedControlFiles)].map((file) => {
+      if (!existsSync(file) || lstatSync(file).isSymbolicLink()) {
+        fail(`Доверенный control-plane файл недоступен или является symbolic link: ${file}`);
+      }
+      return [file, trustedFileHash(file)];
+    }),
+  );
 
   runtimeSettings = { ...config.runtime };
   return config;
@@ -1216,13 +1232,23 @@ function assertTrustedIssue(config, issue, repository) {
         'Add its exact title and body to approvedIssueSnapshots before AFK execution.',
     );
   }
-  if (issueContentHash(issue) !== issueContentHash(snapshot)) {
+  const issueAuthoredContent = {
+    title: issue.title,
+    body: issueBodyWithoutRalphMetadata(issue),
+  };
+  if (issueContentHash(issueAuthoredContent) !== issueContentHash(snapshot)) {
     fail(
       `Issue #${issue.number} does not match the approved immutable snapshot. ` +
         'Its mutable GitHub title or body changed after approval; review and explicitly update the snapshot.',
     );
   }
-  return { ...issue, title: snapshot.title, body: snapshot.body };
+  return {
+    ...issue,
+    title: snapshot.title,
+    // Completion markers are only recovery pointers. Review context is retained
+    // so the next implementation session receives the latest reviewer findings.
+    body: issueBodyWithoutCompletionState(issue),
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -1387,12 +1413,18 @@ function normalizeReviewResult(review) {
   return review;
 }
 
+const reviewContextPattern =
+  /\n*<!-- ralph-issue-review-context:start -->[\s\S]*?<!-- ralph-issue-review-context:end -->\n*/g;
+
+function issueBodyWithoutRalphMetadata(issue) {
+  return issueBodyWithoutCompletionState(issue).replace(reviewContextPattern, '').trim();
+}
+
 function issueBodyWithReviewContext(issue, review) {
   const startMarker = '<!-- ralph-issue-review-context:start -->';
   const endMarker = '<!-- ralph-issue-review-context:end -->';
-  const previousContext = new RegExp(`\\n*${startMarker}[\\s\\S]*?${endMarker}\\n*`, 'g');
   const originalBody = issueBodyWithoutCompletionState(issue)
-    .replace(previousContext, '')
+    .replace(reviewContextPattern, '')
     .trimEnd();
   const reviewContext = formatReviewComment(review).replace(
     '\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.',
@@ -2249,7 +2281,9 @@ function ensureValidationImage(config, snapshotPath, dependencies = {}) {
   return image;
 }
 
-function runConfiguredScripts(config, scripts, label, { includePreflight = true } = {}) {
+function runConfiguredScripts(config, scripts, label, options = {}) {
+  const includePreflight = options.includePreflight ?? true;
+  const execute = options.run ?? run;
   if (scripts.length === 0) return;
   assertTrustedControlFilesUnchanged(config);
   for (const script of scripts) {
@@ -2258,8 +2292,8 @@ function runConfiguredScripts(config, scripts, label, { includePreflight = true 
     console.log(`\n=== ${label}: isolated npm run ${script} ===\n`);
     try {
       const isolatedScripts = includePreflight ? [...config.preflightScripts, script] : [script];
-      const image = ensureValidationImage(config, dependencySnapshotPath);
-      run(
+      const image = ensureValidationImage(config, dependencySnapshotPath, { run: execute });
+      execute(
         'docker',
         validationContainerRunArgs(
           { ...config, validationContainer: { ...config.validationContainer, image } },
@@ -3203,6 +3237,7 @@ export {
   runCli,
   runCodex,
   runCodexWithTurnLimit,
+  runConfiguredScripts,
   runContinuousLoop,
   sanitizedChildEnvironment,
   validationContainerRunArgs,
