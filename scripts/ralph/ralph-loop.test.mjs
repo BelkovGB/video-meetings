@@ -1025,7 +1025,10 @@ function fakeCodexScript(source) {
 async function withFakeCodex(source, operation) {
   const directory = fakeCodexScript(source);
   const originalPath = process.env.PATH;
+  const originalCodexHome = process.env.CODEX_HOME;
+  writeFileSync(path.join(directory, 'auth.json'), '{}\n', { encoding: 'utf8', mode: 0o600 });
   process.env.PATH = `${directory}${path.delimiter}${originalPath ?? ''}`;
+  process.env.CODEX_HOME = directory;
 
   try {
     return await operation();
@@ -1034,6 +1037,11 @@ async function withFakeCodex(source, operation) {
       delete process.env.PATH;
     } else {
       process.env.PATH = originalPath;
+    }
+    if (originalCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = originalCodexHome;
     }
     rmSync(directory, { recursive: true, force: true });
   }
