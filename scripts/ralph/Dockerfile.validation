@@ -11,7 +11,18 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY apps/api/prisma apps/api/prisma
 COPY .env.example .env.example
-RUN npm ci \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+  npm config set fetch-retries 5 \
+  && npm config set fetch-retry-factor 2 \
+  && npm config set fetch-retry-mintimeout 10000 \
+  && npm config set fetch-retry-maxtimeout 120000 \
+  && attempt=1 \
+  && until npm ci; do \
+    if [ "$attempt" -ge 3 ]; then exit 1; fi; \
+    echo "npm ci failed; retrying after a transient network error (attempt $attempt/3)." >&2; \
+    attempt=$((attempt + 1)); \
+    sleep $((attempt * 5)); \
+  done \
   && PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright npx --no-install playwright install --with-deps chromium \
   && chown -R 65532:65532 /opt/ralph-dependencies /opt/ms-playwright
 

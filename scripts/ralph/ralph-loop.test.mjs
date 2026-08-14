@@ -371,10 +371,14 @@ test('validation image provisions the configured database from a pinned Dockerfi
   );
 
   assert.match(dockerfile, /COPY apps\/api\/prisma apps\/api\/prisma/);
-  assert.match(dockerfile, /RUN npm ci\s*\\/);
+  assert.match(dockerfile, /--mount=type=cache,target=\/root\/\.npm,sharing=locked/);
+  assert.match(dockerfile, /fetch-retries 5/);
+  assert.match(dockerfile, /until npm ci; do/);
   assert.match(dockerfile, /RUN --network=none \/usr\/local\/bin\/ralph-validation db:migrate/);
   assert.match(entrypoint, /cp -R \/opt\/ralph-dependencies\/node_modules \/workspace\//);
   assert.doesNotMatch(entrypoint, /npm ci/);
+  assert.match(entrypoint, /unix_socket_directories=\/tmp/);
+  assert.match(entrypoint, /cat "\$PGLOG" >&2/);
   assert.match(entrypoint, /CREATE ROLE video_meetings LOGIN/);
   assert.match(entrypoint, /CREATE DATABASE video_meetings OWNER video_meetings/);
 });

@@ -11,8 +11,17 @@ cp -R /opt/ralph-dependencies/node_modules /workspace/
 cp /workspace/.env.example /workspace/.env
 
 export PGDATA=/tmp/postgres
+export PGHOST=127.0.0.1
+export PGLOG=/tmp/postgres.log
 initdb --auth-local=trust --auth-host=trust --pgdata="$PGDATA" >/dev/null
-pg_ctl --pgdata="$PGDATA" --options='-c listen_addresses=127.0.0.1' --wait start >/dev/null
+if ! pg_ctl \
+  --pgdata="$PGDATA" \
+  --log="$PGLOG" \
+  --options="-c listen_addresses=$PGHOST -c unix_socket_directories=/tmp" \
+  --wait start >/dev/null; then
+  cat "$PGLOG" >&2
+  exit 1
+fi
 trap 'pg_ctl --pgdata="$PGDATA" --wait stop >/dev/null 2>&1 || true' EXIT
 psql --dbname=postgres --command 'CREATE ROLE video_meetings LOGIN;' >/dev/null
 psql --dbname=postgres --command 'CREATE DATABASE video_meetings OWNER video_meetings;' >/dev/null
