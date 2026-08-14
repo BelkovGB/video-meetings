@@ -506,6 +506,30 @@ function trustedFileHash(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex');
 }
 
+const ignoredAgentInstructionDirectories = new Set([
+  '.git',
+  '.next',
+  'coverage',
+  'dist',
+  'node_modules',
+]);
+
+function agentInstructionFiles(directory = projectRoot) {
+  const files = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (!ignoredAgentInstructionDirectories.has(entry.name)) {
+        files.push(...agentInstructionFiles(path.join(directory, entry.name)));
+      }
+      continue;
+    }
+    if (entry.name === 'AGENTS.md') {
+      files.push(path.join(directory, entry.name));
+    }
+  }
+  return files.sort();
+}
+
 function freezeValidationDockerfile(dockerfilePath) {
   const snapshotDirectory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-dockerfile-'));
   const snapshotPath = path.join(snapshotDirectory, 'Dockerfile.validation');
@@ -519,6 +543,21 @@ function freezeValidationDockerfile(dockerfilePath) {
 }
 
 function assertTrustedControlFilesUnchanged(config) {
+  const trustedAgentInstructionFiles = new Set(
+    [...(config.trustedControlFileHashes?.keys() ?? [])].filter(
+      (file) => path.basename(file) === 'AGENTS.md',
+    ),
+  );
+  const currentAgentInstructionFiles = new Set(agentInstructionFiles());
+  if (
+    trustedAgentInstructionFiles.size !== currentAgentInstructionFiles.size ||
+    [...currentAgentInstructionFiles].some((file) => !trustedAgentInstructionFiles.has(file))
+  ) {
+    fail(
+      'AFK-сессия изменила набор доверенных файлов AGENTS.md. ' +
+        'Изменение отклонено до валидации, commit и push.',
+    );
+  }
   for (const [file, expectedHash] of config.trustedControlFileHashes ?? []) {
     if (!existsSync(file) || trustedFileHash(file) !== expectedHash) {
       fail(
@@ -808,6 +847,7 @@ function loadConfig() {
     path.join(scriptDirectory, 'ralph-validation-entrypoint.sh'),
     fileURLToPath(import.meta.url),
     path.join(projectRoot, '.agents', 'RALPH.md'),
+    ...agentInstructionFiles(),
   ];
   if (config.review.enabled) trustedControlFiles.push(config.review.schemaPath);
   if (config.milestoneReview.enabled) trustedControlFiles.push(config.milestoneReview.schemaPath);
