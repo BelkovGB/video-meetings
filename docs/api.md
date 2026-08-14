@@ -60,6 +60,29 @@ A duplicate email returns `409 Conflict`.
 Accepts the same payload and returns `200 OK` with an `accessToken`.
 Missing or invalid credentials return `401 Unauthorized`.
 
+### Authentication rate limits
+
+`POST /auth/register` and `POST /auth/login` share in-process fixed-window
+limits to protect authentication work: at most 30 requests per client IP per
+minute and at most 5 requests per normalized email address per 15 minutes.
+Email addresses are normalized by trimming leading and trailing whitespace and
+converting to lowercase before the account limit is applied. Requests to either
+route count toward the same applicable limit.
+
+After either limit is exhausted, the route returns `429 Too Many Requests`.
+The response includes a `Retry-After` header containing the number of whole
+seconds until the relevant window resets, plus this JSON body:
+
+```json
+{
+  "statusCode": 429,
+  "message": "Too many authentication attempts. Please try again later.",
+  "retryAfterSeconds": 60
+}
+```
+
+Clients should wait for the number of seconds in `Retry-After` before retrying.
+
 ## Current user profile
 
 Profile operations require an access token. Send it in the HTTP header:
