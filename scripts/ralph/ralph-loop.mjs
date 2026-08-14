@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -194,7 +195,15 @@ function credentialFreeEnvironment(source = process.env) {
   return createEnvironment(credentialFreeEnvironmentVariables, source);
 }
 
-function createSandboxedCodexEnvironment(source = process.env) {
+function codexAuthenticationFile(source = process.env) {
+  const codexHome = source.CODEX_HOME?.trim();
+  if (codexHome) return path.join(codexHome, 'auth.json');
+
+  const userHome = source.USERPROFILE?.trim() || source.HOME?.trim();
+  return userHome ? path.join(userHome, '.codex', 'auth.json') : null;
+}
+
+function createSandboxedCodexEnvironment(source = process.env, options = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'ralph-codex-'));
   const home = path.join(root, 'home');
   const temp = path.join(root, 'tmp');
@@ -206,6 +215,38 @@ function createSandboxedCodexEnvironment(source = process.env) {
   mkdirSync(config, { recursive: true });
   mkdirSync(cache, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
+
+  const authenticationFile =
+    options.authenticationFile === undefined
+      ? codexAuthenticationFile(source)
+      : options.authenticationFile;
+  if (authenticationFile !== null) {
+    try {
+      if (!authenticationFile || !existsSync(authenticationFile)) {
+        const error = new Error(
+          'Codex auth.json не найден. Выполните `codex login`, затем повторите запуск Ralph.',
+        );
+        error.code = 'RALPH_CODEX_AUTH';
+        throw error;
+      }
+      const authenticationFileStat = lstatSync(authenticationFile);
+      if (!authenticationFileStat.isFile() || authenticationFileStat.isSymbolicLink()) {
+        const error = new Error('Codex auth.json должен быть обычным файлом, а не ссылкой.');
+        error.code = 'RALPH_CODEX_AUTH';
+        throw error;
+      }
+      const sandboxedAuthenticationFile = path.join(codexHome, 'auth.json');
+      copyFileSync(authenticationFile, sandboxedAuthenticationFile);
+      chmodSync(sandboxedAuthenticationFile, 0o600);
+      writeFileSync(path.join(codexHome, 'config.toml'), 'cli_auth_credentials_store = "file"\n', {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+    } catch (error) {
+      rmSync(root, { recursive: true, force: true });
+      throw error;
+    }
+  }
 
   return {
     root,
@@ -382,7 +423,9 @@ function printCodexEvent(event, turn, maxTurns) {
 
 async function runCodexWithTurnLimit(args, options) {
   const { command, commandArgs } = commandSpec('codex', args);
-  const childEnvironment = createSandboxedCodexEnvironment(options.env ?? process.env);
+  const childEnvironment = createSandboxedCodexEnvironment(options.env ?? process.env, {
+    authenticationFile: options.authenticationFile,
+  });
   let child;
   try {
     child = spawn(command, commandArgs, {
@@ -523,11 +566,15 @@ async function runCodexWithTurnLimit(args, options) {
   }
 
   if (result.code !== 0) {
-    fail(
+    const error = new Error(
       `${options.label} завершился с кодом ${result.code ?? 'null'}` +
         `${result.signal ? ` (сигнал ${result.signal})` : ''}.` +
         `${stderr.trim() ? `\n${stderr.trim()}` : ''}`,
     );
+    if (/401 Unauthorized|Missing bearer or basic authentication/i.test(stderr)) {
+      error.code = 'RALPH_CODEX_AUTH';
+    }
+    throw error;
   }
 
   console.log(`${options.label}: использовано шагов ${turns}/${options.maxTurns}.`);
@@ -1151,6 +1198,12 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
       persist();
       return state.iterationsUsed;
     },
+    releaseIteration() {
+      if (!state) return null;
+      state.iterationsUsed = Math.max(0, state.iterationsUsed - 1);
+      persist();
+      return state.iterationsUsed;
+    },
     allowsDirtyRecovery(currentBranch, currentHead) {
       return Boolean(
         state?.issue &&
@@ -1265,6 +1318,28 @@ function verifyTools() {
   run('codex', ['--version']);
   run('docker', ['version']);
   runNetwork('gh', ['auth', 'status']);
+}
+
+function verifyCodexAuthentication(dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const childEnvironment = createSandboxedCodexEnvironment(dependencies.env ?? process.env, {
+    authenticationFile: dependencies.authenticationFile,
+  });
+  try {
+    execute('codex', ['login', 'status'], {
+      env: childEnvironment.env,
+      timeoutMs: runtimeSettings.commandTimeoutMs,
+    });
+  } catch (cause) {
+    const error = new Error(
+      'Изолированный Codex не авторизован. Выполните `codex login` и повторите запуск Ralph.',
+      { cause },
+    );
+    error.code = 'RALPH_CODEX_AUTH';
+    throw error;
+  } finally {
+    rmSync(childEnvironment.root, { recursive: true, force: true });
+  }
 }
 
 function verifyRepository(config, requireClean) {
@@ -2276,6 +2351,9 @@ async function runCodex(config, repository, issue, rules) {
       phase: 'working-tree',
       lastFailure: error.message,
     });
+    if (error.code === 'RALPH_CODEX_AUTH') {
+      throw error;
+    }
     if (['RALPH_MAX_TURNS', 'RALPH_CODEX_TIMEOUT'].includes(error.code)) {
       reopenIssueWithComment(
         repository,
@@ -3322,7 +3400,15 @@ async function runContinuousLoop(context, actions) {
       `${needsDevelopmentIteration ? 'Итерация' : 'Resume'} ${iteration}/${config.maxIterations}; ` +
         `осталось issues: ${issues.length}.`,
     );
-    const result = await actions.runCodex(config, repository, currentIssue, rules);
+    let result;
+    try {
+      result = await actions.runCodex(config, repository, currentIssue, rules);
+    } catch (error) {
+      if (needsDevelopmentIteration && error.code === 'RALPH_CODEX_AUTH') {
+        iteration = stateStore?.releaseIteration() ?? Math.max(0, iteration - 1);
+      }
+      throw error;
+    }
     if (result?.completed === false) {
       pendingIssues.set(currentIssue.number, currentIssue);
     } else {
@@ -3475,6 +3561,9 @@ async function main() {
       activeStateStore = createStateStore(firstPhaseConfig, mode);
       const rules = loadRalphRules(config);
       verifyTools();
+      if (mode !== '--check') {
+        verifyCodexAuthentication();
+      }
       for (const phase of config.phases) {
         run('git', ['check-ref-format', '--branch', phase.branch]);
         run('git', ['check-ref-format', '--branch', phase.baseBranch]);
@@ -3556,6 +3645,7 @@ export {
   configForPhase,
   createTrustedValidationDependencySnapshot,
   createStateStore,
+  createSandboxedCodexEnvironment,
   credentialFreeEnvironment,
   createOrReopenReviewIssues,
   executeMode,
@@ -3587,4 +3677,5 @@ export {
   sanitizedChildEnvironment,
   validationContainerRunArgs,
   validationImageForSnapshot,
+  verifyCodexAuthentication,
 };

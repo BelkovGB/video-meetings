@@ -11,6 +11,7 @@ import {
   buildIndependentReviewPrompt,
   buildMilestoneReviewPrompt,
   configForPhase,
+  createSandboxedCodexEnvironment,
   createTrustedValidationDependencySnapshot,
   createStateStore,
   credentialFreeEnvironment,
@@ -43,6 +44,7 @@ import {
   sanitizedChildEnvironment,
   validationContainerRunArgs,
   validationImageForSnapshot,
+  verifyCodexAuthentication,
 } from './ralph-loop.mjs';
 
 test('only an approved immutable issue snapshot can supply an AFK implementation prompt', () => {
@@ -1150,6 +1152,7 @@ process.stdout.write(JSON.stringify({
           label: 'Environment fake Codex',
           maxTurns: 1,
           timeoutMs: 5_000,
+          authenticationFile: null,
         });
         const childEnvironment = JSON.parse(result.lastAgentMessage);
         assert.equal(childEnvironment.ghToken, undefined);
@@ -1173,6 +1176,55 @@ process.stdout.write(JSON.stringify({
     else process.env.GH_TOKEN = originalGhToken;
     if (originalJwtSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = originalJwtSecret;
+  }
+});
+
+test('sandboxed Codex receives an isolated login cache without the user configuration', () => {
+  const sourceDirectory = mkdtempSync(path.join(tmpdir(), 'ralph-auth-source-'));
+  const authenticationFile = path.join(sourceDirectory, 'auth.json');
+  writeFileSync(authenticationFile, '{"auth":"test-only"}\n', 'utf8');
+
+  const sandbox = createSandboxedCodexEnvironment(
+    { PATH: process.env.PATH ?? '', CODEX_HOME: sourceDirectory },
+    { authenticationFile },
+  );
+  try {
+    assert.notEqual(sandbox.env.CODEX_HOME, sourceDirectory);
+    assert.equal(
+      readFileSync(path.join(sandbox.env.CODEX_HOME, 'auth.json'), 'utf8'),
+      '{"auth":"test-only"}\n',
+    );
+    assert.equal(
+      readFileSync(path.join(sandbox.env.CODEX_HOME, 'config.toml'), 'utf8'),
+      'cli_auth_credentials_store = "file"\n',
+    );
+  } finally {
+    rmSync(sandbox.root, { recursive: true, force: true });
+    rmSync(sourceDirectory, { recursive: true, force: true });
+  }
+});
+
+test('Codex authentication preflight uses the isolated login cache', () => {
+  const sourceDirectory = mkdtempSync(path.join(tmpdir(), 'ralph-auth-preflight-'));
+  const authenticationFile = path.join(sourceDirectory, 'auth.json');
+  writeFileSync(authenticationFile, '{"auth":"test-only"}\n', 'utf8');
+  let checked = false;
+
+  try {
+    verifyCodexAuthentication({
+      authenticationFile,
+      env: { PATH: process.env.PATH ?? '' },
+      run: (name, args, options) => {
+        assert.equal(name, 'codex');
+        assert.deepEqual(args, ['login', 'status']);
+        assert.equal(existsSync(path.join(options.env.CODEX_HOME, 'auth.json')), true);
+        assert.notEqual(options.env.CODEX_HOME, sourceDirectory);
+        checked = true;
+      },
+    });
+    assert.equal(checked, true);
+  } finally {
+    rmSync(sourceDirectory, { recursive: true, force: true });
   }
 });
 
@@ -1229,6 +1281,10 @@ function persistentState({ iterationsUsed = 0, issue = null } = {}) {
       used += 1;
       return used;
     },
+    releaseIteration() {
+      used = Math.max(0, used - 1);
+      return used;
+    },
     clearIssue() {
       currentIssue = null;
     },
@@ -1275,6 +1331,7 @@ setInterval(() => {}, 1_000);
           label: 'Fake Codex',
           maxTurns: 1,
           timeoutMs: 5_000,
+          authenticationFile: null,
         }),
         (error) => {
           assert.equal(error.code, 'RALPH_MAX_TURNS');
@@ -1302,6 +1359,7 @@ test(
           label: 'Hung fake Codex',
           maxTurns: 50,
           timeoutMs,
+          authenticationFile: null,
         }),
         (error) => {
           assert.equal(error.code, 'RALPH_CODEX_TIMEOUT');
@@ -1316,6 +1374,31 @@ test(
     assert.ok(Date.now() - startedAt < 5_000, 'hung Codex must be terminated promptly');
   },
 );
+
+test('Codex 401 is classified as an authentication infrastructure failure', async () => {
+  await withFakeCodex(
+    `
+process.stderr.write('401 Unauthorized: Missing bearer or basic authentication');
+process.exit(1);
+`,
+    async () => {
+      await assert.rejects(
+        runCodexWithTurnLimit(['exec', '--json', '-'], {
+          input: 'test prompt',
+          label: 'Unauthorized fake Codex',
+          maxTurns: 5,
+          timeoutMs: 5_000,
+          authenticationFile: null,
+        }),
+        (error) => {
+          assert.equal(error.code, 'RALPH_CODEX_AUTH');
+          assert.match(error.message, /401 Unauthorized/);
+          return true;
+        },
+      );
+    },
+  );
+});
 
 test('--check reports state without running an issue or creating a PR', async () => {
   const calls = [];
@@ -1616,6 +1699,30 @@ test('continuous loop does not reset an iteration budget restored from persisten
 
   assert.equal(stateStore.iterationsUsed, 1);
   assert.equal(codexRuns, 0);
+});
+
+test('continuous loop stops immediately and refunds an iteration on Codex authentication failure', async () => {
+  const stateStore = persistentState();
+  let codexRuns = 0;
+  const authenticationError = new Error('401 Unauthorized');
+  authenticationError.code = 'RALPH_CODEX_AUTH';
+
+  await assert.rejects(
+    runContinuousLoop(
+      context({ stateStore }),
+      actions({
+        openIssues: () => [{ number: 67, title: 'Product issue' }],
+        runCodex: async () => {
+          codexRuns += 1;
+          throw authenticationError;
+        },
+      }),
+    ),
+    (error) => error.code === 'RALPH_CODEX_AUTH',
+  );
+
+  assert.equal(codexRuns, 1);
+  assert.equal(stateStore.iterationsUsed, 0);
 });
 
 test('continuous loop prioritizes a persisted recovery issue over a lower issue number', async () => {
