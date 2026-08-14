@@ -9,16 +9,25 @@ WORKDIR /opt/ralph-dependencies
 COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN npm ci --ignore-scripts \
+COPY apps/api/prisma apps/api/prisma
+COPY .env.example .env.example
+RUN npm ci \
   && PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright npx --no-install playwright install --with-deps chromium \
-  && mkdir -p /opt/ralph-npm-cache \
-  && cp -a /root/.npm/. /opt/ralph-npm-cache/ \
-  && chown -R 65532:65532 /opt/ralph-npm-cache /opt/ms-playwright
+  && chown -R 65532:65532 /opt/ralph-dependencies /opt/ms-playwright
 
 ENV PATH="/usr/lib/postgresql/15/bin:${PATH}"
 ENV PLAYWRIGHT_BROWSERS_PATH="/opt/ms-playwright"
 COPY scripts/ralph/ralph-validation-entrypoint.sh /usr/local/bin/ralph-validation
 COPY scripts/ralph/ralph-validation-docker-shim.sh /usr/local/bin/docker
-RUN chmod 0555 /usr/local/bin/ralph-validation /usr/local/bin/docker
+RUN chmod 0555 /usr/local/bin/ralph-validation /usr/local/bin/docker \
+  && mkdir -p /source /workspace \
+  && cp -R /opt/ralph-dependencies/. /source/ \
+  && chown -R 65532:65532 /source /workspace
+
+USER 65532:65532
+
+# This proves the image carries Prisma's Linux engines and that the entrypoint
+# creates the database configured by .env.example without network access.
+RUN --network=none /usr/local/bin/ralph-validation db:migrate
 
 ENTRYPOINT ["/usr/local/bin/ralph-validation"]

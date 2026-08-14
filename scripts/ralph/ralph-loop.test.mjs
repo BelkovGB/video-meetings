@@ -92,6 +92,23 @@ test('Ralph configuration loads the tracked approved snapshot ledger and isolate
   assert.equal(existsSync(config.validationContainer.dockerfilePath), true);
 });
 
+test('validation image provisions the configured database and preinstalls Prisma for offline migrations', () => {
+  const dockerfile = readFileSync(new URL('./Dockerfile.validation', import.meta.url), 'utf8');
+  const entrypoint = readFileSync(
+    new URL('./ralph-validation-entrypoint.sh', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(dockerfile, /COPY apps\/api\/prisma apps\/api\/prisma/);
+  assert.match(dockerfile, /RUN npm ci\s*\\/);
+  assert.doesNotMatch(dockerfile, /npm ci --ignore-scripts/);
+  assert.match(dockerfile, /RUN --network=none \/usr\/local\/bin\/ralph-validation db:migrate/);
+  assert.match(entrypoint, /cp -R \/opt\/ralph-dependencies\/node_modules \/workspace\//);
+  assert.doesNotMatch(entrypoint, /npm ci/);
+  assert.match(entrypoint, /CREATE ROLE video_meetings LOGIN/);
+  assert.match(entrypoint, /CREATE DATABASE video_meetings OWNER video_meetings/);
+});
+
 test('implementation prompt delegates full validation to the outer orchestrator', () => {
   const rules = readFileSync(new URL('../../.agents/ralph-rules.md', import.meta.url), 'utf8');
   const prompt = renderPrompt(
