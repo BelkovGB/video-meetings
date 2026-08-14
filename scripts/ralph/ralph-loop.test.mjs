@@ -13,6 +13,7 @@ import {
   credentialFreeEnvironment,
   createOrReopenReviewIssues,
   executeMode,
+  ensureValidationImage,
   githubPagedArray,
   issueBodyWithCompletionState,
   issueBodyWithReviewContext,
@@ -130,6 +131,29 @@ test('validation image cache is invalidated when the workspace lockfile changes'
   } finally {
     rmSync(firstSnapshot, { recursive: true, force: true });
     rmSync(secondSnapshot, { recursive: true, force: true });
+  }
+});
+
+test('validation image cache hit returns the existing image without rebuilding it', () => {
+  const snapshot = mkdtempSync(path.join(tmpdir(), 'ralph-validation-cache-hit-'));
+  const config = { validationContainer: { image: 'ralph-validation:test' } };
+  const calls = [];
+
+  try {
+    writeFileSync(snapshot + path.sep + 'package-lock.json', '{"lockfileVersion":3}\n');
+    const expectedImage = validationImageForSnapshot(config, snapshot);
+    const image = ensureValidationImage(config, snapshot, {
+      run: (command, args) => {
+        calls.push([command, args]);
+        assert.deepEqual(args, ['image', 'inspect', expectedImage]);
+        return { status: 0, stdout: '' };
+      },
+    });
+
+    assert.equal(image, expectedImage);
+    assert.deepEqual(calls, [['docker', ['image', 'inspect', expectedImage]]]);
+  } finally {
+    rmSync(snapshot, { recursive: true, force: true });
   }
 });
 

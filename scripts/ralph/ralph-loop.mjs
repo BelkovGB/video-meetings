@@ -2063,24 +2063,25 @@ function validationImageForSnapshot(config, snapshotPath) {
   return `${imageRepository}-lock-${lockfileHash}`;
 }
 
-function ensureValidationImage(config, snapshotPath) {
+function ensureValidationImage(config, snapshotPath, dependencies = {}) {
+  const execute = dependencies.run ?? run;
   const { dockerfilePath } = config.validationContainer;
   const image = validationImageForSnapshot(config, snapshotPath);
   if (preparedValidationImages.has(image)) return image;
-  const existingImage = run('docker', ['image', 'inspect', image], {
+  const existingImage = execute('docker', ['image', 'inspect', image], {
     allowFailure: true,
     allowedExitCodes: [1],
     env: credentialFreeEnvironment(),
   });
   if (existingImage.status === 0) {
     preparedValidationImages.add(image);
-    return;
+    return image;
   }
   if (existingImage.status !== 1) {
     fail(`Не удалось проверить образ изоляции валидации ${image}.`);
   }
   console.log(`\n=== Validation isolation: docker build ${image} ===\n`);
-  run('docker', ['build', '--file', dockerfilePath, '--tag', image, snapshotPath], {
+  execute('docker', ['build', '--file', dockerfilePath, '--tag', image, snapshotPath], {
     echoOutput: true,
     timeoutMs: config.runtime.validationTimeoutMs,
     env: credentialFreeEnvironment(),
@@ -3012,6 +3013,7 @@ export {
   credentialFreeEnvironment,
   createOrReopenReviewIssues,
   executeMode,
+  ensureValidationImage,
   issueBodyWithCompletionState,
   issueContentHash,
   githubPagedArray,
