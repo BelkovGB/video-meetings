@@ -27,6 +27,10 @@ type ApiError = {
   message?: string | string[];
 };
 
+type CurrentUserProfile = {
+  displayName: string | null;
+};
+
 type FormErrors = {
   title?: string;
   date?: string;
@@ -114,6 +118,43 @@ export default function DashboardPage() {
     const displayName = sessionStorage.getItem('userDisplayName')?.trim();
     setIdentity(displayName || email);
 
+    const clearSessionAndRedirectToLogin = () => {
+      sessionStorage.removeItem('accessToken');
+      sessionStorage.removeItem('userEmail');
+      sessionStorage.removeItem('userDisplayName');
+      router.replace('/login');
+    };
+
+    const hydrateCurrentUserIdentity = async () => {
+      try {
+        const response = await fetch(`${apiUrl}/users/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (response.status === 401) {
+          clearSessionAndRedirectToLogin();
+          return;
+        }
+
+        if (!response.ok) {
+          return;
+        }
+
+        const profile = (await response.json()) as CurrentUserProfile;
+        const savedDisplayName = profile.displayName?.trim();
+
+        if (savedDisplayName) {
+          sessionStorage.setItem('userDisplayName', savedDisplayName);
+        } else {
+          sessionStorage.removeItem('userDisplayName');
+        }
+
+        setIdentity(savedDisplayName || email);
+      } catch {
+        // Keep the locally available identity while the profile service is unavailable.
+      }
+    };
+
     const loadMeetings = async () => {
       try {
         const response = await fetch(`${apiUrl}/meetings`, {
@@ -121,10 +162,7 @@ export default function DashboardPage() {
         });
 
         if (response.status === 401) {
-          sessionStorage.removeItem('accessToken');
-          sessionStorage.removeItem('userEmail');
-          sessionStorage.removeItem('userDisplayName');
-          router.replace('/login');
+          clearSessionAndRedirectToLogin();
           return;
         }
 
@@ -140,6 +178,7 @@ export default function DashboardPage() {
       }
     };
 
+    void hydrateCurrentUserIdentity();
     void loadMeetings();
   }, [loadAttempts, router]);
 

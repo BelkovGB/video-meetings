@@ -170,6 +170,22 @@ test('synchronizes the saved display name with the dashboard identity and keeps 
   );
 });
 
+test('hydrates a previously saved display name after a new login', async ({ page, request }) => {
+  const session = await register(request, 'profile-login-identity');
+  await prisma.user.update({ where: { id: session.userId }, data: { displayName: 'Нина' } });
+
+  await page.goto('/login');
+  await page.getByLabel('Email').fill(session.email);
+  await page.getByLabel('Пароль').fill(password);
+  await page.getByRole('button', { name: 'Войти' }).click();
+
+  await expect(page).toHaveURL('/');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText('Нина');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).not.toContainText(
+    session.email,
+  );
+});
+
 test('redirects to login without loading profile data when authentication is missing', async ({
   page,
 }) => {
