@@ -67,6 +67,32 @@ describe('MeetingFilesService failure handling', () => {
     await expect(service.openDownload('ticket')).rejects.toBe(databaseFailure);
   });
 
+  it('deletes expired and consumed download tickets in bounded batches', async () => {
+    const now = new Date('2026-08-14T12:00:00.000Z');
+    const prisma = {
+      meetingFileDownloadTicket: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ tokenHash: 'expired-ticket' }, { tokenHash: 'consumed-ticket' }]),
+        deleteMany: jest.fn().mockResolvedValue({ count: 2 }),
+      },
+    };
+    const service = new MeetingFileDeletionReconciliationService(prisma as never, {} as never);
+
+    await service.reconcileDownloadTickets(now);
+
+    expect(prisma.meetingFileDownloadTicket.findMany).toHaveBeenCalledWith({
+      where: {
+        OR: [{ expiresAt: { lte: now } }, { usedAt: { not: null } }],
+      },
+      select: { tokenHash: true },
+      take: 100,
+    });
+    expect(prisma.meetingFileDownloadTicket.deleteMany).toHaveBeenCalledWith({
+      where: { tokenHash: { in: ['expired-ticket', 'consumed-ticket'] } },
+    });
+  });
+
   it('retries a stale DELETING file after a transient storage failure', async () => {
     const file = { id: 'file-1', storageKey: 'storage-1' };
     const prisma = {

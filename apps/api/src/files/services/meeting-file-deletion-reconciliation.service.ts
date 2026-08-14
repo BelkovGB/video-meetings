@@ -6,6 +6,7 @@ import { uploadConfig } from '../upload.config';
 import { LocalMeetingFileStorageService } from './local-meeting-file-storage.service';
 
 const reconciliationIntervalMs = 60_000;
+const downloadTicketCleanupBatchSize = 100;
 
 @Injectable()
 export class MeetingFileDeletionReconciliationService
@@ -42,11 +43,30 @@ export class MeetingFileDeletionReconciliationService
 
     this.reconciliationRunning = true;
     try {
+      await this.reconcileDownloadTickets(now);
       await this.reconcileDeletions(now);
       await this.reconcileStorage(now);
     } finally {
       this.reconciliationRunning = false;
     }
+  }
+
+  async reconcileDownloadTickets(now: Date): Promise<void> {
+    const tickets = await this.prisma.meetingFileDownloadTicket.findMany({
+      where: {
+        OR: [{ expiresAt: { lte: now } }, { usedAt: { not: null } }],
+      },
+      select: { tokenHash: true },
+      take: downloadTicketCleanupBatchSize,
+    });
+
+    if (tickets.length === 0) {
+      return;
+    }
+
+    await this.prisma.meetingFileDownloadTicket.deleteMany({
+      where: { tokenHash: { in: tickets.map((ticket) => ticket.tokenHash) } },
+    });
   }
 
   async reconcileDeletions(now = new Date()): Promise<void> {

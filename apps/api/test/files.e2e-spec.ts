@@ -1,4 +1,5 @@
 import { INestApplication } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { access, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -6,6 +7,7 @@ import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { MeetingFileDeletionReconciliationService } from '../src/files/services/meeting-file-deletion-reconciliation.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 type Meeting = { id: string };
@@ -22,6 +24,10 @@ function createUniqueValue(prefix: string) {
 
 function createEmail(prefix: string) {
   return `${createUniqueValue(prefix)}@example.com`;
+}
+
+function createTicketHash() {
+  return createHash('sha256').update(createUniqueValue('ticket')).digest('hex');
 }
 
 describe('Meeting files (e2e)', () => {
@@ -297,6 +303,53 @@ describe('Meeting files (e2e)', () => {
         .get(`/file-downloads/${ticketResponse.body.ticket as string}`)
         .expect(404);
     }
+  });
+
+  it('removes expired and consumed tickets while retaining active tickets', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const userId = getUserId(owner.accessToken);
+    const now = new Date('2026-08-14T12:00:00.000Z');
+    const expiredTicketHash = createTicketHash();
+    const consumedTicketHash = createTicketHash();
+    const activeTicketHash = createTicketHash();
+
+    await prisma.meetingFileDownloadTicket.createMany({
+      data: [
+        {
+          tokenHash: expiredTicketHash,
+          fileId: uploaded.id,
+          issuedToUserId: userId,
+          expiresAt: new Date('2026-08-14T11:59:00.000Z'),
+        },
+        {
+          tokenHash: consumedTicketHash,
+          fileId: uploaded.id,
+          issuedToUserId: userId,
+          expiresAt: new Date('2026-08-14T12:01:00.000Z'),
+          usedAt: new Date('2026-08-14T11:59:00.000Z'),
+        },
+        {
+          tokenHash: activeTicketHash,
+          fileId: uploaded.id,
+          issuedToUserId: userId,
+          expiresAt: new Date('2026-08-14T12:01:00.000Z'),
+        },
+      ],
+    });
+
+    await app.get(MeetingFileDeletionReconciliationService).reconcileDownloadTickets(now);
+
+    await expect(
+      prisma.meetingFileDownloadTicket.findUnique({ where: { tokenHash: expiredTicketHash } }),
+    ).resolves.toBeNull();
+    await expect(
+      prisma.meetingFileDownloadTicket.findUnique({ where: { tokenHash: consumedTicketHash } }),
+    ).resolves.toBeNull();
+    await expect(
+      prisma.meetingFileDownloadTicket.findUnique({ where: { tokenHash: activeTicketHash } }),
+    ).resolves.not.toBeNull();
   });
 
   it('lets the meeting owner delete file content and metadata', async () => {

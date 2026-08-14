@@ -95,5 +95,6 @@ model MeetingFileDownloadTicket {
 
   @@index([fileId])
   @@index([expiresAt])
+  @@index([usedAt])
   @@map("meeting_file_download_tickets")
 }
