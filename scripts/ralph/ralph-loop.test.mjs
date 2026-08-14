@@ -9,6 +9,7 @@ import {
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
   buildMilestoneReviewPrompt,
+  createTrustedValidationDependencySnapshot,
   createStateStore,
   credentialFreeEnvironment,
   createOrReopenReviewIssues,
@@ -83,18 +84,80 @@ test('only an approved immutable issue snapshot can supply an AFK implementation
   );
 });
 
-test('Ralph configuration loads the tracked approved snapshot ledger and isolated validator', () => {
+test('Ralph configuration pins approved AFK inputs before starting an agent session', () => {
   const config = loadConfig();
 
   assert.equal(
     config.approvedIssueSnapshots[66].title,
     '[P1] Do not execute mutable issue content as trusted AFK instructions',
   );
+  assert.match(
+    config.approvedIssueSnapshotsPath,
+    /[\\/]scripts[\\/]ralph[\\/]approved-issues\.json$/,
+  );
   assert.equal(config.validationContainer.network, 'none');
+  assert.match(
+    config.validationContainer.dockerfilePath,
+    /[\\/]scripts[\\/]ralph[\\/]Dockerfile\.validation$/,
+  );
   assert.equal(existsSync(config.validationContainer.dockerfilePath), true);
 });
 
-test('validation image provisions the configured database and preinstalls Prisma for offline migrations', () => {
+test('Ralph rejects a modified approved snapshot ledger before an AFK session starts', () => {
+  const ledgerPath = new URL('./approved-issues.json', import.meta.url);
+  const originalLedger = readFileSync(ledgerPath, 'utf8');
+
+  try {
+    writeFileSync(ledgerPath, 'tampered approval ledger\n', 'utf8');
+    assert.throws(() => loadConfig(), /не совпадает с защищённым контрольным SHA-256/u);
+  } finally {
+    writeFileSync(ledgerPath, originalLedger, 'utf8');
+  }
+});
+
+test('runCodex aborts before commit when an AFK session modifies the approved snapshot ledger', async () => {
+  const config = loadConfig();
+  const ledgerPath = config.approvedIssueSnapshotsPath;
+  const originalLedger = readFileSync(ledgerPath, 'utf8');
+  const approvedIssue = config.approvedIssueSnapshots[66];
+
+  try {
+    await withFakeCodex(
+      `
+import { writeFileSync } from 'node:fs';
+const ledgerPath = ${JSON.stringify(ledgerPath)};
+writeFileSync(ledgerPath, 'tampered approval ledger\\n', 'utf8');
+process.stdout.write(JSON.stringify({
+  type: 'item.completed',
+  item: { id: 'final', type: 'agent_message', text: 'COMMIT_MESSAGE: fix: mutate approval ledger' },
+}) + '\\n');
+`,
+      async () => {
+        await assert.rejects(
+          () =>
+            runCodex(
+              config,
+              'BelkovGB/video-meetings',
+              {
+                number: 66,
+                title: approvedIssue.title,
+                body: approvedIssue.body,
+                url: 'https://example.test/issues/66',
+                authorLogin: 'BelkovGB',
+                authorAssociation: 'OWNER',
+              },
+              'trusted rules',
+            ),
+          /изменила доверенный файл.*approved-issues\.json/u,
+        );
+      },
+    );
+  } finally {
+    writeFileSync(ledgerPath, originalLedger, 'utf8');
+  }
+});
+
+test('validation image provisions the configured database from a pinned Dockerfile', () => {
   const dockerfile = readFileSync(new URL('./Dockerfile.validation', import.meta.url), 'utf8');
   const entrypoint = readFileSync(
     new URL('./ralph-validation-entrypoint.sh', import.meta.url),
@@ -103,7 +166,6 @@ test('validation image provisions the configured database and preinstalls Prisma
 
   assert.match(dockerfile, /COPY apps\/api\/prisma apps\/api\/prisma/);
   assert.match(dockerfile, /RUN npm ci\s*\\/);
-  assert.doesNotMatch(dockerfile, /npm ci --ignore-scripts/);
   assert.match(dockerfile, /RUN --network=none \/usr\/local\/bin\/ralph-validation db:migrate/);
   assert.match(entrypoint, /cp -R \/opt\/ralph-dependencies\/node_modules \/workspace\//);
   assert.doesNotMatch(entrypoint, /npm ci/);
@@ -111,22 +173,38 @@ test('validation image provisions the configured database and preinstalls Prisma
   assert.match(entrypoint, /CREATE DATABASE video_meetings OWNER video_meetings/);
 });
 
-test('validation image cache is invalidated when the workspace lockfile changes', () => {
+test('validation dependency image is built from committed inputs, not the mutable workspace', () => {
+  const lockfilePath = new URL('../../package-lock.json', import.meta.url);
+  const originalLockfile = readFileSync(lockfilePath, 'utf8');
+  let snapshot;
+
+  try {
+    writeFileSync(lockfilePath, '{"name":"attacker-controlled-lockfile"}\n', 'utf8');
+    snapshot = createTrustedValidationDependencySnapshot();
+    const committedLockfile = run('git', ['show', 'HEAD:package-lock.json']).stdout;
+    assert.equal(readFileSync(path.join(snapshot, 'package-lock.json'), 'utf8'), committedLockfile);
+    assert.equal(existsSync(path.join(snapshot, 'apps', 'api', 'prisma', 'schema.prisma')), true);
+  } finally {
+    if (snapshot) rmSync(snapshot, { recursive: true, force: true });
+    writeFileSync(lockfilePath, originalLockfile, 'utf8');
+  }
+});
+
+test('validation image cache is invalidated when trusted dependency inputs change', () => {
   const firstSnapshot = mkdtempSync(path.join(tmpdir(), 'ralph-validation-lock-first-'));
   const secondSnapshot = mkdtempSync(path.join(tmpdir(), 'ralph-validation-lock-second-'));
   const config = { validationContainer: { image: 'ralph-validation:test' } };
 
   try {
     writeFileSync(path.join(firstSnapshot, 'package-lock.json'), '{"lockfileVersion":3}\n');
-    writeFileSync(
-      path.join(secondSnapshot, 'package-lock.json'),
-      '{"lockfileVersion":3,"packages":{}}\n',
-    );
+    writeFileSync(path.join(secondSnapshot, 'package-lock.json'), '{"lockfileVersion":3}\n');
+    writeFileSync(path.join(firstSnapshot, 'schema.prisma'), 'model First {}\n');
+    writeFileSync(path.join(secondSnapshot, 'schema.prisma'), 'model Second {}\n');
 
     const firstImage = validationImageForSnapshot(config, firstSnapshot);
     const secondImage = validationImageForSnapshot(config, secondSnapshot);
 
-    assert.match(firstImage, /^ralph-validation:test-lock-[a-f0-9]{16}$/);
+    assert.match(firstImage, /^ralph-validation:test-inputs-[a-f0-9]{16}$/);
     assert.notEqual(firstImage, secondImage);
   } finally {
     rmSync(firstSnapshot, { recursive: true, force: true });

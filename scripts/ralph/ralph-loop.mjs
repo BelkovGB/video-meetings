@@ -9,8 +9,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -36,6 +38,8 @@ import {
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..', '..');
 const configPath = path.join(projectRoot, '.agents', 'ralph.config.json');
+const approvedIssueSnapshotsHash =
+  'c61fb0bf7dfd9dd5f53adcb3ab44a63c8e1a2142cca280dd73e93c7841ad0253';
 const mode = process.argv[2] ?? '--check';
 const supportedModes = new Set(['--check', '--once', '--run']);
 const runtimeDirectory = path.join(projectRoot, '.git', 'ralph-loop');
@@ -456,6 +460,21 @@ function resolveProjectFile(file, field) {
   return resolved;
 }
 
+function trustedFileHash(file) {
+  return createHash('sha256').update(readFileSync(file)).digest('hex');
+}
+
+function assertTrustedControlFilesUnchanged(config) {
+  for (const [file, expectedHash] of config.trustedControlFileHashes ?? []) {
+    if (!existsSync(file) || trustedFileHash(file) !== expectedHash) {
+      fail(
+        `AFK-сессия изменила доверенный файл ${file}. ` +
+          'Изменение отклонено до валидации, commit и push.',
+      );
+    }
+  }
+}
+
 function loadConfig() {
   const config = parseJson(readFileSync(configPath, 'utf8'), configPath);
 
@@ -495,10 +514,20 @@ function loadConfig() {
   if (!existsSync(approvedIssueSnapshotsPath)) {
     fail(`Файл одобренных snapshots issue не найден: ${approvedIssueSnapshotsPath}`);
   }
+  if (lstatSync(approvedIssueSnapshotsPath).isSymbolicLink()) {
+    fail('Файл одобренных snapshots issue не должен быть symbolic link.');
+  }
+  if (trustedFileHash(approvedIssueSnapshotsPath) !== approvedIssueSnapshotsHash) {
+    fail(
+      'Файл одобренных snapshots issue не совпадает с защищённым контрольным SHA-256. ' +
+        'Проверьте изменение и обновите контрольную сумму вместе с одобрением snapshots.',
+    );
+  }
   config.approvedIssueSnapshots = parseJson(
     readFileSync(approvedIssueSnapshotsPath, 'utf8'),
     approvedIssueSnapshotsPath,
   );
+  config.approvedIssueSnapshotsPath = approvedIssueSnapshotsPath;
   config.validationContainer ??= {
     image: 'video-meetings-ralph-validation:latest',
     dockerfile: 'scripts/ralph/Dockerfile.validation',
@@ -597,6 +626,16 @@ function loadConfig() {
   if (!existsSync(config.validationContainer.dockerfilePath)) {
     fail(`Dockerfile изоляции валидации не найден: ${config.validationContainer.dockerfilePath}`);
   }
+  if (lstatSync(config.validationContainer.dockerfilePath).isSymbolicLink()) {
+    fail('Dockerfile изоляции валидации не должен быть symbolic link.');
+  }
+  config.trustedControlFileHashes = new Map(
+    [
+      approvedIssueSnapshotsPath,
+      config.validationContainer.dockerfilePath,
+      fileURLToPath(import.meta.url),
+    ].map((file) => [file, trustedFileHash(file)]),
+  );
   if (
     !Array.isArray(config.preflightScripts) ||
     !Array.isArray(config.validationScripts) ||
@@ -1684,6 +1723,7 @@ async function resumeIssueCompletion(config, repository, issue, completion) {
 }
 
 async function commitAndCompleteIssue(config, repository, issue, startingCommit, lastAgentMessage) {
+  assertTrustedControlFilesUnchanged(config);
   const currentBranch = run('git', ['branch', '--show-current']).stdout;
   const currentCommit = run('git', ['rev-parse', 'HEAD']).stdout;
   const changes = run('git', ['status', '--porcelain']).stdout;
@@ -2056,11 +2096,72 @@ function createValidationWorkspaceSnapshot() {
   }
 }
 
+const validationDependencyFiles = [
+  '.env.example',
+  'package.json',
+  'package-lock.json',
+  'apps/api/package.json',
+  'apps/web/package.json',
+  'scripts/ralph/ralph-validation-docker-shim.sh',
+  'scripts/ralph/ralph-validation-entrypoint.sh',
+];
+
+function createTrustedValidationDependencySnapshot() {
+  const snapshotPath = mkdtempSync(path.join(tmpdir(), 'ralph-validation-dependencies-'));
+  try {
+    const prismaFiles = run('git', [
+      'ls-tree',
+      '-r',
+      '--name-only',
+      'HEAD',
+      '--',
+      'apps/api/prisma',
+    ])
+      .stdout.split('\n')
+      .filter(Boolean);
+    for (const relativePath of [...validationDependencyFiles, ...prismaFiles]) {
+      const gitPath = relativePath.split(path.sep).join('/');
+      const destinationPath = path.join(snapshotPath, relativePath);
+      mkdirSync(path.dirname(destinationPath), { recursive: true });
+      writeFileSync(destinationPath, run('git', ['show', `HEAD:${gitPath}`]).stdout);
+    }
+    return snapshotPath;
+  } catch (error) {
+    rmSync(snapshotPath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function validationInputHash(snapshotPath, hash = createHash('sha256'), relativePath = '') {
+  const entries = readdirSync(snapshotPath, { withFileTypes: true }).sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
+  for (const entry of entries) {
+    const nextRelativePath = path.join(relativePath, entry.name);
+    const entryPath = path.join(snapshotPath, entry.name);
+    if (entry.isDirectory()) {
+      validationInputHash(entryPath, hash, nextRelativePath);
+    } else if (entry.isFile()) {
+      hash
+        .update(`${nextRelativePath.replaceAll(path.sep, '/')}\0`)
+        .update(readFileSync(entryPath));
+    } else {
+      fail(`Validation dependency snapshot содержит неподдерживаемый файл: ${nextRelativePath}`);
+    }
+  }
+  return hash;
+}
+
 function validationImageForSnapshot(config, snapshotPath) {
-  const lockfile = readFileSync(path.join(snapshotPath, 'package-lock.json'));
-  const lockfileHash = createHash('sha256').update(lockfile).digest('hex').slice(0, 16);
+  const inputsHash = validationInputHash(snapshotPath);
+  if (config.validationContainer.dockerfilePath) {
+    inputsHash
+      .update('Dockerfile.validation\0')
+      .update(readFileSync(config.validationContainer.dockerfilePath));
+  }
+  const inputHash = inputsHash.digest('hex').slice(0, 16);
   const imageRepository = config.validationContainer.image.split('@', 1)[0];
-  return `${imageRepository}-lock-${lockfileHash}`;
+  return `${imageRepository}-inputs-${inputHash}`;
 }
 
 function ensureValidationImage(config, snapshotPath, dependencies = {}) {
@@ -2092,12 +2193,14 @@ function ensureValidationImage(config, snapshotPath, dependencies = {}) {
 
 function runConfiguredScripts(config, scripts, label, { includePreflight = true } = {}) {
   if (scripts.length === 0) return;
+  assertTrustedControlFilesUnchanged(config);
   for (const script of scripts) {
     const snapshotPath = createValidationWorkspaceSnapshot();
+    const dependencySnapshotPath = createTrustedValidationDependencySnapshot();
     console.log(`\n=== ${label}: isolated npm run ${script} ===\n`);
     try {
       const isolatedScripts = includePreflight ? [...config.preflightScripts, script] : [script];
-      const image = ensureValidationImage(config, snapshotPath);
+      const image = ensureValidationImage(config, dependencySnapshotPath);
       run(
         'docker',
         validationContainerRunArgs(
@@ -2117,6 +2220,7 @@ function runConfiguredScripts(config, scripts, label, { includePreflight = true 
       throw error;
     } finally {
       rmSync(snapshotPath, { recursive: true, force: true });
+      rmSync(dependencySnapshotPath, { recursive: true, force: true });
     }
   }
 }
@@ -3006,9 +3110,11 @@ if (isMainModule) {
 
 export {
   assertTrustedIssue,
+  assertTrustedControlFilesUnchanged,
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
   buildMilestoneReviewPrompt,
+  createTrustedValidationDependencySnapshot,
   createStateStore,
   credentialFreeEnvironment,
   createOrReopenReviewIssues,
