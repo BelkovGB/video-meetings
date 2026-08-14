@@ -2,7 +2,17 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -43,6 +53,7 @@ let runtimeSettings = {
   reviewRetryAttempts: 3,
 };
 let activeStateStore = null;
+const preparedValidationImages = new Set();
 
 // -----------------------------------------------------------------------------
 // Запуск внешних команд: Git, GitHub CLI, npm и Codex CLI
@@ -470,6 +481,29 @@ function loadConfig() {
   config.developmentModel ??= 'gpt-5.6-terra';
   config.rulesFile ??= '.agents/ralph-rules.md';
   config.trustedIssueAuthors ??= [];
+  config.approvedIssueSnapshotsFile ??= 'scripts/ralph/approved-issues.json';
+  if (
+    typeof config.approvedIssueSnapshotsFile !== 'string' ||
+    config.approvedIssueSnapshotsFile.trim() === ''
+  ) {
+    fail('Поле "approvedIssueSnapshotsFile" должно быть непустым путём к snapshots issue.');
+  }
+  const approvedIssueSnapshotsPath = resolveProjectFile(
+    config.approvedIssueSnapshotsFile,
+    'approvedIssueSnapshotsFile',
+  );
+  if (!existsSync(approvedIssueSnapshotsPath)) {
+    fail(`Файл одобренных snapshots issue не найден: ${approvedIssueSnapshotsPath}`);
+  }
+  config.approvedIssueSnapshots = parseJson(
+    readFileSync(approvedIssueSnapshotsPath, 'utf8'),
+    approvedIssueSnapshotsPath,
+  );
+  config.validationContainer ??= {
+    image: 'video-meetings-ralph-validation:latest',
+    dockerfile: 'scripts/ralph/Dockerfile.validation',
+    network: 'none',
+  };
   config.preflightScripts ??= [];
   config.validationScripts ??= ['format:check', 'lint', 'build'];
   config.review ??= {
@@ -520,6 +554,49 @@ function loadConfig() {
     fail('Поле "trustedIssueAuthors" не должно содержать одинаковые логины с разным регистром.');
   }
   config.trustedIssueAuthors = normalizedTrustedAuthors;
+  if (
+    typeof config.approvedIssueSnapshots !== 'object' ||
+    config.approvedIssueSnapshots === null ||
+    Array.isArray(config.approvedIssueSnapshots)
+  ) {
+    fail('Поле "approvedIssueSnapshots" должно быть объектом с неизменяемыми snapshots issue.');
+  }
+  for (const [number, snapshot] of Object.entries(config.approvedIssueSnapshots)) {
+    if (!/^[1-9][0-9]*$/.test(number)) {
+      fail('Ключи "approvedIssueSnapshots" должны быть положительными номерами GitHub issue.');
+    }
+    if (
+      typeof snapshot !== 'object' ||
+      snapshot === null ||
+      Array.isArray(snapshot) ||
+      typeof snapshot.title !== 'string' ||
+      typeof snapshot.body !== 'string'
+    ) {
+      fail(`Snapshot issue #${number} должен содержать строковые поля "title" и "body".`);
+    }
+  }
+  if (typeof config.validationContainer !== 'object' || config.validationContainer === null) {
+    fail('Поле "validationContainer" должно быть объектом.');
+  }
+  for (const field of ['image', 'dockerfile']) {
+    if (
+      typeof config.validationContainer[field] !== 'string' ||
+      config.validationContainer[field].trim() === '' ||
+      !/^[a-zA-Z0-9._/:@-]+$/.test(config.validationContainer[field])
+    ) {
+      fail(`Поле "validationContainer.${field}" должно содержать безопасное значение.`);
+    }
+  }
+  if (config.validationContainer.network !== 'none') {
+    fail('Поле "validationContainer.network" должно быть равно "none" для изолированной проверки.');
+  }
+  config.validationContainer.dockerfilePath = resolveProjectFile(
+    config.validationContainer.dockerfile,
+    'validationContainer.dockerfile',
+  );
+  if (!existsSync(config.validationContainer.dockerfilePath)) {
+    fail(`Dockerfile изоляции валидации не найден: ${config.validationContainer.dockerfilePath}`);
+  }
   if (
     !Array.isArray(config.preflightScripts) ||
     !Array.isArray(config.validationScripts) ||
@@ -652,7 +729,7 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
   let state = readJsonFile(statePath, null);
   if (state) {
     const identityMismatch =
-      state.version !== 1 ||
+      state.version !== 2 ||
       state.branch !== config.branch ||
       state.baseBranch !== config.baseBranch ||
       state.milestone !== config.milestone;
@@ -670,7 +747,7 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
   }
   if (!state && selectedMode !== '--check') {
     state = {
-      version: 1,
+      version: 2,
       runId: randomUUID(),
       status: 'active',
       branch: config.branch,
@@ -706,6 +783,8 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
         title: issue.title,
         url: issue.url,
         body: issue.body ?? '',
+        authorLogin: issue.authorLogin ?? null,
+        authorAssociation: issue.authorAssociation ?? null,
         startingCommit,
         phase: 'agent-running',
         validationFixAttempts: 0,
@@ -836,6 +915,7 @@ function verifyTools() {
   run('git', ['--version']);
   run('gh', ['--version']);
   run('codex', ['--version']);
+  run('docker', ['version']);
   runNetwork('gh', ['auth', 'status']);
 }
 
@@ -1010,6 +1090,15 @@ function openIssues(repository, milestone) {
     .sort((left, right) => left.number - right.number);
 }
 
+function issueContentHash(issue) {
+  const canonicalBody = String(issue.body ?? '')
+    .replaceAll('\r\n', '\n')
+    .replace(/\n+$/, '');
+  return createHash('sha256')
+    .update(JSON.stringify({ title: issue.title ?? '', body: canonicalBody }))
+    .digest('hex');
+}
+
 function assertTrustedIssue(config, issue, repository) {
   const author = typeof issue.authorLogin === 'string' ? issue.authorLogin : '';
   const repositoryOwner = repository?.split('/')[0]?.toLowerCase();
@@ -1024,6 +1113,20 @@ function assertTrustedIssue(config, issue, repository) {
         'Only the repository owner or authors configured in trustedIssueAuthors may provide AFK instructions.',
     );
   }
+  const snapshot = config.approvedIssueSnapshots?.[String(issue.number)];
+  if (!snapshot) {
+    fail(
+      `Issue #${issue.number} has no approved immutable snapshot. ` +
+        'Add its exact title and body to approvedIssueSnapshots before AFK execution.',
+    );
+  }
+  if (issueContentHash(issue) !== issueContentHash(snapshot)) {
+    fail(
+      `Issue #${issue.number} does not match the approved immutable snapshot. ` +
+        'Its mutable GitHub title or body changed after approval; review and explicitly update the snapshot.',
+    );
+  }
+  return { ...issue, title: snapshot.title, body: snapshot.body };
 }
 
 // -----------------------------------------------------------------------------
@@ -1705,7 +1808,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 // -----------------------------------------------------------------------------
 
 async function runCodex(config, repository, issue, rules) {
-  assertTrustedIssue(config, issue, repository);
+  issue = assertTrustedIssue(config, issue, repository);
   const storedIssue =
     activeStateStore?.issue?.number === issue.number ? activeStateStore.issue : null;
   if (storedIssue?.commit && ['committed', 'pushed', 'reviewing'].includes(storedIssue.phase)) {
@@ -1889,11 +1992,109 @@ function verifyReviewedPullRequestHead(config, repository, pullRequest) {
   return refreshed;
 }
 
-function runConfiguredScripts(config, scripts, label) {
+function validationContainerRunArgs(config, scripts, snapshotPath) {
+  const scriptList = Array.isArray(scripts) ? scripts : [scripts];
+  return [
+    'run',
+    '--rm',
+    '--init',
+    '--network',
+    'none',
+    '--read-only',
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges',
+    '--pids-limit',
+    '512',
+    '--user',
+    '65532:65532',
+    '--tmpfs',
+    '/workspace:rw,exec,nosuid,nodev,size=4g,uid=65532,gid=65532',
+    '--tmpfs',
+    '/tmp:rw,noexec,nosuid,nodev,size=1g,uid=65532,gid=65532',
+    '--mount',
+    `type=bind,source=${snapshotPath},target=/source,readonly`,
+    '--workdir',
+    '/workspace',
+    '--env',
+    'HOME=/tmp',
+    config.validationContainer.image,
+    'ralph-validation',
+    ...scriptList,
+  ];
+}
+
+function createValidationWorkspaceSnapshot() {
+  const snapshotPath = mkdtempSync(path.join(tmpdir(), 'ralph-validation-'));
+  try {
+    const files = run('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])
+      .stdout.split('\0')
+      .filter(Boolean);
+    for (const relativePath of files) {
+      const normalizedPath = path.normalize(relativePath);
+      if (
+        normalizedPath === '.' ||
+        path.isAbsolute(normalizedPath) ||
+        normalizedPath.startsWith(`..${path.sep}`) ||
+        normalizedPath === '..'
+      ) {
+        fail(`Небезопасный путь в git ls-files: ${relativePath}`);
+      }
+      const sourcePath = path.join(projectRoot, normalizedPath);
+      if (lstatSync(sourcePath).isSymbolicLink()) {
+        fail(`Validation snapshot не допускает symbolic link: ${relativePath}`);
+      }
+      const destinationPath = path.join(snapshotPath, normalizedPath);
+      mkdirSync(path.dirname(destinationPath), { recursive: true });
+      copyFileSync(sourcePath, destinationPath);
+    }
+    return snapshotPath;
+  } catch (error) {
+    rmSync(snapshotPath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function ensureValidationImage(config) {
+  const { image, dockerfilePath } = config.validationContainer;
+  if (preparedValidationImages.has(image)) return;
+  const existingImage = run('docker', ['image', 'inspect', image], {
+    allowFailure: true,
+    allowedExitCodes: [1],
+    env: credentialFreeEnvironment(),
+  });
+  if (existingImage.status === 0) {
+    preparedValidationImages.add(image);
+    return;
+  }
+  if (existingImage.status !== 1) {
+    fail(`Не удалось проверить образ изоляции валидации ${image}.`);
+  }
+  if (run('git', ['status', '--porcelain']).stdout !== '') {
+    fail(
+      `Нельзя собрать отсутствующий образ изоляции ${image} из незакоммиченного дерева. ` +
+        'Восстановите доверенный образ до продолжения AFK recovery.',
+    );
+  }
+  console.log(`\n=== Validation isolation: docker build ${image} ===\n`);
+  run('docker', ['build', '--file', dockerfilePath, '--tag', image, projectRoot], {
+    echoOutput: true,
+    timeoutMs: config.runtime.validationTimeoutMs,
+    env: credentialFreeEnvironment(),
+  });
+  preparedValidationImages.add(image);
+}
+
+function runConfiguredScripts(config, scripts, label, { includePreflight = true } = {}) {
+  if (scripts.length === 0) return;
+  ensureValidationImage(config);
   for (const script of scripts) {
-    console.log(`\n=== ${label}: npm run ${script} ===\n`);
+    const snapshotPath = createValidationWorkspaceSnapshot();
+    console.log(`\n=== ${label}: isolated npm run ${script} ===\n`);
     try {
-      run('npm', ['run', script], {
+      const isolatedScripts = includePreflight ? [...config.preflightScripts, script] : [script];
+      run('docker', validationContainerRunArgs(config, isolatedScripts, snapshotPath), {
         echoOutput: true,
         timeoutMs: config.runtime.validationTimeoutMs,
         env: credentialFreeEnvironment(),
@@ -1902,31 +2103,20 @@ function runConfiguredScripts(config, scripts, label) {
       error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
       error.script = script;
       throw error;
+    } finally {
+      rmSync(snapshotPath, { recursive: true, force: true });
     }
   }
 }
 
 function runPreflight(config) {
-  runConfiguredScripts(config, config.preflightScripts, 'Preflight');
+  runConfiguredScripts(config, config.preflightScripts, 'Preflight', { includePreflight: false });
 }
 
 function runConfiguredValidation(config) {
-  // Повторяем preflight перед E2E: текущая issue могла добавить новую migration.
-  runPreflight(config);
-  for (const script of config.validationScripts) {
-    console.log(`\n=== npm run ${script} ===\n`);
-    try {
-      run('npm', ['run', script], {
-        echoOutput: true,
-        timeoutMs: config.runtime.validationTimeoutMs,
-        env: credentialFreeEnvironment(),
-      });
-    } catch (error) {
-      error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
-      error.script = script;
-      throw error;
-    }
-  }
+  // Каждый validation-запуск получает новую изолированную БД и повторяет preflight,
+  // чтобы migration текущей issue была применена внутри того же контейнера.
+  runConfiguredScripts(config, config.validationScripts, 'Validation');
 }
 
 function createPullRequest(config, repository) {
@@ -2537,6 +2727,8 @@ async function runContinuousLoop(context, actions) {
           title: recoveryIssue.title,
           url: recoveryIssue.url,
           body: recoveryIssue.body ?? '',
+          authorLogin: recoveryIssue.authorLogin ?? null,
+          authorAssociation: recoveryIssue.authorAssociation ?? null,
         });
       } else {
         if (actions.workingTreeStatus() !== '') {
@@ -2810,11 +3002,13 @@ export {
   createOrReopenReviewIssues,
   executeMode,
   issueBodyWithCompletionState,
+  issueContentHash,
   githubPagedArray,
   issueBodyWithReviewContext,
   issueCompletionState,
   limitMilestoneReviewFindings,
   linkedCommitForIssue,
+  loadConfig,
   milestonePassReviewIsClean,
   normalizeReviewResult,
   reviewFindingMarker,
@@ -2822,7 +3016,9 @@ export {
   reviewFindingFingerprint,
   run,
   runCli,
+  runCodex,
   runCodexWithTurnLimit,
   runContinuousLoop,
   sanitizedChildEnvironment,
+  validationContainerRunArgs,
 };
