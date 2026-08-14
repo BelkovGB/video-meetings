@@ -40,7 +40,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..', '..');
 const configPath = path.join(projectRoot, '.agents', 'ralph.config.json');
 const approvedIssueSnapshotsHash =
-  'd9deffd06e73d40bd0c2f0db3411d836300d34b74dd9be505fc1c4cac829fdc3';
+  'c0e278f489ab9e9b20c7d21232b9bb50e1e268eed0ba338966091da84777701e';
 const mode = process.argv[2] ?? '--check';
 const supportedModes = new Set(['--check', '--once', '--run']);
 const runtimeDirectory = path.join(projectRoot, '.git', 'ralph-loop');
