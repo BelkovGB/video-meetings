@@ -417,6 +417,26 @@ function printCodexEvent(event, turn, maxTurns) {
   }
 }
 
+function developmentCodexArguments(config) {
+  return [
+    'exec',
+    '--json',
+    '--sandbox',
+    'danger-full-access',
+    '--model',
+    config.developmentModel,
+    '-C',
+    projectRoot,
+    '-',
+  ];
+}
+
+function agentReportedWriteAccessFailure(message) {
+  return /(?:file system|filesystem|файловая система).{0,80}(?:read[- ]only|только для чтения)|(?:access|доступ).{0,40}(?:denied|запрещ[её]н)|(?:EPERM|EACCES).{0,80}(?:write|запис)/is.test(
+    String(message ?? ''),
+  );
+}
+
 // -----------------------------------------------------------------------------
 // Circuit breaker: ограничиваем количество шагов Codex через maxTurns
 // -----------------------------------------------------------------------------
@@ -2323,29 +2343,16 @@ async function runCodex(config, repository, issue, rules) {
   let codexResult;
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
   try {
-    codexResult = await runCodexWithTurnLimit(
-      [
-        'exec',
-        '--json',
-        '--sandbox',
-        'workspace-write',
-        '--model',
-        config.developmentModel,
-        '-C',
-        projectRoot,
-        '-',
-      ],
-      {
-        input:
-          renderPrompt(config, issue, rules) +
-          (continuation
-            ? `\n\n## AFK recovery\n\nЭто продолжение незавершённой сессии Ralph. Не сбрасывай существующие изменения. Изучи текущий git diff, продолжи реализацию той же issue и исправь последний сбой оркестратора:\n\n${storedIssue.lastFailure ?? 'процесс завершился до фиксации результата'}`
-            : ''),
-        maxTurns: config.maxTurns,
-        timeoutMs: config.runtime.codexTimeoutMs,
-        label: `Codex issue #${issue.number}`,
-      },
-    );
+    codexResult = await runCodexWithTurnLimit(developmentCodexArguments(config), {
+      input:
+        renderPrompt(config, issue, rules) +
+        (continuation
+          ? `\n\n## AFK recovery\n\nЭто продолжение незавершённой сессии Ralph. Не сбрасывай существующие изменения. Изучи текущий git diff, продолжи реализацию той же issue и исправь последний сбой оркестратора:\n\n${storedIssue.lastFailure ?? 'процесс завершился до фиксации результата'}`
+          : ''),
+      maxTurns: config.maxTurns,
+      timeoutMs: config.runtime.codexTimeoutMs,
+      label: `Codex issue #${issue.number}`,
+    });
   } catch (error) {
     activeStateStore?.updateIssue({
       phase: 'working-tree',
@@ -2365,6 +2372,16 @@ async function runCodex(config, repository, issue, rules) {
       `Issue #${issue.number}: Terra-сессия не завершилась; существующий diff сохранён: ${error.message}`,
     );
     return { completed: false, agentFailed: true };
+  }
+
+  if (agentReportedWriteAccessFailure(codexResult.lastAgentMessage)) {
+    const error = new Error(
+      `Issue #${issue.number}: дочерний Codex сообщил об отсутствии write-доступа, ` +
+        'хотя development-сессия запущена с danger-full-access.',
+    );
+    error.code = 'RALPH_AGENT_WRITE_ACCESS';
+    activeStateStore?.updateIssue({ phase: 'working-tree', lastFailure: error.message });
+    throw error;
   }
 
   return commitAndCompleteIssue(
@@ -3404,7 +3421,10 @@ async function runContinuousLoop(context, actions) {
     try {
       result = await actions.runCodex(config, repository, currentIssue, rules);
     } catch (error) {
-      if (needsDevelopmentIteration && error.code === 'RALPH_CODEX_AUTH') {
+      if (
+        needsDevelopmentIteration &&
+        ['RALPH_CODEX_AUTH', 'RALPH_AGENT_WRITE_ACCESS'].includes(error.code)
+      ) {
         iteration = stateStore?.releaseIteration() ?? Math.max(0, iteration - 1);
       }
       throw error;
@@ -3647,6 +3667,7 @@ export {
   createStateStore,
   createSandboxedCodexEnvironment,
   credentialFreeEnvironment,
+  developmentCodexArguments,
   createOrReopenReviewIssues,
   executeMode,
   ensureValidationImage,
@@ -3675,6 +3696,7 @@ export {
   runPhasePlan,
   scopeMilestoneReviewToProduct,
   sanitizedChildEnvironment,
+  agentReportedWriteAccessFailure,
   validationContainerRunArgs,
   validationImageForSnapshot,
   verifyCodexAuthentication,

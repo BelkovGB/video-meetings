@@ -6,6 +6,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  agentReportedWriteAccessFailure,
   assertTrustedIssue,
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
@@ -15,6 +16,7 @@ import {
   createTrustedValidationDependencySnapshot,
   createStateStore,
   credentialFreeEnvironment,
+  developmentCodexArguments,
   createOrReopenReviewIssues,
   executeMode,
   ensureValidationImage,
@@ -1228,6 +1230,22 @@ test('Codex authentication preflight uses the isolated login cache', () => {
   }
 });
 
+test('development Codex has unrestricted repository write access', () => {
+  const args = developmentCodexArguments({ developmentModel: 'gpt-5.6-terra' });
+  assert.deepEqual(args.slice(0, 4), ['exec', '--json', '--sandbox', 'danger-full-access']);
+  assert.ok(!args.includes('workspace-write'));
+});
+
+test('write access blockers are recognized as infrastructure failures', () => {
+  assert.equal(
+    agentReportedWriteAccessFailure(
+      'Файловая система доступна только для чтения, поэтому изменить файл нельзя.',
+    ),
+    true,
+  );
+  assert.equal(agentReportedWriteAccessFailure('Реализация и тесты завершены.'), false);
+});
+
 function context(overrides = {}) {
   return {
     mode: '--run',
@@ -1722,6 +1740,27 @@ test('continuous loop stops immediately and refunds an iteration on Codex authen
   );
 
   assert.equal(codexRuns, 1);
+  assert.equal(stateStore.iterationsUsed, 0);
+});
+
+test('continuous loop refunds an iteration when the agent cannot write the workspace', async () => {
+  const stateStore = persistentState();
+  const writeError = new Error('workspace is read-only');
+  writeError.code = 'RALPH_AGENT_WRITE_ACCESS';
+
+  await assert.rejects(
+    runContinuousLoop(
+      context({ stateStore }),
+      actions({
+        openIssues: () => [{ number: 67, title: 'Product issue' }],
+        runCodex: async () => {
+          throw writeError;
+        },
+      }),
+    ),
+    (error) => error.code === 'RALPH_AGENT_WRITE_ACCESS',
+  );
+
   assert.equal(stateStore.iterationsUsed, 0);
 });
 
