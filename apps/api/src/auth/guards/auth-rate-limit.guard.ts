@@ -62,6 +62,7 @@ export class AuthRateLimitGuard implements CanActivate {
 
       throw new HttpException(
         {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
           message: 'Too many authentication attempts. Please try again later.',
           retryAfterSeconds: result.retryAfterSeconds,
         },

@@ -136,11 +136,17 @@ describe('Authentication rate limiting (e2e)', () => {
           .expect(path === '/auth/register' ? 400 : 401);
       }
 
-      await request(app.getHttpServer())
+      const response = await request(app.getHttpServer())
         .post(path)
         .send({ email: createEmail('rate-limit-blocked'), password: 'short' })
         .expect('Retry-After', /\d+/)
         .expect(429);
+
+      expect(response.body).toMatchObject({
+        statusCode: 429,
+        message: 'Too many authentication attempts. Please try again later.',
+      });
+      expect(response.body.retryAfterSeconds).toEqual(expect.any(Number));
     },
   );
 
