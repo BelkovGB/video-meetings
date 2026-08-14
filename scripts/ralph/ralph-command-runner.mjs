@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
-import process from "node:process";
+import { spawn, spawnSync } from 'node:child_process';
+import process from 'node:process';
 
-let requestText = "";
-process.stdin.setEncoding("utf8");
+let requestText = '';
+process.stdin.setEncoding('utf8');
 for await (const chunk of process.stdin) {
   requestText += chunk;
 }
@@ -19,7 +19,7 @@ try {
 
 const child = spawn(request.command, request.args, {
   cwd: request.cwd,
-  stdio: ["pipe", "pipe", "pipe"],
+  stdio: ['pipe', 'pipe', 'pipe'],
   windowsHide: true,
 });
 let settled = false;
@@ -28,8 +28,8 @@ let forceExitTimer;
 
 child.stdout.pipe(process.stdout);
 child.stderr.pipe(process.stderr);
-child.stdin.on("error", (error) => {
-  if (error.code !== "EPIPE") {
+child.stdin.on('error', (error) => {
+  if (error.code !== 'EPIPE') {
     process.stderr.write(`RALPH_COMMAND_STDIN_ERROR: ${error.message}\n`);
   }
 });
@@ -37,16 +37,16 @@ child.stdin.end(request.input);
 
 function killTree() {
   if (!child.pid) return;
-  if (process.platform === "win32") {
-    spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-      stdio: "ignore",
+  if (process.platform === 'win32') {
+    spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
       timeout: 10_000,
       windowsHide: true,
     });
     return;
   }
   try {
-    process.kill(child.pid, "SIGKILL");
+    process.kill(child.pid, 'SIGKILL');
   } catch {
     // Дочерний процесс уже завершён.
   }
@@ -58,18 +58,18 @@ const timeout = setTimeout(() => {
   forceExitTimer = setTimeout(() => process.exit(124), 10_000);
 }, request.timeoutMs);
 
-child.once("error", (error) => {
+child.once('error', (error) => {
   if (settled) return;
   settled = true;
   clearTimeout(timeout);
   clearTimeout(forceExitTimer);
   process.stderr.write(
-    `RALPH_COMMAND_RUNNER_LAUNCH_ERROR:${error.code ?? "UNKNOWN"}: ${error.message}\n`,
+    `RALPH_COMMAND_RUNNER_LAUNCH_ERROR:${error.code ?? 'UNKNOWN'}: ${error.message}\n`,
   );
   process.exitCode = 125;
 });
 
-child.once("close", (code, signal) => {
+child.once('close', (code, signal) => {
   if (settled) return;
   settled = true;
   clearTimeout(timeout);

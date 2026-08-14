@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   closeSync,
@@ -10,10 +10,10 @@ import {
   renameSync,
   unlinkSync,
   writeFileSync,
-} from "node:fs";
-import path from "node:path";
-import process from "node:process";
-import { format } from "node:util";
+} from 'node:fs';
+import path from 'node:path';
+import process from 'node:process';
+import { format } from 'node:util';
 
 function waitSync(milliseconds) {
   if (milliseconds <= 0) return;
@@ -24,11 +24,11 @@ function waitSync(milliseconds) {
 function isTransientFailure(error) {
   const text = [error?.message, error?.stderr, error?.stdout]
     .filter(Boolean)
-    .join("\n")
+    .join('\n')
     .toLowerCase();
   if (
-    error?.code === "RALPH_COMMAND_TIMEOUT" ||
-    ["ETIMEDOUT", "ECONNRESET", "EAI_AGAIN", "ENETUNREACH"].includes(error?.code)
+    error?.code === 'RALPH_COMMAND_TIMEOUT' ||
+    ['ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'ENETUNREACH'].includes(error?.code)
   ) {
     return true;
   }
@@ -64,7 +64,7 @@ function isProcessAlive(pid) {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return error.code === "EPERM";
+    return error.code === 'EPERM';
   }
 }
 
@@ -83,9 +83,9 @@ function acquireRunLock(lockPath, metadata = {}, dependencies = {}) {
     let descriptor;
     let createdByCurrentProcess = false;
     try {
-      descriptor = openSync(lockPath, "wx");
+      descriptor = openSync(lockPath, 'wx');
       createdByCurrentProcess = true;
-      writeFileSync(descriptor, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+      writeFileSync(descriptor, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
       closeSync(descriptor);
       descriptor = undefined;
       break;
@@ -94,11 +94,11 @@ function acquireRunLock(lockPath, metadata = {}, dependencies = {}) {
       if (createdByCurrentProcess) {
         removeFileIfExists(lockPath);
       }
-      if (error.code !== "EEXIST") throw error;
+      if (error.code !== 'EEXIST') throw error;
 
       let existing;
       try {
-        existing = JSON.parse(readFileSync(lockPath, "utf8"));
+        existing = JSON.parse(readFileSync(lockPath, 'utf8'));
       } catch {
         throw new Error(
           `Lock Ralph повреждён или ещё создаётся: ${lockPath}. Проверьте активные процессы и удалите файл вручную только если Ralph не запущен.`,
@@ -106,7 +106,7 @@ function acquireRunLock(lockPath, metadata = {}, dependencies = {}) {
       }
       if (alive(existing.pid)) {
         throw new Error(
-          `Ralph Loop уже запущен (PID ${existing.pid}, с ${existing.startedAt ?? "неизвестно"}).`,
+          `Ralph Loop уже запущен (PID ${existing.pid}, с ${existing.startedAt ?? 'неизвестно'}).`,
         );
       }
       unlinkSync(lockPath);
@@ -122,10 +122,10 @@ function acquireRunLock(lockPath, metadata = {}, dependencies = {}) {
     if (released) return;
     released = true;
     try {
-      const current = JSON.parse(readFileSync(lockPath, "utf8"));
+      const current = JSON.parse(readFileSync(lockPath, 'utf8'));
       if (current.token === token) unlinkSync(lockPath);
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if (error.code !== 'ENOENT') throw error;
     }
   };
 }
@@ -135,23 +135,23 @@ function initializePersistentLog(logPath, metadata = {}) {
   appendFileSync(
     logPath,
     `${new Date().toISOString()} INFO Ralph process started ${JSON.stringify({ pid: process.pid, ...metadata })}\n`,
-    "utf8",
+    'utf8',
   );
   const original = { log: console.log, error: console.error };
   const append = (level, args) => {
     appendFileSync(
       logPath,
-      `${new Date().toISOString()} ${level} ${format(...args).replaceAll("\u0000", "")}\n`,
-      "utf8",
+      `${new Date().toISOString()} ${level} ${format(...args).replaceAll('\u0000', '')}\n`,
+      'utf8',
     );
   };
   console.log = (...args) => {
     original.log(...args);
-    append("INFO", args);
+    append('INFO', args);
   };
   console.error = (...args) => {
     original.error(...args);
-    append("ERROR", args);
+    append('ERROR', args);
   };
   return () => {
     console.log = original.log;
@@ -161,14 +161,14 @@ function initializePersistentLog(logPath, metadata = {}) {
 
 function readJsonFile(filePath, fallback = null) {
   if (!existsSync(filePath)) return fallback;
-  return JSON.parse(readFileSync(filePath, "utf8"));
+  return JSON.parse(readFileSync(filePath, 'utf8'));
 }
 
 function writeJsonAtomic(filePath, value) {
   mkdirSync(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
     renameSync(temporaryPath, filePath);
   } finally {
     removeFileIfExists(temporaryPath);
@@ -179,36 +179,36 @@ function removeFileIfExists(filePath) {
   try {
     unlinkSync(filePath);
   } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+    if (error.code !== 'ENOENT') throw error;
   }
 }
 
 function commandTimeoutError(name, args, timeoutMs, result) {
   const error = new Error(
-    `Команда ${name} ${args.join(" ")} превысила wall-clock timeout ${timeoutMs} ms.`,
+    `Команда ${name} ${args.join(' ')} превысила wall-clock timeout ${timeoutMs} ms.`,
   );
-  error.code = "RALPH_COMMAND_TIMEOUT";
+  error.code = 'RALPH_COMMAND_TIMEOUT';
   error.timeoutMs = timeoutMs;
-  error.stdout = result.stdout?.trim() ?? "";
-  error.stderr = result.stderr?.trim() ?? "";
+  error.stdout = result.stdout?.trim() ?? '';
+  error.stderr = result.stderr?.trim() ?? '';
   return error;
 }
 
 function terminateProcessTreeByPid(pid, force = false) {
   if (!pid) return;
-  if (process.platform === "win32") {
-    spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
-      stdio: "ignore",
+  if (process.platform === 'win32') {
+    spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore',
       timeout: 10_000,
       windowsHide: true,
     });
     return;
   }
   try {
-    process.kill(-pid, force ? "SIGKILL" : "SIGTERM");
+    process.kill(-pid, force ? 'SIGKILL' : 'SIGTERM');
   } catch {
     try {
-      process.kill(pid, force ? "SIGKILL" : "SIGTERM");
+      process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
     } catch {
       // Процесс уже завершился.
     }

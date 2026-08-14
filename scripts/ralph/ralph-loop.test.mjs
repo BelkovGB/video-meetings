@@ -1,15 +1,8 @@
-import assert from "node:assert/strict";
-import {
-  chmodSync,
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import test from "node:test";
+import assert from 'node:assert/strict';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
 
 import {
   alreadyFixedCommitFromAgent,
@@ -31,23 +24,23 @@ import {
   run,
   runCodexWithTurnLimit,
   runContinuousLoop,
-} from "./ralph-loop.mjs";
+} from './ralph-loop.mjs';
 
-test("implementation prompt delegates full validation to the outer orchestrator", () => {
-  const rules = readFileSync(new URL("./ralph-rules.md", import.meta.url), "utf8");
+test('implementation prompt delegates full validation to the outer orchestrator', () => {
+  const rules = readFileSync(new URL('../../.agents/ralph-rules.md', import.meta.url), 'utf8');
   const prompt = renderPrompt(
     {
-      milestone: "Efficiency",
-      branch: "feature/efficiency",
-      prompt: "Implement issue #{issue_number} in {milestone}.",
+      milestone: 'Efficiency',
+      branch: 'feature/efficiency',
+      prompt: 'Implement issue #{issue_number} in {milestone}.',
       maxTurns: 50,
       maxTestFixAttempts: 5,
     },
     {
       number: 7,
-      title: "Avoid duplicate validation",
-      body: "Run focused tests.",
-      url: "https://example.test/issues/7",
+      title: 'Avoid duplicate validation',
+      body: 'Run focused tests.',
+      url: 'https://example.test/issues/7',
     },
     rules,
   );
@@ -58,14 +51,14 @@ test("implementation prompt delegates full validation to the outer orchestrator"
   assert.match(prompt, /Не повторяй тот же полный\s+прогон с увеличенным таймаутом/);
 });
 
-test("issue review prompt requires one exhaustive in-scope audit", () => {
+test('issue review prompt requires one exhaustive in-scope audit', () => {
   const prompt = buildIndependentReviewPrompt(
     {
       number: 62,
-      title: "Rate-limit authentication",
-      body: "Document and test the public contract.",
+      title: 'Rate-limit authentication',
+      body: 'Document and test the public contract.',
     },
-    "a".repeat(40),
+    'a'.repeat(40),
   );
 
   assert.match(prompt, /Do not stop after the first problem/);
@@ -74,9 +67,8 @@ test("issue review prompt requires one exhaustive in-scope audit", () => {
   assert.match(prompt, /Ignore unrelated pre-existing debt/);
 });
 
-test("cached milestone PASS is trusted only with an empty canonical findings section", () => {
-  const marker =
-    "<!-- ralph-milestone-review milestone:abc head:def model:gpt-5.6-sol -->";
+test('cached milestone PASS is trusted only with an empty canonical findings section', () => {
+  const marker = '<!-- ralph-milestone-review milestone:abc head:def model:gpt-5.6-sol -->';
   const cleanReview = `${marker}
 ## Ralph Loop: milestone review
 
@@ -100,47 +92,58 @@ The pull request remains draft so a human can make the final merge decision.`;
   This finding must prevent cached PASS reuse.
 
 The pull request remains draft so a human can make the final merge decision.`;
+  const duplicateFindingsReview = `${marker}
+## Ralph Loop: milestone review
+
+- **Verdict:** **PASS**
+
+### Findings
+
+- **P2 — Hidden defect** (file.ts:10)
+  A second empty section must not hide this finding.
+
+### Findings
+
+No actionable findings.
+
+The pull request remains draft so a human can make the final merge decision.`;
 
   assert.equal(milestonePassReviewIsClean(cleanReview, marker), true);
   assert.equal(milestonePassReviewIsClean(malformedReview, marker), false);
-  assert.equal(milestonePassReviewIsClean(cleanReview, "<!-- another marker -->"), false);
+  assert.equal(milestonePassReviewIsClean(duplicateFindingsReview, marker), false);
+  assert.equal(milestonePassReviewIsClean(cleanReview, '<!-- another marker -->'), false);
 });
 
-test("persistent state survives restart and enforces branch identity", () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "ralph-state-"));
-  const statePath = path.join(directory, "state.json");
+test('persistent state survives restart and enforces branch identity', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-state-'));
+  const statePath = path.join(directory, 'state.json');
   const config = {
-    branch: "feature/state",
-    baseBranch: "master",
-    milestone: "State milestone",
+    branch: 'feature/state',
+    baseBranch: 'master',
+    milestone: 'State milestone',
   };
 
   try {
-    const first = createStateStore(config, "--run", statePath);
+    const first = createStateStore(config, '--run', statePath);
     assert.equal(first.iterationsUsed, 0);
     first.reserveIteration();
     first.beginIssue(
       {
         number: 42,
-        title: "Resume me",
-        body: "Requirements",
-        url: "https://example.test/issues/42",
+        title: 'Resume me',
+        body: 'Requirements',
+        url: 'https://example.test/issues/42',
       },
-      "a".repeat(40),
+      'a'.repeat(40),
     );
 
-    const resumed = createStateStore(config, "--run", statePath);
+    const resumed = createStateStore(config, '--run', statePath);
     assert.equal(resumed.iterationsUsed, 1);
     assert.equal(resumed.issue.number, 42);
-    assert.equal(resumed.issue.phase, "agent-running");
-    assert.equal(resumed.issue.body, "Requirements");
+    assert.equal(resumed.issue.phase, 'agent-running');
+    assert.equal(resumed.issue.body, 'Requirements');
     assert.throws(
-      () =>
-        createStateStore(
-          { ...config, branch: "feature/another" },
-          "--run",
-          statePath,
-        ),
+      () => createStateStore({ ...config, branch: 'feature/another' }, '--run', statePath),
       /относится к другой ветке/,
     );
 
@@ -151,13 +154,13 @@ test("persistent state survives restart and enforces branch identity", () => {
   }
 });
 
-test("check mode does not create persistent state", () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "ralph-state-check-"));
-  const statePath = path.join(directory, "state.json");
+test('check mode does not create persistent state', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-state-check-'));
+  const statePath = path.join(directory, 'state.json');
   try {
     const store = createStateStore(
-      { branch: "feature/check", baseBranch: "master", milestone: "Check" },
-      "--check",
+      { branch: 'feature/check', baseBranch: 'master', milestone: 'Check' },
+      '--check',
       statePath,
     );
     assert.equal(store.state, null);
@@ -167,20 +170,20 @@ test("check mode does not create persistent state", () => {
   }
 });
 
-test("GitHub pagination combines pages and fails instead of silently truncating", () => {
+test('GitHub pagination combines pages and fails instead of silently truncating', () => {
   const makePage = (prefix, length) =>
     Array.from({ length }, (_, index) => ({ id: `${prefix}-${index}` }));
-  const pages = [makePage("first", 100), makePage("second", 1)];
+  const pages = [makePage('first', 100), makePage('second', 1)];
   const calls = [];
   const combined = githubPagedArray(
-    "owner/repository",
-    "issues",
-    [["state", "open"]],
-    "test issues",
+    'owner/repository',
+    'issues',
+    [['state', 'open']],
+    'test issues',
     {
       maxPages: 2,
       runNetwork: (_name, args) => {
-        const page = Number(args.at(-1).split("=")[1]);
+        const page = Number(args.at(-1).split('=')[1]);
         calls.push(page);
         return { stdout: JSON.stringify(pages[page - 1]) };
       },
@@ -191,28 +194,28 @@ test("GitHub pagination combines pages and fails instead of silently truncating"
 
   assert.throws(
     () =>
-      githubPagedArray("owner/repository", "issues", [], "bounded issues", {
+      githubPagedArray('owner/repository', 'issues', [], 'bounded issues', {
         maxPages: 2,
-        runNetwork: () => ({ stdout: JSON.stringify(makePage("full", 100)) }),
+        runNetwork: () => ({ stdout: JSON.stringify(makePage('full', 100)) }),
       }),
     /достиг лимита 200 объектов/,
   );
 });
 
 function fakeCodexScript(source) {
-  const directory = mkdtempSync(path.join(tmpdir(), "ralph-fake-codex-"));
-  const scriptPath = path.join(directory, "fake-codex.mjs");
-  writeFileSync(scriptPath, source, "utf8");
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-fake-codex-'));
+  const scriptPath = path.join(directory, 'fake-codex.mjs');
+  writeFileSync(scriptPath, source, 'utf8');
 
-  if (process.platform === "win32") {
+  if (process.platform === 'win32') {
     writeFileSync(
-      path.join(directory, "codex.cmd"),
+      path.join(directory, 'codex.cmd'),
       '@echo off\r\nnode "%~dp0fake-codex.mjs" %*\r\n',
-      "utf8",
+      'utf8',
     );
   } else {
-    const executablePath = path.join(directory, "codex");
-    writeFileSync(executablePath, `#!/bin/sh\nexec node "${scriptPath}" "$@"\n`, "utf8");
+    const executablePath = path.join(directory, 'codex');
+    writeFileSync(executablePath, `#!/bin/sh\nexec node "${scriptPath}" "$@"\n`, 'utf8');
     chmodSync(executablePath, 0o755);
   }
 
@@ -222,7 +225,7 @@ function fakeCodexScript(source) {
 async function withFakeCodex(source, operation) {
   const directory = fakeCodexScript(source);
   const originalPath = process.env.PATH;
-  process.env.PATH = `${directory}${path.delimiter}${originalPath ?? ""}`;
+  process.env.PATH = `${directory}${path.delimiter}${originalPath ?? ''}`;
 
   try {
     return await operation();
@@ -238,16 +241,16 @@ async function withFakeCodex(source, operation) {
 
 function context(overrides = {}) {
   return {
-    mode: "--run",
+    mode: '--run',
     config: {
-      branch: "feature/test",
-      milestone: "Test milestone",
+      branch: 'feature/test',
+      milestone: 'Test milestone',
       maxIterations: 5,
     },
-    repository: "owner/repository",
-    milestone: { number: 7, title: "Test milestone" },
-    repositoryState: { currentBranch: "feature/test", clean: true },
-    rules: "test rules",
+    repository: 'owner/repository',
+    milestone: { number: 7, title: 'Test milestone' },
+    repositoryState: { currentBranch: 'feature/test', clean: true },
+    rules: 'test rules',
     ...overrides,
   };
 }
@@ -256,20 +259,20 @@ function actions(overrides = {}) {
   return {
     clearIssueCompletionState: () => {},
     closeMilestone: () => {},
-    issueState: () => "CLOSED",
+    issueState: () => 'CLOSED',
     openIssues: () => [],
     refreshIssue: (_repository, _issueNumber, issue) => ({
       ...issue,
-      state: "OPEN",
+      state: 'OPEN',
     }),
     printCheck: () => {},
     runPreflight: () => {},
     runCodex: async () => {},
-    createPullRequest: () => ({ number: 10, headRefOid: "head-1" }),
-    runMilestoneReview: async () => ({ verdict: "pass", summary: "ok", findings: [] }),
+    createPullRequest: () => ({ number: 10, headRefOid: 'head-1' }),
+    runMilestoneReview: async () => ({ verdict: 'pass', summary: 'ok', findings: [] }),
     createOrReopenReviewIssues: () => [],
     verifyReviewedPullRequestHead: () => {},
-    workingTreeStatus: () => "",
+    workingTreeStatus: () => '',
     ...overrides,
   };
 }
@@ -298,25 +301,28 @@ function persistentState({ iterationsUsed = 0, issue = null } = {}) {
   };
 }
 
-test("sync command runner enforces its wall-clock timeout", { concurrency: false }, () => {
+test('sync command runner enforces its wall-clock timeout', { concurrency: false }, () => {
   const timeoutMs = 100;
   const startedAt = Date.now();
 
   assert.throws(
-    () => run("node", ["-e", "setInterval(() => {}, 1_000)"], { timeoutMs }),
+    () => run('node', ['-e', 'setInterval(() => {}, 1_000)'], { timeoutMs }),
     (error) => {
-      assert.equal(error.code, "RALPH_COMMAND_TIMEOUT");
+      assert.equal(error.code, 'RALPH_COMMAND_TIMEOUT');
       assert.equal(error.timeoutMs, timeoutMs);
       assert.match(error.message, /wall-clock timeout 100 ms/);
       return true;
     },
   );
 
-  assert.ok(Date.now() - startedAt < 5_000, "hung command must be terminated promptly");
+  assert.ok(Date.now() - startedAt < 5_000, 'hung command must be terminated promptly');
 });
 
-test("Codex circuit breaker stops a fake process after maxTurns unique steps", { concurrency: false }, async () => {
-  const fakeSource = `
+test(
+  'Codex circuit breaker stops a fake process after maxTurns unique steps',
+  { concurrency: false },
+  async () => {
+    const fakeSource = `
 const events = [
   { type: "item.completed", item: { id: "step-1", type: "agent_message", text: "first" } },
   { type: "item.completed", item: { id: "step-2", type: "command_execution", aggregated_output: "second" } },
@@ -325,126 +331,131 @@ for (const event of events) process.stdout.write(JSON.stringify(event) + "\\n");
 setInterval(() => {}, 1_000);
 `;
 
-  await withFakeCodex(fakeSource, async () => {
-    await assert.rejects(
-      runCodexWithTurnLimit(["exec", "--json", "-"], {
-        input: "test prompt",
-        label: "Fake Codex",
-        maxTurns: 1,
-        timeoutMs: 5_000,
-      }),
-      (error) => {
-        assert.equal(error.code, "RALPH_MAX_TURNS");
-        assert.equal(error.turns, 1);
-        assert.match(error.message, /maxTurns=1/);
-        return true;
-      },
-    );
-  });
-});
+    await withFakeCodex(fakeSource, async () => {
+      await assert.rejects(
+        runCodexWithTurnLimit(['exec', '--json', '-'], {
+          input: 'test prompt',
+          label: 'Fake Codex',
+          maxTurns: 1,
+          timeoutMs: 5_000,
+        }),
+        (error) => {
+          assert.equal(error.code, 'RALPH_MAX_TURNS');
+          assert.equal(error.turns, 1);
+          assert.match(error.message, /maxTurns=1/);
+          return true;
+        },
+      );
+    });
+  },
+);
 
-test("Codex wall timeout stops a hung fake process independently of maxTurns", { concurrency: false }, async () => {
-  const fakeSource = "setInterval(() => {}, 1_000);\n";
-  const timeoutMs = 100;
-  const startedAt = Date.now();
+test(
+  'Codex wall timeout stops a hung fake process independently of maxTurns',
+  { concurrency: false },
+  async () => {
+    const fakeSource = 'setInterval(() => {}, 1_000);\n';
+    const timeoutMs = 100;
+    const startedAt = Date.now();
 
-  await withFakeCodex(fakeSource, async () => {
-    await assert.rejects(
-      runCodexWithTurnLimit(["exec", "--json", "-"], {
-        input: "test prompt",
-        label: "Hung fake Codex",
-        maxTurns: 50,
-        timeoutMs,
-      }),
-      (error) => {
-        assert.equal(error.code, "RALPH_CODEX_TIMEOUT");
-        assert.equal(error.timeoutMs, timeoutMs);
-        assert.equal(error.turns, 0);
-        assert.match(error.message, /wall-clock timeout 100 ms/);
-        return true;
-      },
-    );
-  });
+    await withFakeCodex(fakeSource, async () => {
+      await assert.rejects(
+        runCodexWithTurnLimit(['exec', '--json', '-'], {
+          input: 'test prompt',
+          label: 'Hung fake Codex',
+          maxTurns: 50,
+          timeoutMs,
+        }),
+        (error) => {
+          assert.equal(error.code, 'RALPH_CODEX_TIMEOUT');
+          assert.equal(error.timeoutMs, timeoutMs);
+          assert.equal(error.turns, 0);
+          assert.match(error.message, /wall-clock timeout 100 ms/);
+          return true;
+        },
+      );
+    });
 
-  assert.ok(Date.now() - startedAt < 5_000, "hung Codex must be terminated promptly");
-});
+    assert.ok(Date.now() - startedAt < 5_000, 'hung Codex must be terminated promptly');
+  },
+);
 
-test("--check reports state without running an issue or creating a PR", async () => {
+test('--check reports state without running an issue or creating a PR', async () => {
   const calls = [];
   const result = await executeMode(
-    context({ mode: "--check" }),
+    context({ mode: '--check' }),
     actions({
       openIssues: () => [{ number: 1 }],
-      printCheck: () => calls.push("check"),
-      runPreflight: () => calls.push("preflight"),
-      runCodex: async () => calls.push("codex"),
-      createPullRequest: () => calls.push("pr"),
+      printCheck: () => calls.push('check'),
+      runPreflight: () => calls.push('preflight'),
+      runCodex: async () => calls.push('codex'),
+      createPullRequest: () => calls.push('pr'),
     }),
   );
 
-  assert.deepEqual(result, { mode: "check", issues: 1 });
-  assert.deepEqual(calls, ["check"]);
+  assert.deepEqual(result, { mode: 'check', issues: 1 });
+  assert.deepEqual(calls, ['check']);
 });
 
-test("--once runs preflight before reading and implementing an issue", async () => {
+test('--once runs preflight before reading and implementing an issue', async () => {
   const calls = [];
 
   const result = await executeMode(
-    context({ mode: "--once" }),
+    context({ mode: '--once' }),
     actions({
-      runPreflight: () => calls.push("preflight"),
+      runPreflight: () => calls.push('preflight'),
       openIssues: () => {
-        calls.push("issues");
+        calls.push('issues');
         return [{ number: 11 }];
       },
       runCodex: async () => {
-        calls.push("codex");
+        calls.push('codex');
         return { completed: true };
       },
     }),
   );
 
-  assert.deepEqual(result, { mode: "once", completed: 1 });
-  assert.deepEqual(calls, ["preflight", "issues", "codex"]);
+  assert.deepEqual(result, { mode: 'once', completed: 1 });
+  assert.deepEqual(calls, ['preflight', 'issues', 'codex']);
 });
 
-test("--run runs preflight once before starting the continuous loop", async () => {
+test('--run runs preflight once before starting the continuous loop', async () => {
   const calls = [];
 
   const result = await executeMode(
     context(),
     actions({
-      runPreflight: () => calls.push("preflight"),
+      runPreflight: () => calls.push('preflight'),
       openIssues: () => {
-        calls.push("issues");
+        calls.push('issues');
         return [];
       },
       createPullRequest: () => {
-        calls.push("pr");
-        return { number: 10, headRefOid: "head-1" };
+        calls.push('pr');
+        return { number: 10, headRefOid: 'head-1' };
       },
       runMilestoneReview: async () => {
-        calls.push("review");
-        return { verdict: "pass", summary: "ok", findings: [] };
+        calls.push('review');
+        return { verdict: 'pass', summary: 'ok', findings: [] };
       },
-      verifyReviewedPullRequestHead: () => calls.push("verify-head"),
-      closeMilestone: () => calls.push("close"),
+      verifyReviewedPullRequestHead: () => calls.push('verify-head'),
+      closeMilestone: () => calls.push('close'),
     }),
   );
 
-  assert.equal(result.verdict, "pass");
+  assert.equal(result.verdict, 'pass');
   assert.deepEqual(calls, [
-    "preflight",
-    "issues",
-    "pr",
-    "review",
-    "issues",
-    "verify-head",
-    "close",
+    'preflight',
+    'issues',
+    'pr',
+    'review',
+    'issues',
+    'verify-head',
+    'close',
   ]);
 });
 
-test("a failed preflight prevents --run from reading or changing GitHub state", async () => {
+test('a failed preflight prevents --run from reading or changing GitHub state', async () => {
   const calls = [];
 
   await assert.rejects(
@@ -452,24 +463,24 @@ test("a failed preflight prevents --run from reading or changing GitHub state", 
       context(),
       actions({
         runPreflight: () => {
-          calls.push("preflight");
-          throw new Error("database is unavailable");
+          calls.push('preflight');
+          throw new Error('database is unavailable');
         },
-        openIssues: () => calls.push("issues"),
-        runCodex: async () => calls.push("codex"),
-        createPullRequest: () => calls.push("pr"),
+        openIssues: () => calls.push('issues'),
+        runCodex: async () => calls.push('codex'),
+        createPullRequest: () => calls.push('pr'),
       }),
     ),
     /database is unavailable/,
   );
 
-  assert.deepEqual(calls, ["preflight"]);
+  assert.deepEqual(calls, ['preflight']);
 });
 
-test("--once completes exactly one open issue", async () => {
+test('--once completes exactly one open issue', async () => {
   const completed = [];
   const result = await executeMode(
-    context({ mode: "--once" }),
+    context({ mode: '--once' }),
     actions({
       openIssues: () => [{ number: 11 }, { number: 12 }],
       runCodex: async (_config, _repository, issue) => {
@@ -479,35 +490,35 @@ test("--once completes exactly one open issue", async () => {
     }),
   );
 
-  assert.deepEqual(result, { mode: "once", completed: 1 });
+  assert.deepEqual(result, { mode: 'once', completed: 1 });
   assert.deepEqual(completed, [11]);
 });
 
-test("--once exits cleanly when no issue is open", async () => {
+test('--once exits cleanly when no issue is open', async () => {
   let codexRuns = 0;
   const result = await executeMode(
-    context({ mode: "--once" }),
+    context({ mode: '--once' }),
     actions({ runCodex: async () => (codexRuns += 1) }),
   );
 
-  assert.deepEqual(result, { mode: "once", completed: 0 });
+  assert.deepEqual(result, { mode: 'once', completed: 0 });
   assert.equal(codexRuns, 0);
 });
 
-test("--once reports an issue-level review failure without claiming completion", async () => {
+test('--once reports an issue-level review failure without claiming completion', async () => {
   const result = await executeMode(
-    context({ mode: "--once" }),
+    context({ mode: '--once' }),
     actions({
       openIssues: () => [{ number: 11 }],
       runCodex: async () => ({ completed: false }),
     }),
   );
 
-  assert.deepEqual(result, { mode: "once", completed: 0, reviewFailed: true });
+  assert.deepEqual(result, { mode: 'once', completed: 0, reviewFailed: true });
 });
 
-test("continuous loop does not spend a development iteration for a linked commit", async () => {
-  const commit = "e".repeat(40);
+test('continuous loop does not spend a development iteration for a linked commit', async () => {
+  const commit = 'e'.repeat(40);
   let open = true;
   let receivedIssue;
   const stateStore = persistentState();
@@ -520,8 +531,8 @@ test("continuous loop does not spend a development iteration for a linked commit
           ? [
               {
                 number: 64,
-                title: "Already implemented",
-                updatedAt: "2026-08-14T09:31:03Z",
+                title: 'Already implemented',
+                updatedAt: '2026-08-14T09:31:03Z',
               },
             ]
           : [],
@@ -539,7 +550,7 @@ test("continuous loop does not spend a development iteration for a linked commit
   assert.equal(stateStore.iterationsUsed, 0);
 });
 
-test("continuous loop fixes new review issues even while GitHub list remains stale", async () => {
+test('continuous loop fixes new review issues even while GitHub list remains stale', async () => {
   let reviewRuns = 0;
   const completed = [];
   const pullRequests = [];
@@ -554,12 +565,12 @@ test("continuous loop fixes new review issues even while GitHub list remains sta
       reviewRuns += 1;
       if (reviewRuns === 1) {
         return {
-          verdict: "fail",
-          summary: "two findings",
-          findings: [{ title: "first" }, { title: "second" }],
+          verdict: 'fail',
+          summary: 'two findings',
+          findings: [{ title: 'first' }, { title: 'second' }],
         };
       }
-      return { verdict: "pass", summary: "clean", findings: [] };
+      return { verdict: 'pass', summary: 'clean', findings: [] };
     },
     createOrReopenReviewIssues: (_config, _repository, _milestone, _pr, review) => {
       return review.findings.map((finding, index) => ({
@@ -575,14 +586,14 @@ test("continuous loop fixes new review issues even while GitHub list remains sta
 
   const result = await runContinuousLoop(context(), testActions);
 
-  assert.equal(result.verdict, "pass");
+  assert.equal(result.verdict, 'pass');
   assert.equal(result.iterations, 2);
   assert.deepEqual(completed, [101, 102]);
-  assert.deepEqual(pullRequests, ["head-0", "head-2"]);
+  assert.deepEqual(pullRequests, ['head-0', 'head-2']);
   assert.equal(reviewRuns, 2);
 });
 
-test("continuous loop closes the milestone only after a clean PASS review", async () => {
+test('continuous loop closes the milestone only after a clean PASS review', async () => {
   let milestoneCloses = 0;
 
   const result = await runContinuousLoop(
@@ -594,11 +605,11 @@ test("continuous loop closes the milestone only after a clean PASS review", asyn
     }),
   );
 
-  assert.equal(result.verdict, "pass");
+  assert.equal(result.verdict, 'pass');
   assert.equal(milestoneCloses, 1);
 });
 
-test("continuous loop treats PASS with findings as recovery work", async () => {
+test('continuous loop treats PASS with findings as recovery work', async () => {
   let reviewRuns = 0;
   const completed = [];
 
@@ -609,10 +620,10 @@ test("continuous loop treats PASS with findings as recovery work", async () => {
       runMilestoneReview: async () => {
         reviewRuns += 1;
         return reviewRuns === 1
-          ? { verdict: "pass", summary: "inconsistent", findings: [{ title: "still broken" }] }
-          : { verdict: "pass", summary: "clean", findings: [] };
+          ? { verdict: 'pass', summary: 'inconsistent', findings: [{ title: 'still broken' }] }
+          : { verdict: 'pass', summary: 'clean', findings: [] };
       },
-      createOrReopenReviewIssues: () => [{ number: 201, title: "still broken" }],
+      createOrReopenReviewIssues: () => [{ number: 201, title: 'still broken' }],
       runCodex: async (_config, _repository, issue) => {
         completed.push(issue.number);
         return { completed: true };
@@ -620,15 +631,15 @@ test("continuous loop treats PASS with findings as recovery work", async () => {
     }),
   );
 
-  assert.equal(result.verdict, "pass");
+  assert.equal(result.verdict, 'pass');
   assert.deepEqual(completed, [201]);
   assert.equal(reviewRuns, 2);
 });
 
-test("continuous loop stops when the shared issue iteration budget is exhausted", async () => {
+test('continuous loop stops when the shared issue iteration budget is exhausted', async () => {
   let open = [{ number: 1 }, { number: 2 }];
   const limitedContext = context({
-    config: { branch: "feature/test", milestone: "Test milestone", maxIterations: 1 },
+    config: { branch: 'feature/test', milestone: 'Test milestone', maxIterations: 1 },
   });
 
   await assert.rejects(
@@ -645,18 +656,18 @@ test("continuous loop stops when the shared issue iteration budget is exhausted"
   );
 });
 
-test("continuous loop does not reset an iteration budget restored from persistent state", async () => {
+test('continuous loop does not reset an iteration budget restored from persistent state', async () => {
   const stateStore = persistentState({ iterationsUsed: 1 });
   let codexRuns = 0;
 
   await assert.rejects(
     runContinuousLoop(
       context({
-        config: { branch: "feature/test", milestone: "Test milestone", maxIterations: 1 },
+        config: { branch: 'feature/test', milestone: 'Test milestone', maxIterations: 1 },
         stateStore,
       }),
       actions({
-        openIssues: () => [{ number: 8, title: "Still open" }],
+        openIssues: () => [{ number: 8, title: 'Still open' }],
         runCodex: async () => {
           codexRuns += 1;
           return { completed: true };
@@ -670,18 +681,18 @@ test("continuous loop does not reset an iteration budget restored from persisten
   assert.equal(codexRuns, 0);
 });
 
-test("continuous loop prioritizes a persisted recovery issue over a lower issue number", async () => {
+test('continuous loop prioritizes a persisted recovery issue over a lower issue number', async () => {
   const stateStore = persistentState({
     issue: {
       number: 20,
-      title: "Resume interrupted work",
-      url: "https://example.test/issues/20",
-      phase: "working-tree",
+      title: 'Resume interrupted work',
+      url: 'https://example.test/issues/20',
+      phase: 'working-tree',
     },
   });
   let visibleIssues = [
-    { number: 2, title: "Lower number" },
-    { number: 20, title: "Resume interrupted work" },
+    { number: 2, title: 'Lower number' },
+    { number: 20, title: 'Resume interrupted work' },
   ];
   const completed = [];
 
@@ -698,12 +709,12 @@ test("continuous loop prioritizes a persisted recovery issue over a lower issue 
     }),
   );
 
-  assert.equal(result.verdict, "pass");
+  assert.equal(result.verdict, 'pass');
   assert.deepEqual(completed, [20, 2]);
   assert.equal(result.iterations, 2);
 });
 
-test("continuous loop retries the same issue after an issue-level review finding", async () => {
+test('continuous loop retries the same issue after an issue-level review finding', async () => {
   let open = [{ number: 8 }];
   let attempts = 0;
 
@@ -722,14 +733,14 @@ test("continuous loop retries the same issue after an issue-level review finding
     }),
   );
 
-  assert.equal(result.verdict, "pass");
+  assert.equal(result.verdict, 'pass');
   assert.equal(result.iterations, 2);
   assert.equal(attempts, 2);
 });
 
-test("continuous loop keeps fresh retry context and ignores a stale completed issue", async () => {
+test('continuous loop keeps fresh retry context and ignores a stale completed issue', async () => {
   const seenBodies = [];
-  const staleIssue = { number: 8, title: "Retry me", body: "stale body" };
+  const staleIssue = { number: 8, title: 'Retry me', body: 'stale body' };
   let attempts = 0;
 
   const result = await runContinuousLoop(
@@ -742,7 +753,7 @@ test("continuous loop keeps fresh retry context and ignores a stale completed is
         attempts += 1;
         seenBodies.push(issue.body);
         if (attempts === 1) {
-          issue.body = "fresh review context";
+          issue.body = 'fresh review context';
           return { completed: false };
         }
         return { completed: true };
@@ -750,13 +761,13 @@ test("continuous loop keeps fresh retry context and ignores a stale completed is
     }),
   );
 
-  assert.equal(result.verdict, "pass");
+  assert.equal(result.verdict, 'pass');
   assert.equal(result.iterations, 2);
-  assert.deepEqual(seenBodies, ["stale body", "fresh review context"]);
+  assert.deepEqual(seenBodies, ['stale body', 'fresh review context']);
 });
 
-test("continuous loop processes an issue that was genuinely reopened", async () => {
-  const issue = { number: 8, title: "Reopened", body: "requirements" };
+test('continuous loop processes an issue that was genuinely reopened', async () => {
+  const issue = { number: 8, title: 'Reopened', body: 'requirements' };
   let codexRuns = 0;
   let visible = true;
 
@@ -764,7 +775,7 @@ test("continuous loop processes an issue that was genuinely reopened", async () 
     context(),
     actions({
       openIssues: () => (visible ? [{ ...issue }] : []),
-      issueState: () => "OPEN",
+      issueState: () => 'OPEN',
       runCodex: async () => {
         codexRuns += 1;
         // После первого закрытия GitHub возвращает эту issue как действительно
@@ -777,12 +788,12 @@ test("continuous loop processes an issue that was genuinely reopened", async () 
     }),
   );
 
-  assert.equal(result.verdict, "pass");
+  assert.equal(result.verdict, 'pass');
   assert.equal(result.iterations, 2);
   assert.equal(codexRuns, 2);
 });
 
-test("continuous loop rejects FAIL without queued recovery issues", async () => {
+test('continuous loop rejects FAIL without queued recovery issues', async () => {
   let milestoneCloses = 0;
 
   await assert.rejects(
@@ -793,8 +804,8 @@ test("continuous loop rejects FAIL without queued recovery issues", async () => 
           milestoneCloses += 1;
         },
         runMilestoneReview: async () => ({
-          verdict: "fail",
-          summary: "invalid empty recovery",
+          verdict: 'fail',
+          summary: 'invalid empty recovery',
           findings: [],
         }),
       }),
@@ -805,46 +816,46 @@ test("continuous loop rejects FAIL without queued recovery issues", async () => 
   assert.equal(milestoneCloses, 0);
 });
 
-test("finding fingerprint is stable for Unicode titles and changes with location", () => {
+test('finding fingerprint is stable for Unicode titles and changes with location', () => {
   const pullRequest = { number: 61 };
   const finding = {
-    severity: "P1",
-    title: "Обработать ошибку reconciliation",
-    file: "apps/api/src/service.ts",
+    severity: 'P1',
+    title: 'Обработать ошибку reconciliation',
+    file: 'apps/api/src/service.ts',
   };
 
   const first = reviewFindingFingerprint(pullRequest, finding);
   const equivalent = reviewFindingFingerprint(pullRequest, {
     ...finding,
-    title: "ОБРАБОТАТЬ   ОШИБКУ — reconciliation!",
+    title: 'ОБРАБОТАТЬ   ОШИБКУ — reconciliation!',
   });
   const anotherFile = reviewFindingFingerprint(pullRequest, {
     ...finding,
-    file: "apps/api/src/other.ts",
+    file: 'apps/api/src/other.ts',
   });
 
   assert.equal(first, equivalent);
   assert.notEqual(first, anotherFile);
 });
 
-test("review findings create, reuse, and reopen milestone issues without duplicates", () => {
-  const config = { milestone: "Test milestone" };
-  const milestone = { number: 7, title: "Test milestone" };
-  const pullRequest = { number: 61, headRefOid: "head-1" };
+test('review findings create, reuse, and reopen milestone issues without duplicates', () => {
+  const config = { milestone: 'Test milestone' };
+  const milestone = { number: 7, title: 'Test milestone' };
+  const pullRequest = { number: 61, headRefOid: 'head-1' };
   const findings = [
-    { severity: "P1", title: "Open finding", body: "open", file: "open.ts", line: 1 },
-    { severity: "P2", title: "Closed finding", body: "closed", file: "closed.ts", line: 2 },
-    { severity: "P2", title: "New finding", body: "new", file: "new.ts", line: 3 },
+    { severity: 'P1', title: 'Open finding', body: 'open', file: 'open.ts', line: 1 },
+    { severity: 'P2', title: 'Closed finding', body: 'closed', file: 'closed.ts', line: 2 },
+    { severity: 'P2', title: 'New finding', body: 'new', file: 'new.ts', line: 3 },
   ];
   const existing = [
     {
       number: 1,
-      state: "OPEN",
+      state: 'OPEN',
       body: reviewFindingMarker(pullRequest, findings[0]),
     },
     {
       number: 2,
-      state: "CLOSED",
+      state: 'CLOSED',
       body: reviewFindingMarker(pullRequest, findings[1]),
     },
   ];
@@ -854,14 +865,14 @@ test("review findings create, reuse, and reopen milestone issues without duplica
 
   const queued = createOrReopenReviewIssues(
     config,
-    "owner/repository",
+    'owner/repository',
     milestone,
     pullRequest,
-    { verdict: "fail", findings: [...findings, findings[0]] },
+    { verdict: 'fail', findings: [...findings, findings[0]] },
     {
       milestoneIssues: () => existing,
       createReviewFindingIssue: (_config, _repository, _milestone, _pr, finding) => {
-        const issue = { number: 3, state: "OPEN", body: reviewFindingMarker(pullRequest, finding) };
+        const issue = { number: 3, state: 'OPEN', body: reviewFindingMarker(pullRequest, finding) };
         created.push(issue.number);
         return issue;
       },
@@ -879,22 +890,22 @@ test("review findings create, reuse, and reopen milestone issues without duplica
   assert.deepEqual(reopened, [2]);
 });
 
-test("issue review context is replaced instead of growing on every retry", () => {
+test('issue review context is replaced instead of growing on every retry', () => {
   const first = issueBodyWithReviewContext(
-    { body: "Original requirements" },
+    { body: 'Original requirements' },
     {
-      summary: "First review",
+      summary: 'First review',
       findings: [
-        { severity: "P1", title: "First finding", file: "first.ts", line: 1, body: "Fix first" },
+        { severity: 'P1', title: 'First finding', file: 'first.ts', line: 1, body: 'Fix first' },
       ],
     },
   );
   const second = issueBodyWithReviewContext(
     { body: first },
     {
-      summary: "Second review",
+      summary: 'Second review',
       findings: [
-        { severity: "P2", title: "Second finding", file: "second.ts", line: 2, body: "Fix second" },
+        { severity: 'P2', title: 'Second finding', file: 'second.ts', line: 2, body: 'Fix second' },
       ],
     },
   );
@@ -905,26 +916,22 @@ test("issue review context is replaced instead of growing on every retry", () =>
   assert.equal(second.match(/ralph-issue-review-context:start/g)?.length, 1);
 });
 
-test("issue completion state can be replaced and removed by review context", () => {
-  const firstCommit = "a".repeat(40);
-  const secondCommit = "b".repeat(40);
+test('issue completion state can be replaced and removed by review context', () => {
+  const firstCommit = 'a'.repeat(40);
+  const secondCommit = 'b'.repeat(40);
   const pending = issueBodyWithCompletionState(
-    { body: "Original requirements" },
-    "pending-review",
+    { body: 'Original requirements' },
+    'pending-review',
     firstCommit,
   );
-  const passed = issueBodyWithCompletionState(
-    { body: pending },
-    "review-passed",
-    secondCommit,
-  );
+  const passed = issueBodyWithCompletionState({ body: pending }, 'review-passed', secondCommit);
 
   assert.deepEqual(issueCompletionState({ body: pending }), {
-    status: "pending-review",
+    status: 'pending-review',
     commit: firstCommit,
   });
   assert.deepEqual(issueCompletionState({ body: passed }), {
-    status: "review-passed",
+    status: 'review-passed',
     commit: secondCommit,
   });
   assert.equal(passed.match(/ralph-issue-completion/g)?.length, 1);
@@ -932,91 +939,75 @@ test("issue completion state can be replaced and removed by review context", () 
   const retryBody = issueBodyWithReviewContext(
     { body: passed },
     {
-      summary: "Needs another fix",
-      findings: [
-        { severity: "P1", title: "Finding", file: "file.ts", line: 1, body: "Fix it" },
-      ],
+      summary: 'Needs another fix',
+      findings: [{ severity: 'P1', title: 'Finding', file: 'file.ts', line: 1, body: 'Fix it' }],
     },
   );
   assert.equal(issueCompletionState({ body: retryBody }), null);
   assert.doesNotMatch(retryBody, /ralph-issue-completion/);
 });
 
-test("already-fixed marker accepts a commit SHA only on its own final line", () => {
+test('already-fixed marker accepts a commit SHA only on its own final line', () => {
   assert.equal(
-    alreadyFixedCommitFromAgent(`Checks passed.\n\nALREADY_FIXED: ${"c".repeat(40)}`),
-    "c".repeat(40),
+    alreadyFixedCommitFromAgent(`Checks passed.\n\nALREADY_FIXED: ${'c'.repeat(40)}`),
+    'c'.repeat(40),
   );
-  assert.equal(alreadyFixedCommitFromAgent("ALREADY_FIXED: not-a-sha"), null);
-  assert.equal(
-    alreadyFixedCommitFromAgent(`ALREADY_FIXED: ${"d".repeat(40)}\nMore text`),
-    null,
-  );
+  assert.equal(alreadyFixedCommitFromAgent('ALREADY_FIXED: not-a-sha'), null);
+  assert.equal(alreadyFixedCommitFromAgent(`ALREADY_FIXED: ${'d'.repeat(40)}\nMore text`), null);
   assert.equal(alreadyFixedCommitFromAgent(undefined), null);
 });
 
-test("fresh Ralph-Issue trailer links an existing commit without another Terra run", () => {
-  const commit = "a".repeat(40);
+test('fresh Ralph-Issue trailer links an existing commit without another Terra run', () => {
+  const commit = 'a'.repeat(40);
   const commands = [];
   const execute = (_command, args) => {
     commands.push(args);
-    if (args[0] === "log") {
+    if (args[0] === 'log') {
       return { status: 0, stdout: `${commit}\t2026-08-14T12:39:45+03:00` };
     }
-    return { status: 0, stdout: "#64" };
+    return { status: 0, stdout: '#64' };
   };
 
   assert.equal(
-    linkedCommitForIssue(
-      { number: 64, updatedAt: "2026-08-14T09:31:03Z" },
-      execute,
-    ),
+    linkedCommitForIssue({ number: 64, updatedAt: '2026-08-14T09:31:03Z' }, execute),
     commit,
   );
-  assert.deepEqual(commands[0].slice(-3), ["--grep", "Ralph-Issue: #64", "HEAD"]);
+  assert.deepEqual(commands[0].slice(-3), ['--grep', 'Ralph-Issue: #64', 'HEAD']);
 });
 
-test("Ralph-Issue trailer older than the latest issue update is not reused", () => {
+test('Ralph-Issue trailer older than the latest issue update is not reused', () => {
   const execute = (_command, args) => ({
     status: 0,
-    stdout:
-      args[0] === "log"
-        ? `${"b".repeat(40)}\t2026-08-14T09:00:00Z`
-        : "#64",
+    stdout: args[0] === 'log' ? `${'b'.repeat(40)}\t2026-08-14T09:00:00Z` : '#64',
   });
 
   assert.equal(
-    linkedCommitForIssue(
-      { number: 64, updatedAt: "2026-08-14T09:31:03Z" },
-      execute,
-    ),
+    linkedCommitForIssue({ number: 64, updatedAt: '2026-08-14T09:31:03Z' }, execute),
     null,
   );
   assert.equal(linkedCommitForIssue({ number: 64 }, execute), null);
 });
 
-test("review result invariants reject empty FAIL and convert PASS with findings", () => {
+test('review result invariants reject empty FAIL and convert PASS with findings', () => {
   assert.throws(
-    () => normalizeReviewResult({ verdict: "fail", summary: "broken", findings: [] }),
+    () => normalizeReviewResult({ verdict: 'fail', summary: 'broken', findings: [] }),
     /FAIL without actionable findings/,
   );
 
   const normalized = normalizeReviewResult({
-    verdict: "pass",
-    summary: "inconsistent",
-    findings: [
-      { severity: "P1", title: "Bug", body: "Fix it", file: "file.ts", line: 1 },
-    ],
+    verdict: 'pass',
+    summary: 'inconsistent',
+    findings: [{ severity: 'P1', title: 'Bug', body: 'Fix it', file: 'file.ts', line: 1 }],
   });
-  assert.equal(normalized.verdict, "fail");
+  assert.equal(normalized.verdict, 'fail');
   assert.equal(normalized.findings.length, 1);
   assert.match(normalized.summary, /treated the result as FAIL/);
 });
 
-test("milestone findings are deduplicated, prioritized, and bounded", () => {
+test('milestone findings are deduplicated, prioritized, and bounded', () => {
   const pullRequest = { number: 61 };
   const findings = Array.from({ length: 12 }, (_, index) => ({
-    severity: index === 11 ? "P0" : index >= 8 ? "P1" : "P2",
+    severity: index === 11 ? 'P0' : index >= 8 ? 'P1' : 'P2',
     title: `Finding ${index}`,
     body: `Body ${index}`,
     file: `file-${index}.ts`,
@@ -1025,20 +1016,17 @@ test("milestone findings are deduplicated, prioritized, and bounded", () => {
   findings.push({ ...findings[11] });
 
   const limited = limitMilestoneReviewFindings(
-    { verdict: "fail", summary: "Review summary.", findings },
+    { verdict: 'fail', summary: 'Review summary.', findings },
     pullRequest,
     10,
   );
 
   assert.equal(limited.findings.length, 10);
-  assert.equal(limited.findings[0].severity, "P0");
+  assert.equal(limited.findings[0].severity, 'P0');
   assert.deepEqual(
     limited.findings.slice(1, 4).map((finding) => finding.severity),
-    ["P1", "P1", "P1"],
+    ['P1', 'P1', 'P1'],
   );
-  assert.equal(
-    limited.findings.filter((finding) => finding.title === "Finding 11").length,
-    1,
-  );
+  assert.equal(limited.findings.filter((finding) => finding.title === 'Finding 11').length, 1);
   assert.match(limited.summary, /2 findings were deferred/);
 });

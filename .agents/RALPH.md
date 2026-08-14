@@ -1,7 +1,10 @@
 # Ralph Loop для Codex
 
 Codex не использует Claude Code `Stop` hook. В этом проекте
-циклом управляет внешний Node.js-скрипт `.agents/ralph-loop.mjs`.
+циклом управляет внешний Node.js-скрипт `scripts/ralph/ralph-loop.mjs`.
+Файл `.agents/ralph-loop.mjs` — только совместимый launcher для старой команды.
+Исполняемый код и тесты намеренно находятся вне `.agents`: эта папка содержит
+доверенные инструкции и доступна дочернему Codex только для чтения.
 Правила автономной сессии хранятся отдельно в `.agents/ralph-rules.md` и
 добавляются в prompt только при запуске Ralph Loop.
 
@@ -90,14 +93,18 @@ issue: старый trailer после нового review или ручного
 
 ```powershell
 # Только проверить конфиг, GitHub, milestone и ветку
-node .agents/ralph-loop.mjs --check
+node scripts/ralph/ralph-loop.mjs --check
 
 # Выполнить ровно одну issue и остановиться
-node .agents/ralph-loop.mjs --once
+node scripts/ralph/ralph-loop.mjs --once
 
 # Выполнить issues, создать draft PR и запустить итоговый Sol-review
-node .agents/ralph-loop.mjs --run
+node scripts/ralph/ralph-loop.mjs --run
 ```
+
+Старые команды через `.agents/ralph-loop.mjs` продолжают работать и запускают
+ту же реализацию. Для новых инструкций используйте канонический путь
+`scripts/ralph/ralph-loop.mjs`.
 
 Для первого тренировочного запуска использовать `--once` и вручную проверить
 изменения и commit. Для AFK запускайте `--run` из чистой консоли в корне
