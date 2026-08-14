@@ -74,6 +74,53 @@ function outputTail(value, maxLength = 20_000) {
   return text.length > maxLength ? `…${text.slice(-maxLength)}` : text;
 }
 
+const sanitizedChildEnvironmentVariables = [
+  'PATH',
+  'Path',
+  'PATHEXT',
+  'ComSpec',
+  'SystemRoot',
+  'SYSTEMROOT',
+  'WINDIR',
+  'TEMP',
+  'TMP',
+  'TMPDIR',
+  'HOME',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'XDG_CONFIG_HOME',
+  'XDG_CACHE_HOME',
+  'CODEX_HOME',
+];
+
+const credentialFreeEnvironmentVariables = sanitizedChildEnvironmentVariables.filter(
+  (name) =>
+    ![
+      'HOME',
+      'USERPROFILE',
+      'APPDATA',
+      'LOCALAPPDATA',
+      'XDG_CONFIG_HOME',
+      'XDG_CACHE_HOME',
+      'CODEX_HOME',
+    ].includes(name),
+);
+
+function createEnvironment(variableNames, source = process.env) {
+  return Object.fromEntries(
+    variableNames.flatMap((name) => (source[name] === undefined ? [] : [[name, source[name]]])),
+  );
+}
+
+function sanitizedChildEnvironment(source = process.env) {
+  return createEnvironment(sanitizedChildEnvironmentVariables, source);
+}
+
+function credentialFreeEnvironment(source = process.env) {
+  return createEnvironment(credentialFreeEnvironmentVariables, source);
+}
+
 function run(name, args, options = {}) {
   const commandTarget = commandSpec(name, args);
   const useCommandRunner = process.platform === 'win32';
@@ -93,6 +140,7 @@ function run(name, args, options = {}) {
           cwd: projectRoot,
           input: options.input,
           timeoutMs,
+          env: options.env,
         })
       : options.input,
     stdio,
@@ -100,6 +148,7 @@ function run(name, args, options = {}) {
     killSignal: 'SIGTERM',
     maxBuffer: 50 * 1024 * 1024,
     windowsHide: true,
+    ...(options.env === undefined ? {} : { env: options.env }),
   });
 
   const commandRunnerTimedOut =
@@ -231,6 +280,7 @@ async function runCodexWithTurnLimit(args, options) {
   const { command, commandArgs } = commandSpec('codex', args);
   const child = spawn(command, commandArgs, {
     cwd: projectRoot,
+    env: options.env ?? sanitizedChildEnvironment(),
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
     windowsHide: true,
@@ -419,6 +469,7 @@ function loadConfig() {
   config.runtime.reviewRetryAttempts ??= 3;
   config.developmentModel ??= 'gpt-5.6-terra';
   config.rulesFile ??= '.agents/ralph-rules.md';
+  config.trustedIssueAuthors ??= [];
   config.preflightScripts ??= [];
   config.validationScripts ??= ['format:check', 'lint', 'build'];
   config.review ??= {
@@ -456,6 +507,19 @@ function loadConfig() {
   if (!Number.isInteger(config.maxTestFixAttempts) || config.maxTestFixAttempts < 1) {
     fail('Поле "maxTestFixAttempts" должно быть целым числом больше 0.');
   }
+  if (
+    !Array.isArray(config.trustedIssueAuthors) ||
+    config.trustedIssueAuthors.some(
+      (author) => typeof author !== 'string' || !/^[a-zA-Z0-9-]+$/.test(author),
+    )
+  ) {
+    fail('Поле "trustedIssueAuthors" должно содержать GitHub логины доверенных авторов.');
+  }
+  const normalizedTrustedAuthors = config.trustedIssueAuthors.map((author) => author.toLowerCase());
+  if (new Set(normalizedTrustedAuthors).size !== normalizedTrustedAuthors.length) {
+    fail('Поле "trustedIssueAuthors" не должно содержать одинаковые логины с разным регистром.');
+  }
+  config.trustedIssueAuthors = normalizedTrustedAuthors;
   if (
     !Array.isArray(config.preflightScripts) ||
     !Array.isArray(config.validationScripts) ||
@@ -940,8 +1004,26 @@ function openIssues(repository, milestone) {
       body: issue.body,
       url: issue.html_url,
       updatedAt: issue.updated_at,
+      authorLogin: issue.user?.login ?? null,
+      authorAssociation: issue.author_association ?? null,
     }))
     .sort((left, right) => left.number - right.number);
+}
+
+function assertTrustedIssue(config, issue, repository) {
+  const author = typeof issue.authorLogin === 'string' ? issue.authorLogin : '';
+  const repositoryOwner = repository?.split('/')[0]?.toLowerCase();
+  const trustedAuthors = new Set(
+    [...(config.trustedIssueAuthors ?? []), repositoryOwner]
+      .filter(Boolean)
+      .map((trustedAuthor) => trustedAuthor.toLowerCase()),
+  );
+  if (!trustedAuthors.has(author.toLowerCase())) {
+    fail(
+      `Issue #${issue.number} authored by "${author || 'unknown'}" is not trusted. ` +
+        'Only the repository owner or authors configured in trustedIssueAuthors may provide AFK instructions.',
+    );
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -1020,6 +1102,8 @@ function refreshIssue(repository, issueNumber) {
     url: issue.html_url,
     state: issue.state?.toUpperCase(),
     updatedAt: issue.updated_at,
+    authorLogin: issue.user?.login ?? null,
+    authorAssociation: issue.author_association ?? null,
   };
 }
 
@@ -1621,6 +1705,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 // -----------------------------------------------------------------------------
 
 async function runCodex(config, repository, issue, rules) {
+  assertTrustedIssue(config, issue, repository);
   const storedIssue =
     activeStateStore?.issue?.number === issue.number ? activeStateStore.issue : null;
   if (storedIssue?.commit && ['committed', 'pushed', 'reviewing'].includes(storedIssue.phase)) {
@@ -1811,6 +1896,7 @@ function runConfiguredScripts(config, scripts, label) {
       run('npm', ['run', script], {
         echoOutput: true,
         timeoutMs: config.runtime.validationTimeoutMs,
+        env: credentialFreeEnvironment(),
       });
     } catch (error) {
       error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
@@ -1833,6 +1919,7 @@ function runConfiguredValidation(config) {
       run('npm', ['run', script], {
         echoOutput: true,
         timeoutMs: config.runtime.validationTimeoutMs,
+        env: credentialFreeEnvironment(),
       });
     } catch (error) {
       error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
@@ -2714,10 +2801,12 @@ if (isMainModule) {
 }
 
 export {
+  assertTrustedIssue,
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
   buildMilestoneReviewPrompt,
   createStateStore,
+  credentialFreeEnvironment,
   createOrReopenReviewIssues,
   executeMode,
   issueBodyWithCompletionState,
@@ -2735,4 +2824,5 @@ export {
   runCli,
   runCodexWithTurnLimit,
   runContinuousLoop,
+  sanitizedChildEnvironment,
 };

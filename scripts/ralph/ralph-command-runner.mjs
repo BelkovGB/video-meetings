@@ -19,6 +19,7 @@ try {
 
 const child = spawn(request.command, request.args, {
   cwd: request.cwd,
+  ...(request.env === undefined ? {} : { env: request.env }),
   stdio: ['pipe', 'pipe', 'pipe'],
   windowsHide: true,
 });
