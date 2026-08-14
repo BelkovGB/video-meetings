@@ -255,13 +255,21 @@ export default function DashboardPage() {
             </span>
             <span className="text-sm font-semibold tracking-wide text-cyan-50">VIDEO MEETINGS</span>
           </div>
-          <button
-            type="button"
-            className="min-h-11 rounded-xl border border-white/15 px-4 text-sm font-semibold text-slate-200 transition hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-cyan-300 focus:ring-offset-2 focus:ring-offset-slate-950"
-            onClick={logout}
-          >
-            Выйти из аккаунта
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              href="/profile"
+              className="inline-flex min-h-11 touch-manipulation items-center justify-center rounded-xl border border-white/15 px-4 text-sm font-semibold text-slate-200 transition duration-200 hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300 focus:ring-offset-2 focus:ring-offset-slate-950"
+            >
+              Открыть профиль
+            </Link>
+            <button
+              type="button"
+              className="min-h-11 touch-manipulation rounded-xl border border-white/15 px-4 text-sm font-semibold text-slate-200 transition hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-cyan-300 focus:ring-offset-2 focus:ring-offset-slate-950"
+              onClick={logout}
+            >
+              Выйти из аккаунта
+            </button>
+          </div>
         </header>
 
         <section className="grid gap-6 py-10 lg:grid-cols-[1.15fr_0.85fr] lg:py-14">
