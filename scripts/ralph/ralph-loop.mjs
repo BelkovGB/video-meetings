@@ -39,7 +39,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..', '..');
 const configPath = path.join(projectRoot, '.agents', 'ralph.config.json');
 const approvedIssueSnapshotsHash =
-  '490d4bb1d9727a20f89c0116327a219ea46f121debf98b750a25ee6d67ba5d30';
+  'c0e278f489ab9e9b20c7d21232b9bb50e1e268eed0ba338966091da84777701e';
 const mode = process.argv[2] ?? '--check';
 const supportedModes = new Set(['--check', '--once', '--run']);
 const runtimeDirectory = path.join(projectRoot, '.git', 'ralph-loop');
@@ -47,6 +47,7 @@ const runtimeStatePath = path.join(runtimeDirectory, 'state.json');
 const runtimeLockPath = path.join(runtimeDirectory, 'run.lock');
 const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
 const commandRunnerPath = path.join(scriptDirectory, 'ralph-command-runner.mjs');
+const ralphInfrastructureLabel = 'ralph-infrastructure';
 let runtimeSettings = {
   commandTimeoutMs: 300_000,
   validationTimeoutMs: 1_800_000,
@@ -65,6 +66,63 @@ const preparedValidationImages = new Set();
 
 function fail(message) {
   throw new Error(message);
+}
+
+// Ralph is the control plane for product work. Its own implementation and
+// instructions are maintained manually in this chat and are never product work.
+function isRalphInfrastructurePath(file) {
+  const normalized = String(file ?? '')
+    .trim()
+    .replaceAll('\\', '/')
+    .replace(/^\.\//, '')
+    .replace(/:\d+(?::\d+)?$/, '');
+
+  return (
+    normalized === 'AGENTS.md' ||
+    normalized.endsWith('/AGENTS.md') ||
+    normalized === '.agents' ||
+    normalized.startsWith('.agents/') ||
+    normalized === 'scripts/ralph' ||
+    normalized.startsWith('scripts/ralph/')
+  );
+}
+
+function issueLabels(issue) {
+  return (issue?.labels ?? []).map((label) =>
+    typeof label === 'string' ? label : String(label?.name ?? ''),
+  );
+}
+
+function milestoneFindingPath(issue) {
+  if (!String(issue?.body ?? '').includes('<!-- ralph-milestone-finding ')) return null;
+  return String(issue.body).match(/^\*\*Location:\*\*\s+`([^`]+)`\s*$/m)?.[1] ?? null;
+}
+
+function isRalphInfrastructureIssue(issue) {
+  return (
+    issueLabels(issue).some((label) => label.toLowerCase() === ralphInfrastructureLabel) ||
+    isRalphInfrastructurePath(milestoneFindingPath(issue))
+  );
+}
+
+function scopeMilestoneReviewToProduct(review) {
+  const productFindings = review.findings.filter(
+    (finding) => !isRalphInfrastructurePath(finding.file),
+  );
+  const ignoredCount = review.findings.length - productFindings.length;
+  if (ignoredCount === 0) return review;
+
+  console.log(
+    `Milestone review: ${ignoredCount} замечаний к Ralph-инфраструктуре исключены из продуктовой очереди.`,
+  );
+  return {
+    ...review,
+    verdict: productFindings.length > 0 ? 'fail' : 'pass',
+    summary:
+      `${review.summary} ${ignoredCount} Ralph infrastructure finding(s) were excluded ` +
+      'from the product milestone and must be handled manually in the configuration chat.',
+    findings: productFindings,
+  };
 }
 
 function executable(name) {
@@ -1238,7 +1296,15 @@ function openIssues(repository, milestone) {
       updatedAt: issue.updated_at,
       authorLogin: issue.user?.login ?? null,
       authorAssociation: issue.author_association ?? null,
+      labels: issue.labels ?? [],
     }))
+    .filter((issue) => {
+      if (!isRalphInfrastructureIssue(issue)) return true;
+      console.log(
+        `Issue #${issue.number} относится к Ralph-инфраструктуре и исключена из очереди.`,
+      );
+      return false;
+    })
     .sort((left, right) => left.number - right.number);
 }
 
@@ -1252,6 +1318,12 @@ function issueContentHash(issue) {
 }
 
 function assertTrustedIssue(config, issue, repository) {
+  if (isRalphInfrastructureIssue(issue)) {
+    fail(
+      `Issue #${issue.number} относится к Ralph-инфраструктуре. ` +
+        'Ralph выполняет только продуктовые задачи video-meetings; настройка цикла выполняется вручную.',
+    );
+  }
   const author = typeof issue.authorLogin === 'string' ? issue.authorLogin : '';
   const repositoryOwner = repository?.split('/')[0]?.toLowerCase();
   const trustedAuthors = new Set(
@@ -1369,6 +1441,7 @@ function refreshIssue(repository, issueNumber) {
     updatedAt: issue.updated_at,
     authorLogin: issue.user?.login ?? null,
     authorAssociation: issue.author_association ?? null,
+    labels: issue.labels ?? [],
   };
 }
 
@@ -2620,6 +2693,8 @@ ${milestoneDescription}
 
 The branch and pull request may be cumulative and contain work from other milestones. Scope the review exclusively to the requirements in the milestone title and description, plus integrations strictly required for those requirements. Use the branch diff against ${config.baseBranch} as evidence, not as the definition of scope. Do not report defects in unrelated features, infrastructure, or files merely because they are present or changed in the pull request.
 
+Ralph's control plane is maintained manually outside the product loop. Never report findings for .agents/**, scripts/ralph/**, AGENTS.md, or nested **/AGENTS.md files. Those paths must never become milestone issues and must never be modified by an AFK implementation session.
+
 Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
 
 The Ralph orchestrator has already completed every configured preflight and validation script successfully for the exact reviewed head. Do not rerun npm, npx, builds, linters, type checks, tests, dev servers, or any command that writes caches or artifacts. Use read-only file and git inspection only.
@@ -2729,6 +2804,7 @@ async function runMilestoneReview(config, repository, milestone, pullRequest) {
     }
     fail(`Milestone review PR #${pullRequest.number} не завершился: ${error.message}`);
   }
+  review = scopeMilestoneReviewToProduct(review);
   review = limitMilestoneReviewFindings(review, pullRequest, config.milestoneReview.maxFindings);
 
   postPullRequestReview(
@@ -2873,6 +2949,16 @@ function createOrReopenReviewIssues(
     fail('Milestone review вернул FAIL без findings; задачи исправления создать невозможно.');
   }
 
+  const infrastructureFindings = review.findings.filter((finding) =>
+    isRalphInfrastructurePath(finding.file),
+  );
+  if (infrastructureFindings.length > 0) {
+    fail(
+      `Milestone review содержит ${infrastructureFindings.length} замечаний к Ralph-инфраструктуре. ` +
+        'Они не могут быть превращены в продуктовые issues.',
+    );
+  }
+
   const existingIssues = dependencies.milestoneIssues(repository, milestone);
   const queuedIssues = [];
   const queuedNumbers = new Set();
@@ -2952,7 +3038,9 @@ async function runContinuousLoop(context, actions) {
   const completedIssueNumbers = new Set();
 
   while (true) {
-    const listedIssues = actions.openIssues(repository, milestone);
+    const listedIssues = actions
+      .openIssues(repository, milestone)
+      .filter((issue) => !isRalphInfrastructureIssue(issue));
     const issuesByNumber = new Map();
     // Сначала добавляем ответ GitHub, затем локальную очередь: локальная копия
     // содержит самый свежий body после review и должна победить устаревший REST-ответ.
@@ -2968,6 +3056,20 @@ async function runContinuousLoop(context, actions) {
       issuesByNumber.set(issue.number, issue);
     }
     const recoveryIssue = stateStore?.issue;
+    if (recoveryIssue && isRalphInfrastructureIssue(recoveryIssue)) {
+      if (actions.workingTreeStatus() !== '') {
+        fail(
+          `Сохранённая служебная issue #${recoveryIssue.number} имеет незавершённый diff. ` +
+            'Ralph остановлен: служебные изменения должен разобрать оператор вручную.',
+        );
+      }
+      console.log(
+        `Recovery issue #${recoveryIssue.number} относится к Ralph-инфраструктуре; ` +
+          'служебное состояние очищено без запуска Codex.',
+      );
+      stateStore.clearIssue();
+      continue;
+    }
     if (recoveryIssue && !issuesByNumber.has(recoveryIssue.number)) {
       if (actions.issueState(repository, recoveryIssue.number) === 'OPEN') {
         issuesByNumber.set(recoveryIssue.number, {
@@ -3265,6 +3367,8 @@ export {
   githubPagedArray,
   issueBodyWithReviewContext,
   issueCompletionState,
+  isRalphInfrastructureIssue,
+  isRalphInfrastructurePath,
   limitMilestoneReviewFindings,
   linkedCommitForIssue,
   loadConfig,
@@ -3279,6 +3383,7 @@ export {
   runCodexWithTurnLimit,
   runConfiguredScripts,
   runContinuousLoop,
+  scopeMilestoneReviewToProduct,
   sanitizedChildEnvironment,
   validationContainerRunArgs,
   validationImageForSnapshot,

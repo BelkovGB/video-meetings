@@ -21,6 +21,8 @@ import {
   issueBodyWithReviewContext,
   issueContentHash,
   issueCompletionState,
+  isRalphInfrastructureIssue,
+  isRalphInfrastructurePath,
   limitMilestoneReviewFindings,
   linkedCommitForIssue,
   loadConfig,
@@ -34,6 +36,7 @@ import {
   runCodexWithTurnLimit,
   runConfiguredScripts,
   runContinuousLoop,
+  scopeMilestoneReviewToProduct,
   sanitizedChildEnvironment,
   validationContainerRunArgs,
   validationImageForSnapshot,
@@ -140,8 +143,8 @@ test('Ralph configuration pins approved AFK inputs before starting an agent sess
   const config = loadConfig();
 
   assert.equal(
-    config.approvedIssueSnapshots[66].title,
-    '[P1] Do not execute mutable issue content as trusted AFK instructions',
+    config.approvedIssueSnapshots[67].title,
+    '[P2] Batch storage reconciliation instead of scanning the full corpus',
   );
   assert.match(
     config.approvedIssueSnapshotsPath,
@@ -192,7 +195,7 @@ test('runCodex aborts before commit when an AFK session modifies the approved sn
   const config = loadConfig();
   const ledgerPath = config.approvedIssueSnapshotsPath;
   const originalLedger = readFileSync(ledgerPath, 'utf8');
-  const approvedIssue = config.approvedIssueSnapshots[66];
+  const approvedIssue = config.approvedIssueSnapshots[67];
 
   try {
     await withFakeCodex(
@@ -212,10 +215,10 @@ process.stdout.write(JSON.stringify({
               config,
               'BelkovGB/video-meetings',
               {
-                number: 66,
+                number: 67,
                 title: approvedIssue.title,
                 body: approvedIssue.body,
-                url: 'https://example.test/issues/66',
+                url: 'https://example.test/issues/67',
                 authorLogin: 'BelkovGB',
                 authorAssociation: 'OWNER',
               },
@@ -234,7 +237,7 @@ test('runCodex aborts before commit when an AFK session modifies a nested AGENTS
   const config = loadConfig();
   const agentInstructionsPath = path.join(process.cwd(), 'apps', 'web', 'AGENTS.md');
   const originalInstructions = readFileSync(agentInstructionsPath, 'utf8');
-  const approvedIssue = config.approvedIssueSnapshots[66];
+  const approvedIssue = config.approvedIssueSnapshots[67];
 
   try {
     await withFakeCodex(
@@ -254,10 +257,10 @@ process.stdout.write(JSON.stringify({
               config,
               'BelkovGB/video-meetings',
               {
-                number: 66,
+                number: 67,
                 title: approvedIssue.title,
                 body: approvedIssue.body,
-                url: 'https://example.test/issues/66',
+                url: 'https://example.test/issues/67',
                 authorLogin: 'BelkovGB',
                 authorAssociation: 'OWNER',
               },
@@ -276,7 +279,7 @@ test('runCodex aborts before commit when an AFK session modifies the root AGENTS
   const config = loadConfig();
   const agentInstructionsPath = path.join(process.cwd(), 'AGENTS.md');
   const originalInstructions = readFileSync(agentInstructionsPath, 'utf8');
-  const approvedIssue = config.approvedIssueSnapshots[66];
+  const approvedIssue = config.approvedIssueSnapshots[67];
 
   try {
     await withFakeCodex(
@@ -296,10 +299,10 @@ process.stdout.write(JSON.stringify({
               config,
               'BelkovGB/video-meetings',
               {
-                number: 66,
+                number: 67,
                 title: approvedIssue.title,
                 body: approvedIssue.body,
-                url: 'https://example.test/issues/66',
+                url: 'https://example.test/issues/67',
                 authorLogin: 'BelkovGB',
                 authorAssociation: 'OWNER',
               },
@@ -318,7 +321,7 @@ test('runCodex aborts before commit when an AFK session adds an AGENTS instructi
   const config = loadConfig();
   const agentInstructionsDirectory = path.join(process.cwd(), 'apps', 'web', 'ralph-test-agent');
   const agentInstructionsPath = path.join(agentInstructionsDirectory, 'AGENTS.md');
-  const approvedIssue = config.approvedIssueSnapshots[66];
+  const approvedIssue = config.approvedIssueSnapshots[67];
 
   try {
     await withFakeCodex(
@@ -339,10 +342,10 @@ process.stdout.write(JSON.stringify({
               config,
               'BelkovGB/video-meetings',
               {
-                number: 66,
+                number: 67,
                 title: approvedIssue.title,
                 body: approvedIssue.body,
-                url: 'https://example.test/issues/66',
+                url: 'https://example.test/issues/67',
                 authorLogin: 'BelkovGB',
                 authorAssociation: 'OWNER',
               },
@@ -609,6 +612,80 @@ test('milestone review stays within milestone scope and trusts completed validat
   assert.match(prompt, /diff against master as evidence, not as the definition of scope/);
   assert.match(prompt, /Do not rerun npm, npx, builds, linters, type checks, tests/);
   assert.match(prompt, /every configured preflight and validation script successfully/);
+  assert.match(prompt, /Never report findings for \.agents\/\*\*, scripts\/ralph\/\*\*/);
+});
+
+test('Ralph infrastructure is never treated as product work', () => {
+  for (const file of [
+    '.agents/ralph.config.json',
+    'scripts/ralph/ralph-loop.mjs:975',
+    'AGENTS.md',
+    'apps/api/AGENTS.md',
+  ]) {
+    assert.equal(isRalphInfrastructurePath(file), true, file);
+  }
+  assert.equal(isRalphInfrastructurePath('apps/api/src/main.ts:10'), false);
+  assert.equal(
+    isRalphInfrastructureIssue({
+      body: '<!-- ralph-milestone-finding pr:61 id:x -->\n**Location:** `scripts/ralph/ralph-loop.mjs:975`',
+    }),
+    true,
+  );
+  assert.equal(
+    isRalphInfrastructureIssue({ labels: [{ name: 'ralph-infrastructure' }], body: '' }),
+    true,
+  );
+  assert.equal(
+    isRalphInfrastructureIssue({
+      body: '<!-- ralph-milestone-finding pr:61 id:y -->\n**Location:** `apps/api/src/main.ts:10`',
+    }),
+    false,
+  );
+});
+
+test('milestone review removes Ralph findings before product issues are created', () => {
+  const scoped = scopeMilestoneReviewToProduct({
+    verdict: 'fail',
+    summary: 'Two findings.',
+    findings: [
+      {
+        severity: 'P1',
+        title: 'Control-plane defect',
+        body: 'Fix Ralph.',
+        file: 'scripts/ralph/ralph-loop.mjs',
+        line: 10,
+      },
+      {
+        severity: 'P2',
+        title: 'Product defect',
+        body: 'Fix API.',
+        file: 'apps/api/src/main.ts',
+        line: 20,
+      },
+    ],
+  });
+
+  assert.equal(scoped.verdict, 'fail');
+  assert.deepEqual(
+    scoped.findings.map((finding) => finding.title),
+    ['Product defect'],
+  );
+  assert.match(scoped.summary, /excluded from the product milestone/);
+
+  const infrastructureOnly = scopeMilestoneReviewToProduct({
+    verdict: 'fail',
+    summary: 'One finding.',
+    findings: [
+      {
+        severity: 'P1',
+        title: 'Control-plane defect',
+        body: 'Fix Ralph.',
+        file: '.agents/RALPH.md',
+      },
+    ],
+  });
+  assert.equal(infrastructureOnly.verdict, 'pass');
+  assert.deepEqual(infrastructureOnly.findings, []);
 });
 
 test('cached milestone PASS is trusted only with an empty canonical findings section', () => {
