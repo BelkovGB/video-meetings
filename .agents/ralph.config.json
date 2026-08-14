@@ -4,11 +4,32 @@
   "draftPullRequest": true,
 
   "phases": [
-    {
-      "milestone": "Phase 1: Core Profile API (Tracer Bullet)",
-      "branch": "features/profile-phase-1"
-    }
-  ],
+  {
+    "milestone": "Phase 2: Profile Screen and Display Name",
+    "branch": "features/profile-phase-2",
+    "baseBranch": "master"
+  },
+  {
+    "milestone": "Phase 3: Avatar Management API",
+    "branch": "features/profile-phase-3",
+    "baseBranch": "features/profile-phase-2"
+  },
+  {
+    "milestone": "Phase 4: Avatar Controls and Account Identity",
+    "branch": "features/profile-phase-4",
+    "baseBranch": "features/profile-phase-3"
+  },
+  {
+    "milestone": "Phase 7: Password Change and Current-Session Revocation API",
+    "branch": "features/profile-phase-7",
+    "baseBranch": "features/profile-phase-4"
+  },
+  {
+    "milestone": "Phase 8: Password Change Screen",
+    "branch": "features/profile-phase-8",
+    "baseBranch": "features/profile-phase-7"
+  }
+],
 
   "maxIterations": 15,
   "maxTurns": 100,
