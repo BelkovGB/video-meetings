@@ -21,6 +21,7 @@ export default defineConfig({
     {
       command: 'npm run dev --workspace @video-meetings/api',
       url: 'http://localhost:3001/meetings',
+      env: { ...process.env, TRUSTED_PROXY_IPS: 'loopback' },
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },

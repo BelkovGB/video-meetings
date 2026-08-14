@@ -43,6 +43,7 @@ export default function ProfilePage() {
         if (response.status === 401) {
           sessionStorage.removeItem('accessToken');
           sessionStorage.removeItem('userEmail');
+          sessionStorage.removeItem('userDisplayName');
           router.replace('/login');
           return;
         }
@@ -119,6 +120,7 @@ export default function ProfilePage() {
       if (response.status === 401) {
         sessionStorage.removeItem('accessToken');
         sessionStorage.removeItem('userEmail');
+        sessionStorage.removeItem('userDisplayName');
         router.replace('/login');
         return;
       }
@@ -131,6 +133,7 @@ export default function ProfilePage() {
       const updatedProfile = (await response.json()) as Profile;
       setProfile(updatedProfile);
       setDisplayNameInput(updatedProfile.displayName ?? '');
+      sessionStorage.setItem('userDisplayName', updatedProfile.displayName ?? '');
       setSaveStatus(`Имя «${updatedProfile.displayName ?? ''}» сохранено.`);
     } catch {
       setDisplayNameError('Не удалось сохранить имя. Проверьте соединение и повторите попытку.');

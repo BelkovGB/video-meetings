@@ -88,7 +88,7 @@ function getApiErrorMessage(error: ApiError) {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [email, setEmail] = useState('');
+  const [identity, setIdentity] = useState('');
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadAttempts, setLoadAttempts] = useState(0);
@@ -110,7 +110,9 @@ export default function DashboardPage() {
       return;
     }
 
-    setEmail(sessionStorage.getItem('userEmail') ?? getEmailFromToken(token));
+    const email = sessionStorage.getItem('userEmail') ?? getEmailFromToken(token);
+    const displayName = sessionStorage.getItem('userDisplayName')?.trim();
+    setIdentity(displayName || email);
 
     const loadMeetings = async () => {
       try {
@@ -121,6 +123,7 @@ export default function DashboardPage() {
         if (response.status === 401) {
           sessionStorage.removeItem('accessToken');
           sessionStorage.removeItem('userEmail');
+          sessionStorage.removeItem('userDisplayName');
           router.replace('/login');
           return;
         }
@@ -149,6 +152,7 @@ export default function DashboardPage() {
   const logout = () => {
     sessionStorage.removeItem('accessToken');
     sessionStorage.removeItem('userEmail');
+    sessionStorage.removeItem('userDisplayName');
     router.replace('/login');
   };
 
@@ -278,7 +282,7 @@ export default function DashboardPage() {
             <h1 className="mt-3 max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
               Рады видеть вас.
               <span className="mt-2 block break-words text-2xl leading-tight text-cyan-100 sm:text-3xl">
-                {email || 'коллега'}
+                {identity || 'коллега'}
               </span>
             </h1>
             <p className="mt-5 max-w-xl text-base leading-7 text-slate-300">

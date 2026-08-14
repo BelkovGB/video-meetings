@@ -16,6 +16,7 @@ const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 const password = 'secure-password-123';
 const prisma = new PrismaClient();
 const createdUserIds = new Set<string>();
+let testClientAddress = 1;
 
 function uniqueEmail(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
@@ -53,6 +54,7 @@ function createExpiredAccessToken(accessToken: string): string {
 async function register(request: APIRequestContext, prefix: string): Promise<Session> {
   const email = uniqueEmail(prefix);
   const response = await request.post(`${apiUrl}/auth/register`, {
+    headers: { 'X-Forwarded-For': `198.51.100.${testClientAddress++}` },
     data: { email, password },
   });
   expect(response.ok()).toBeTruthy();
@@ -139,6 +141,33 @@ test('manages the display name while preserving saved profile details', async ({
   await expect(page.locator('#display-name-status')).toBeFocused();
   await expect(displayNameInput).toHaveValue('Новое имя');
   await expect(page.getByText('Новое имя', { exact: true })).toHaveCount(1);
+});
+
+test('synchronizes the saved display name with the dashboard identity and keeps the email fallback', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-identity-sync');
+  await authenticate(page, session);
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText(
+    session.email,
+  );
+
+  await page.getByRole('link', { name: 'Открыть профиль' }).click();
+  const displayNameInput = page.getByLabel('Отображаемое имя');
+  await displayNameInput.fill('Мария');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+
+  await expect(page.locator('#display-name-status')).toHaveText('Имя «Мария» сохранено.');
+  await expect(page.getByText('Мария', { exact: true })).toHaveCount(1);
+
+  await page.getByRole('link', { name: 'К встречам' }).click();
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText('Мария');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).not.toContainText(
+    session.email,
+  );
 });
 
 test('redirects to login without loading profile data when authentication is missing', async ({

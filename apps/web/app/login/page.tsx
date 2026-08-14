@@ -67,6 +67,7 @@ export default function LoginPage() {
 
       sessionStorage.setItem('accessToken', data.accessToken);
       sessionStorage.setItem('userEmail', email.trim().toLowerCase());
+      sessionStorage.removeItem('userDisplayName');
       router.replace('/');
     } catch {
       setError('Нет соединения с сервером. Убедитесь, что API запущен, и повторите попытку.');
