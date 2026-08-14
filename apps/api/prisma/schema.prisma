@@ -79,6 +79,7 @@ model MeetingFile {
   downloadTickets MeetingFileDownloadTicket[]
 
   @@index([meetingId, status, createdAt])
+  @@index([status, createdAt, id])
   @@index([uploadedById])
   @@map("meeting_files")
 }

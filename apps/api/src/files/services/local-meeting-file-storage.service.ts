@@ -2,10 +2,11 @@ import {
   Injectable,
   NotFoundException,
   OnModuleInit,
+  OnModuleDestroy,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { ReadStream } from 'node:fs';
-import { mkdir, open, readdir, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
+import { Dir, ReadStream } from 'node:fs';
+import { mkdir, open, opendir, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -17,6 +18,8 @@ export type StoredUploadEntry = {
   modifiedAt: Date;
   name: string;
 };
+
+const storageReconciliationBatchSize = 100;
 
 function isInside(root: string, target: string): boolean {
   const path = relative(root, target);
@@ -30,12 +33,14 @@ function isInside(root: string, target: string): boolean {
 }
 
 @Injectable()
-export class LocalMeetingFileStorageService implements OnModuleInit {
+export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDestroy {
   private static readonly activeTempPaths = new Set<string>();
   private activeReservations = 0;
   private activeUploadCount = 0;
   private readonly activeUploadUsers = new Set<string>();
   private reservationQueue = Promise.resolve();
+  private staleTempDirectory: Dir | undefined;
+  private storedFilesDirectory: Dir | undefined;
 
   async onModuleInit() {
     try {
@@ -58,6 +63,16 @@ export class LocalMeetingFileStorageService implements OnModuleInit {
         cause: error instanceof Error ? error.message : undefined,
       });
     }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    const openDirectories = [this.staleTempDirectory, this.storedFilesDirectory].filter(
+      (directory): directory is Dir => directory !== undefined,
+    );
+    this.staleTempDirectory = undefined;
+    this.storedFilesDirectory = undefined;
+
+    await Promise.all(openDirectories.map((directory) => this.closeDirectory(directory)));
   }
 
   async finalize(tempPath: string, storageKey: string): Promise<void> {
@@ -104,11 +119,22 @@ export class LocalMeetingFileStorageService implements OnModuleInit {
     LocalMeetingFileStorageService.activeTempPaths.delete(resolve(tempPath));
   }
 
-  async listStaleTempFiles(olderThan: Date): Promise<StoredUploadEntry[]> {
-    const entries = await readdir(uploadConfig.tempDirectory, { withFileTypes: true });
+  async listStaleTempFiles(
+    olderThan: Date,
+    limit = storageReconciliationBatchSize,
+  ): Promise<StoredUploadEntry[]> {
     const staleEntries: StoredUploadEntry[] = [];
+    this.staleTempDirectory ??= await opendir(uploadConfig.tempDirectory);
+    const directory = this.staleTempDirectory;
 
-    for (const entry of entries) {
+    for (let inspected = 0; inspected < limit; inspected += 1) {
+      const entry = await directory.read();
+      if (!entry) {
+        this.staleTempDirectory = undefined;
+        await this.closeDirectory(directory);
+        break;
+      }
+
       if (!entry.isFile() || !entry.name.endsWith('.part')) {
         continue;
       }
@@ -141,11 +167,22 @@ export class LocalMeetingFileStorageService implements OnModuleInit {
     }
   }
 
-  async listStoredFiles(olderThan: Date): Promise<StoredUploadEntry[]> {
-    const entries = await readdir(uploadConfig.directory, { withFileTypes: true });
+  async listStoredFiles(
+    olderThan: Date,
+    limit = storageReconciliationBatchSize,
+  ): Promise<StoredUploadEntry[]> {
     const storedEntries: StoredUploadEntry[] = [];
+    this.storedFilesDirectory ??= await opendir(uploadConfig.directory);
+    const directory = this.storedFilesDirectory;
 
-    for (const entry of entries) {
+    for (let inspected = 0; inspected < limit; inspected += 1) {
+      const entry = await directory.read();
+      if (!entry) {
+        this.storedFilesDirectory = undefined;
+        await this.closeDirectory(directory);
+        break;
+      }
+
       if (!entry.isDirectory()) {
         continue;
       }
@@ -297,6 +334,16 @@ export class LocalMeetingFileStorageService implements OnModuleInit {
     }
 
     return contentPath;
+  }
+
+  private async closeDirectory(directory: Dir): Promise<void> {
+    try {
+      await directory.close();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ERR_DIR_CLOSED') {
+        throw error;
+      }
+    }
   }
 
   private async runExclusively<T>(callback: () => Promise<T>): Promise<T> {

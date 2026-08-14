@@ -7,6 +7,12 @@ import { LocalMeetingFileStorageService } from './local-meeting-file-storage.ser
 
 const reconciliationIntervalMs = 60_000;
 const downloadTicketCleanupBatchSize = 100;
+const storageReconciliationBatchSize = 100;
+
+type ReadyFileCursor = {
+  createdAt: Date;
+  id: string;
+};
 
 @Injectable()
 export class MeetingFileDeletionReconciliationService
@@ -16,6 +22,7 @@ export class MeetingFileDeletionReconciliationService
   private reconciliationTimer: NodeJS.Timeout | undefined;
   private reconciliationRunning = false;
   private storageReconciliationRunning = false;
+  private readyFileCursor: ReadyFileCursor | undefined;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -107,8 +114,14 @@ export class MeetingFileDeletionReconciliationService
     this.storageReconciliationRunning = true;
     try {
       const staleBefore = new Date(now.getTime() - uploadConfig.reconciliationGraceMs);
-      const staleTempFiles = await this.storage.listStaleTempFiles(staleBefore);
-      const storedFiles = await this.storage.listStoredFiles(staleBefore);
+      const staleTempFiles = await this.storage.listStaleTempFiles(
+        staleBefore,
+        storageReconciliationBatchSize,
+      );
+      const storedFiles = await this.storage.listStoredFiles(
+        staleBefore,
+        storageReconciliationBatchSize,
+      );
       const storedKeys = storedFiles.map((file) => file.name);
       const linkedFiles = await this.prisma.meetingFile.findMany({
         where: storedKeys.length > 0 ? { storageKey: { in: storedKeys } } : { id: { in: [] } },
@@ -127,8 +140,24 @@ export class MeetingFileDeletionReconciliationService
       }
 
       const readyFiles = await this.prisma.meetingFile.findMany({
-        where: { status: MeetingFileStatus.READY, createdAt: { lte: staleBefore } },
-        select: { id: true, storageKey: true },
+        where: {
+          status: MeetingFileStatus.READY,
+          createdAt: { lte: staleBefore },
+          ...(this.readyFileCursor
+            ? {
+                OR: [
+                  { createdAt: { gt: this.readyFileCursor.createdAt } },
+                  {
+                    createdAt: this.readyFileCursor.createdAt,
+                    id: { gt: this.readyFileCursor.id },
+                  },
+                ],
+              }
+            : {}),
+        },
+        select: { id: true, storageKey: true, createdAt: true },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: storageReconciliationBatchSize,
       });
 
       for (const file of readyFiles) {
@@ -144,6 +173,14 @@ export class MeetingFileDeletionReconciliationService
           this.logger.error(`Meeting file ${file.id} is missing from storage`);
         }
       }
+
+      this.readyFileCursor =
+        readyFiles.length === storageReconciliationBatchSize
+          ? {
+              createdAt: readyFiles.at(-1)!.createdAt,
+              id: readyFiles.at(-1)!.id,
+            }
+          : undefined;
     } finally {
       this.storageReconciliationRunning = false;
     }

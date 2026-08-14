@@ -158,6 +158,72 @@ describe('MeetingFilesService failure handling', () => {
     expect(storage.delete).toHaveBeenCalledWith('orphan-storage');
   });
 
+  it('reconciles storage in bounded batches', async () => {
+    const readyFiles = Array.from({ length: 100 }, (_, index) => ({
+      id: `file-${index}`,
+      storageKey: `storage-${index}`,
+      createdAt: new Date('2026-08-10T00:00:00.000Z'),
+    }));
+    const finalReadyFile = {
+      id: 'file-final',
+      storageKey: 'storage-final',
+      createdAt: new Date('2026-08-10T00:00:01.000Z'),
+    };
+    let readyFilePage = 0;
+    const prisma = {
+      meetingFile: {
+        findMany: jest.fn().mockImplementation(({ where }: { where: object }) => {
+          if (!('status' in where)) {
+            return Promise.resolve([]);
+          }
+
+          readyFilePage += 1;
+          return Promise.resolve(readyFilePage === 1 ? readyFiles : [finalReadyFile]);
+        }),
+      },
+    };
+    const storage = {
+      listStaleTempFiles: jest.fn().mockResolvedValue([]),
+      listStoredFiles: jest.fn().mockResolvedValue([]),
+      exists: jest.fn().mockResolvedValue(true),
+    };
+    const service = new MeetingFileDeletionReconciliationService(prisma as never, storage as never);
+    const now = new Date('2026-08-12T12:00:00.000Z');
+    const staleBefore = new Date('2026-08-11T12:00:00.000Z');
+
+    await service.reconcileStorage(now);
+    await service.reconcileStorage(now);
+    await service.reconcileStorage(now);
+
+    expect(storage.listStaleTempFiles).toHaveBeenCalledWith(staleBefore, 100);
+    expect(storage.listStoredFiles).toHaveBeenCalledWith(staleBefore, 100);
+    expect(prisma.meetingFile.findMany).toHaveBeenNthCalledWith(2, {
+      where: { status: MeetingFileStatus.READY, createdAt: { lte: staleBefore } },
+      select: { id: true, storageKey: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 100,
+    });
+    expect(prisma.meetingFile.findMany).toHaveBeenNthCalledWith(4, {
+      where: {
+        status: MeetingFileStatus.READY,
+        createdAt: { lte: staleBefore },
+        OR: [
+          { createdAt: { gt: readyFiles.at(-1)!.createdAt } },
+          { createdAt: readyFiles.at(-1)!.createdAt, id: { gt: readyFiles.at(-1)!.id } },
+        ],
+      },
+      select: { id: true, storageKey: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 100,
+    });
+    expect(prisma.meetingFile.findMany).toHaveBeenNthCalledWith(6, {
+      where: { status: MeetingFileStatus.READY, createdAt: { lte: staleBefore } },
+      select: { id: true, storageKey: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 100,
+    });
+  });
+
   it('marks a READY database record as MISSING when its stored file disappears', async () => {
     const prisma = {
       meetingFile: {

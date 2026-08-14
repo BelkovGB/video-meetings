@@ -58,10 +58,13 @@ describe('LocalMeetingFileStorageService', () => {
     const tempDirectoryName = 'nested-temp';
     const originalTempDirectory = uploadConfig.tempDirectory;
     uploadConfig.tempDirectory = join(uploadConfig.directory, tempDirectoryName);
-    const readdir = jest.spyOn(filesystem, 'readdir').mockResolvedValue([
-      { isDirectory: () => true, name: tempDirectoryName },
-      { isDirectory: () => true, name: 'orphan-storage' },
-    ] as never);
+    const read = jest
+      .fn()
+      .mockResolvedValueOnce({ isDirectory: () => true, name: tempDirectoryName })
+      .mockResolvedValueOnce({ isDirectory: () => true, name: 'orphan-storage' })
+      .mockResolvedValue(null);
+    const close = jest.fn().mockResolvedValue(undefined);
+    const opendir = jest.spyOn(filesystem, 'opendir').mockResolvedValue({ read, close } as never);
     const stat = jest.spyOn(filesystem, 'stat').mockResolvedValue({
       mtime: new Date('2026-08-10T00:00:00.000Z'),
     } as never);
@@ -74,7 +77,64 @@ describe('LocalMeetingFileStorageService', () => {
       expect(stat).toHaveBeenCalledWith(resolve(uploadConfig.directory, 'orphan-storage'));
     } finally {
       uploadConfig.tempDirectory = originalTempDirectory;
-      readdir.mockRestore();
+      opendir.mockRestore();
+      stat.mockRestore();
+    }
+  });
+
+  it('inspects no more than the requested number of storage entries', async () => {
+    const read = jest
+      .fn()
+      .mockResolvedValueOnce({ isDirectory: () => true, name: 'first-storage' })
+      .mockResolvedValueOnce({ isDirectory: () => true, name: 'second-storage' })
+      .mockResolvedValue(null);
+    const close = jest.fn().mockResolvedValue(undefined);
+    const opendir = jest.spyOn(filesystem, 'opendir').mockResolvedValue({ read, close } as never);
+    const stat = jest.spyOn(filesystem, 'stat').mockResolvedValue({
+      mtime: new Date('2026-08-10T00:00:00.000Z'),
+    } as never);
+    const storage = new LocalMeetingFileStorageService();
+
+    try {
+      const entries = await storage.listStoredFiles(new Date('2026-08-11T00:00:00.000Z'), 1);
+
+      expect(entries.map((entry) => entry.name)).toEqual(['first-storage']);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(close).not.toHaveBeenCalled();
+
+      const nextEntries = await storage.listStoredFiles(new Date('2026-08-11T00:00:00.000Z'), 1);
+
+      expect(nextEntries.map((entry) => entry.name)).toEqual(['second-storage']);
+      expect(opendir).toHaveBeenCalledTimes(1);
+
+      await storage.listStoredFiles(new Date('2026-08-11T00:00:00.000Z'), 1);
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      opendir.mockRestore();
+      stat.mockRestore();
+    }
+  });
+
+  it('closes a retained directory cursor during module shutdown', async () => {
+    const read = jest
+      .fn()
+      .mockResolvedValueOnce({ isDirectory: () => true, name: 'first-storage' });
+    const close = jest.fn().mockResolvedValue(undefined);
+    const opendir = jest.spyOn(filesystem, 'opendir').mockResolvedValue({ read, close } as never);
+    const stat = jest.spyOn(filesystem, 'stat').mockResolvedValue({
+      mtime: new Date('2026-08-10T00:00:00.000Z'),
+    } as never);
+    const storage = new LocalMeetingFileStorageService();
+
+    try {
+      await storage.listStoredFiles(new Date('2026-08-11T00:00:00.000Z'), 1);
+      expect(close).not.toHaveBeenCalled();
+
+      await storage.onModuleDestroy();
+
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      opendir.mockRestore();
       stat.mockRestore();
     }
   });
