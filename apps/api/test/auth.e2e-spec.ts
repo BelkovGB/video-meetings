@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { configureHttpApplication } from '../src/http-application';
 
 type AuthCredentials = {
   email?: string;
@@ -101,18 +102,28 @@ describe('Authentication (e2e)', () => {
 
 describe('Authentication rate limiting (e2e)', () => {
   let app: INestApplication;
+  const originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
 
   beforeEach(async () => {
+    process.env.TRUSTED_PROXY_IPS = 'loopback';
+
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
 
     app = moduleRef.createNestApplication();
+    configureHttpApplication(app);
     await app.init();
   });
 
   afterEach(async () => {
     await app.close();
+
+    if (originalTrustedProxyIps === undefined) {
+      delete process.env.TRUSTED_PROXY_IPS;
+    } else {
+      process.env.TRUSTED_PROXY_IPS = originalTrustedProxyIps;
+    }
   });
 
   it.each(['/auth/register', '/auth/login'])(
@@ -144,5 +155,48 @@ describe('Authentication rate limiting (e2e)', () => {
     }
 
     await request(app.getHttpServer()).post('/auth/login').send(credentials).expect(429);
+  });
+
+  it('keeps rate-limit quotas separate for forwarded clients through a trusted proxy', async () => {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .set('X-Forwarded-For', '198.51.100.10')
+        .send({ email: createEmail(`forwarded-client-${attempt}`), password: 'short' })
+        .expect(401);
+    }
+
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .set('X-Forwarded-For', '198.51.100.11')
+      .send({ email: createEmail('forwarded-client-independent'), password: 'short' })
+      .expect(401);
+  });
+
+  it('does not trust forwarded client addresses without a configured ingress', async () => {
+    await app.close();
+    delete process.env.TRUSTED_PROXY_IPS;
+
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    configureHttpApplication(app);
+    await app.init();
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .set('X-Forwarded-For', '198.51.100.10')
+        .send({ email: createEmail(`untrusted-forwarded-client-${attempt}`), password: 'short' })
+        .expect(401);
+    }
+
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .set('X-Forwarded-For', '198.51.100.11')
+      .send({ email: createEmail('untrusted-forwarded-client-blocked'), password: 'short' })
+      .expect(429);
   });
 });

@@ -83,6 +83,13 @@ seconds until the relevant window resets, plus this JSON body:
 
 Clients should wait for the number of seconds in `Retry-After` before retrying.
 
+By default the API does not trust forwarded client-IP headers. When it runs
+behind a reverse proxy, set `TRUSTED_PROXY_IPS` to a comma-separated list of
+only the proxy's IP addresses or CIDR ranges (for example,
+`TRUSTED_PROXY_IPS=10.0.0.5,fd00:1::/64`). The proxy must be the only peer that
+can connect to the API listener. This lets Express use `X-Forwarded-For` only
+when the immediate peer is a known ingress; do not use a broad or public range.
+
 ## Current user profile
 
 Profile operations require an access token. Send it in the HTTP header:
