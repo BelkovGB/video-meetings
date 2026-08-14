@@ -25,7 +25,12 @@ export class MeetingFileDeletionReconciliationService
   async onApplicationBootstrap(): Promise<void> {
     await this.reconcile();
     this.reconciliationTimer = setInterval(() => {
-      void this.reconcile();
+      void this.reconcile().catch((error: unknown) => {
+        this.logger.error(
+          'Failed to reconcile meeting file deletions',
+          error instanceof Error ? error.stack : undefined,
+        );
+      });
     }, reconciliationIntervalMs);
     this.reconciliationTimer.unref();
   }
