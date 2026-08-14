@@ -626,16 +626,104 @@ function assertTrustedControlFilesUnchanged(config) {
   }
 }
 
+function phasePlanId(phases) {
+  return createHash('sha256')
+    .update(
+      JSON.stringify(
+        phases.map(({ milestone, branch, baseBranch }) => ({ milestone, branch, baseBranch })),
+      ),
+    )
+    .digest('hex');
+}
+
+function normalizePhases(config) {
+  const hasPhaseArray = Object.hasOwn(config, 'phases');
+  const hasAnyLegacyPhaseField =
+    Object.hasOwn(config, 'milestone') || Object.hasOwn(config, 'branch');
+  if (hasPhaseArray && hasAnyLegacyPhaseField) {
+    fail('Не используйте одновременно "phases" и верхнеуровневые "milestone"/"branch".');
+  }
+  const hasLegacyPhase =
+    typeof config.milestone === 'string' &&
+    config.milestone.trim() !== '' &&
+    typeof config.branch === 'string' &&
+    config.branch.trim() !== '';
+  const source =
+    config.phases ??
+    (hasLegacyPhase ? [{ milestone: config.milestone, branch: config.branch }] : null);
+
+  if (!Array.isArray(source) || source.length === 0) {
+    fail(
+      `Добавьте непустой массив "phases" в ${configPath} ` +
+        'или заполните совместимые поля "milestone" и "branch".',
+    );
+  }
+
+  const phases = source.map((phase, index) => {
+    if (typeof phase !== 'object' || phase === null || Array.isArray(phase)) {
+      fail(`Поле "phases[${index}]" должно быть объектом.`);
+    }
+    for (const field of ['milestone', 'branch']) {
+      if (typeof phase[field] !== 'string' || phase[field].trim() === '') {
+        fail(`Поле "phases[${index}].${field}" должно быть непустой строкой.`);
+      }
+    }
+    const baseBranch = phase.baseBranch ?? config.baseBranch;
+    if (typeof baseBranch !== 'string' || baseBranch.trim() === '') {
+      fail(`Поле "phases[${index}].baseBranch" должно быть непустой строкой.`);
+    }
+    if (phase.branch === baseBranch) {
+      fail(`В phases[${index}] рабочая ветка не должна совпадать с baseBranch.`);
+    }
+    return {
+      milestone: phase.milestone.trim(),
+      branch: phase.branch.trim(),
+      baseBranch: baseBranch.trim(),
+    };
+  });
+
+  for (const field of ['milestone', 'branch']) {
+    const values = phases.map((phase) =>
+      field === 'branch' ? phase[field].toLowerCase() : phase[field],
+    );
+    if (new Set(values).size !== values.length) {
+      fail(`Поле "phases" не должно содержать повторяющиеся значения "${field}".`);
+    }
+  }
+
+  return phases;
+}
+
+function configForPhase(config, phaseIndex) {
+  if (!Number.isInteger(phaseIndex) || phaseIndex < 0 || phaseIndex >= config.phases.length) {
+    fail(`Некорректный индекс фазы ${phaseIndex}. Всего фаз: ${config.phases.length}.`);
+  }
+  return {
+    ...config,
+    ...config.phases[phaseIndex],
+    phaseIndex,
+    phaseCount: config.phases.length,
+    phasePlanId: config.phasePlanId,
+  };
+}
+
 function loadConfig() {
   const config = parseJson(readFileSync(configPath, 'utf8'), configPath);
 
-  for (const field of ['milestone', 'branch', 'prompt']) {
+  for (const field of ['prompt']) {
     if (typeof config[field] !== 'string' || config[field].trim() === '') {
       fail(`Заполните строковое поле \"${field}\" в ${configPath}.`);
     }
   }
 
   config.baseBranch ??= 'main';
+  config.phases = normalizePhases(config);
+  config.phasePlanId = phasePlanId(config.phases);
+  ({
+    milestone: config.milestone,
+    branch: config.branch,
+    baseBranch: config.baseBranch,
+  } = config.phases[0]);
   config.draftPullRequest ??= true;
   config.maxIterations ??= 20;
   config.maxTurns ??= 50;
@@ -937,9 +1025,33 @@ function loadRalphRules(config) {
 
 function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
   let state = readJsonFile(statePath, null);
+  const configuredPhaseIndex = config.phaseIndex ?? 0;
+  const configuredPhaseCount = config.phaseCount ?? 1;
+  const configuredPlanId =
+    config.phasePlanId ??
+    phasePlanId([
+      { milestone: config.milestone, branch: config.branch, baseBranch: config.baseBranch },
+    ]);
   if (state) {
+    // Состояние version=1 создано однофазным Ralph. Если его идентичность
+    // совпадает с текущей фазой, безопасно дополняем его индексом плана.
+    if (
+      state.version === 1 &&
+      state.branch === config.branch &&
+      state.baseBranch === config.baseBranch &&
+      state.milestone === config.milestone
+    ) {
+      state.version = 2;
+      state.phaseIndex = configuredPhaseIndex;
+      state.phaseCount = configuredPhaseCount;
+      state.phasePlanId = configuredPlanId;
+      if (selectedMode !== '--check') writeJsonAtomic(statePath, state);
+    }
     const identityMismatch =
       state.version !== 2 ||
+      state.phaseIndex !== configuredPhaseIndex ||
+      state.phaseCount !== configuredPhaseCount ||
+      state.phasePlanId !== configuredPlanId ||
       state.branch !== config.branch ||
       state.baseBranch !== config.baseBranch ||
       state.milestone !== config.milestone;
@@ -960,6 +1072,9 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
       version: 2,
       runId: randomUUID(),
       status: 'active',
+      phaseIndex: configuredPhaseIndex,
+      phaseCount: configuredPhaseCount,
+      phasePlanId: configuredPlanId,
       branch: config.branch,
       baseBranch: config.baseBranch,
       milestone: config.milestone,
@@ -982,6 +1097,12 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
     },
     get issue() {
       return state?.issue ?? null;
+    },
+    get phaseIndex() {
+      return state?.phaseIndex ?? configuredPhaseIndex;
+    },
+    get phaseCount() {
+      return state?.phaseCount ?? configuredPhaseCount;
     },
     beginIssue(issue, startingCommit, continuation = false) {
       if (!state) return;
@@ -1033,10 +1154,27 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
     allowsDirtyRecovery(currentBranch, currentHead) {
       return Boolean(
         state?.issue &&
-        currentBranch === config.branch &&
+        currentBranch === state.branch &&
         currentHead === state.issue.startingCommit &&
         ['agent-running', 'working-tree', 'validating', 'staging'].includes(state.issue.phase),
       );
+    },
+    advancePhase(nextConfig) {
+      if (!state) return false;
+      if (state.issue !== null) {
+        fail(`Нельзя перейти к следующей фазе: состояние issue #${state.issue.number} не очищено.`);
+      }
+      const expectedIndex = state.phaseIndex + 1;
+      if (nextConfig.phaseIndex !== expectedIndex || nextConfig.phasePlanId !== state.phasePlanId) {
+        fail('Следующая фаза не соответствует сохранённому плану Ralph Loop.');
+      }
+      state.phaseIndex = nextConfig.phaseIndex;
+      state.branch = nextConfig.branch;
+      state.baseBranch = nextConfig.baseBranch;
+      state.milestone = nextConfig.milestone;
+      state.iterationsUsed = 0;
+      persist();
+      return true;
     },
     finish() {
       state = null;
@@ -3002,6 +3140,7 @@ function createOrReopenReviewIssues(
 
 function printCheck(config, repository, milestone, repositoryState, issues) {
   console.log('Ralph Loop настроен корректно.');
+  console.log(`Фаза: ${(config.phaseIndex ?? 0) + 1}/${config.phaseCount ?? 1}`);
   console.log(`Репозиторий: ${repository}`);
   console.log(`Milestone: ${milestone.title} (${issues.length} открытых issues)`);
   console.log(`Ветка: ${repositoryState.currentBranch}`);
@@ -3119,7 +3258,6 @@ async function runContinuousLoop(context, actions) {
         }
         actions.verifyReviewedPullRequestHead(config, repository, pullRequest);
         actions.closeMilestone(repository, milestone);
-        stateStore?.finish();
         return { verdict: 'pass', iterations: iteration, pullRequest };
       }
 
@@ -3262,6 +3400,50 @@ function defaultActions() {
   };
 }
 
+function initialPhaseIndex(config, state = readJsonFile(runtimeStatePath, null)) {
+  if (
+    state?.version === 2 &&
+    state.phasePlanId === config.phasePlanId &&
+    state.phaseCount === config.phases.length &&
+    Number.isInteger(state.phaseIndex) &&
+    state.phaseIndex >= 0 &&
+    state.phaseIndex < config.phases.length
+  ) {
+    return state.phaseIndex;
+  }
+  return 0;
+}
+
+async function runPhasePlan(config, stateStore, runPhase) {
+  const results = [];
+  let phaseIndex = stateStore?.phaseIndex ?? 0;
+  while (true) {
+    const currentConfig = configForPhase(config, phaseIndex);
+    console.log(
+      `\n=== Фаза ${phaseIndex + 1}/${config.phases.length}: ${currentConfig.milestone} ` +
+        `(${currentConfig.branch} -> ${currentConfig.baseBranch}) ===`,
+    );
+    const result = await runPhase(currentConfig, phaseIndex);
+    results.push({ phaseIndex, milestone: currentConfig.milestone, ...result });
+    if (result?.verdict !== 'pass') {
+      return { verdict: result?.verdict ?? 'stopped', phases: results };
+    }
+
+    if (phaseIndex + 1 >= config.phases.length) {
+      stateStore?.finish();
+      console.log(`Все ${config.phases.length} фаз Ralph Loop завершены.`);
+      return { verdict: 'pass', phases: results };
+    }
+
+    const nextConfig = configForPhase(config, phaseIndex + 1);
+    stateStore?.advancePhase(nextConfig);
+    console.log(
+      `Фаза ${phaseIndex + 1} завершена. Следующая: ${nextConfig.milestone} (${nextConfig.branch}).`,
+    );
+    phaseIndex = nextConfig.phaseIndex;
+  }
+}
+
 async function main() {
   // Проверяем, что передан поддерживаемый режим запуска.
   if (!supportedModes.has(mode)) {
@@ -3276,40 +3458,56 @@ async function main() {
       return;
     }
 
+    const firstPhaseIndex = initialPhaseIndex(config);
+    const firstPhaseConfig = configForPhase(config, firstPhaseIndex);
     const restoreConsole = initializePersistentLog(runtimeLogPath, {
       mode,
-      branch: config.branch,
-      milestone: config.milestone,
+      branch: firstPhaseConfig.branch,
+      milestone: firstPhaseConfig.milestone,
+      phase: `${firstPhaseIndex + 1}/${config.phases.length}`,
     });
     let releaseLock;
     try {
       releaseLock = acquireRunLock(runtimeLockPath, {
         mode,
         projectRoot,
-        branch: config.branch,
+        branch: firstPhaseConfig.branch,
       });
-      activeStateStore = createStateStore(config, mode);
+      activeStateStore = createStateStore(firstPhaseConfig, mode);
       const rules = loadRalphRules(config);
       verifyTools();
-      const repositoryState = verifyRepository(config, mode !== '--check');
-      if (mode !== '--check') {
-        reconcileStateAfterCrash(config, activeStateStore);
+      for (const phase of config.phases) {
+        run('git', ['check-ref-format', '--branch', phase.branch]);
+        run('git', ['check-ref-format', '--branch', phase.baseBranch]);
       }
-      verifyBaseHistory(config);
       const repository = repositoryName();
-      const milestone = verifyMilestone(repository, config.milestone);
-      return await executeMode(
-        {
-          mode,
-          config,
-          repository,
-          milestone,
-          repositoryState,
-          rules,
-          stateStore: activeStateStore,
-        },
-        defaultActions(),
-      );
+      const milestones = config.phases.map((phase) => verifyMilestone(repository, phase.milestone));
+      const actions = defaultActions();
+      const runPhase = async (phaseConfig) => {
+        const repositoryState = verifyRepository(phaseConfig, mode !== '--check');
+        if (mode !== '--check') {
+          reconcileStateAfterCrash(phaseConfig, activeStateStore);
+        }
+        verifyBaseHistory(phaseConfig);
+        const milestone = milestones[phaseConfig.phaseIndex];
+        return executeMode(
+          {
+            mode,
+            config: phaseConfig,
+            repository,
+            milestone,
+            repositoryState,
+            rules,
+            stateStore: activeStateStore,
+          },
+          actions,
+        );
+      };
+
+      if (mode === '--run') {
+        return await runPhasePlan(config, activeStateStore, runPhase);
+      }
+      return await runPhase(firstPhaseConfig);
     } catch (error) {
       console.error(`AFK pipeline error: ${error.message}`);
       throw error;
@@ -3356,6 +3554,7 @@ export {
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
   buildMilestoneReviewPrompt,
+  configForPhase,
   createTrustedValidationDependencySnapshot,
   createStateStore,
   credentialFreeEnvironment,
@@ -3374,6 +3573,7 @@ export {
   loadConfig,
   milestonePassReviewIsClean,
   normalizeReviewResult,
+  normalizePhases,
   reviewFindingMarker,
   renderPrompt,
   reviewFindingFingerprint,
@@ -3383,6 +3583,7 @@ export {
   runCodexWithTurnLimit,
   runConfiguredScripts,
   runContinuousLoop,
+  runPhasePlan,
   scopeMilestoneReviewToProduct,
   sanitizedChildEnvironment,
   validationContainerRunArgs,

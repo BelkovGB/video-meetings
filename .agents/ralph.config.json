@@ -1,9 +1,14 @@
 {
   "active": true,
-  "milestone": "Phase 1: Core Profile API (Tracer Bullet)",
-  "branch": "features/profile-phase-1",
   "baseBranch": "master",
   "draftPullRequest": true,
+
+  "phases": [
+    {
+      "milestone": "Phase 1: Core Profile API (Tracer Bullet)",
+      "branch": "features/profile-phase-1"
+    }
+  ],
 
   "maxIterations": 15,
   "maxTurns": 100,
