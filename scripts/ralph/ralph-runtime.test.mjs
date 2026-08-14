@@ -54,6 +54,10 @@ test('retryTransientOperation повторяет временные ошибки
     { attempt: 2, delay: 20 },
   ]);
   assert.equal(isTransientFailure({ code: 'RALPH_COMMAND_TIMEOUT' }), true);
+  assert.equal(
+    isTransientFailure({ stderr: 'Patch "https://api.github.com/issues/65": EOF' }),
+    true,
+  );
 });
 
 test('retryTransientOperation останавливается после исчерпания попыток', () => {

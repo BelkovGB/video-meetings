@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
+  buildMilestoneReviewPrompt,
   createStateStore,
   createOrReopenReviewIssues,
   executeMode,
@@ -65,6 +66,23 @@ test('issue review prompt requires one exhaustive in-scope audit', () => {
   assert.match(prompt, /Return every distinct, actionable finding/);
   assert.match(prompt, /public API response contracts, documentation, configuration/);
   assert.match(prompt, /Ignore unrelated pre-existing debt/);
+});
+
+test('milestone review stays within milestone scope and trusts completed validations', () => {
+  const prompt = buildMilestoneReviewPrompt(
+    { baseBranch: 'master' },
+    {
+      title: 'Phase 1: Core Profile API',
+      description: 'Authenticated users can read and update a safe profile.',
+    },
+    { number: 61, url: 'https://example.test/pull/61' },
+  );
+
+  assert.match(prompt, /may be cumulative and contain work from other milestones/);
+  assert.match(prompt, /Scope the review exclusively to the requirements/);
+  assert.match(prompt, /diff against master as evidence, not as the definition of scope/);
+  assert.match(prompt, /Do not rerun npm, npx, builds, linters, type checks, tests/);
+  assert.match(prompt, /every configured preflight and validation script successfully/);
 });
 
 test('cached milestone PASS is trusted only with an empty canonical findings section', () => {

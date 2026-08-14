@@ -32,7 +32,7 @@ function isTransientFailure(error) {
   ) {
     return true;
   }
-  return /(?:\b408\b|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|timed?\s*out|connection reset|could not resolve host|temporary failure|tls handshake|secondary rate limit|unexpected eof|remote end hung up)/i.test(
+  return /(?:\b408\b|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|timed?\s*out|connection reset|could not resolve host|temporary failure|tls handshake|secondary rate limit|\beof\b|remote end hung up)/i.test(
     text,
   );
 }

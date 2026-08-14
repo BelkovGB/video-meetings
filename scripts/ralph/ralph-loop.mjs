@@ -2085,6 +2085,23 @@ function postMilestoneReviewFailure(config, repository, milestone, pullRequest, 
   );
 }
 
+function buildMilestoneReviewPrompt(config, milestone, pullRequest) {
+  const milestoneDescription = milestone.description?.trim() || '(Milestone description is empty.)';
+
+  return `Perform a read-only architectural review of pull request #${pullRequest.number} (${pullRequest.url}) for milestone "${milestone.title}".
+
+Milestone description:
+${milestoneDescription}
+
+The branch and pull request may be cumulative and contain work from other milestones. Scope the review exclusively to the requirements in the milestone title and description, plus integrations strictly required for those requirements. Use the branch diff against ${config.baseBranch} as evidence, not as the definition of scope. Do not report defects in unrelated features, infrastructure, or files merely because they are present or changed in the pull request.
+
+Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
+
+The Ralph orchestrator has already completed every configured preflight and validation script successfully for the exact reviewed head. Do not rerun npm, npx, builds, linters, type checks, tests, dev servers, or any command that writes caches or artifacts. Use read-only file and git inspection only.
+
+Report every distinct actionable finding in scope in this single response. Use verdict "fail" when at least one actionable finding exists; otherwise use "pass" with an empty findings array. Do not edit files, create comments, change GitHub state, or run destructive commands. The Ralph orchestrator will publish the structured result.`;
+}
+
 async function runMilestoneReview(config, repository, milestone, pullRequest) {
   if (!config.milestoneReview.enabled) {
     console.log('Milestone review выключен в конфиге.');
@@ -2106,15 +2123,7 @@ async function runMilestoneReview(config, repository, milestone, pullRequest) {
     };
   }
 
-  const milestoneDescription = milestone.description?.trim() || '(Milestone description is empty.)';
-  const reviewPrompt = `Perform a read-only architectural review of the entire pull request #${pullRequest.number} (${pullRequest.url}) for milestone "${milestone.title}".
-
-Milestone description:
-${milestoneDescription}
-
-Review the complete branch diff against ${config.baseBranch}, not just the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests available in the repository. Look specifically for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements or PRD.
-
-Report only actionable findings introduced by this PR. Use verdict "fail" when at least one actionable finding exists; otherwise use "pass" with an empty findings array. Do not edit files, create comments, change GitHub state, or run destructive commands. The Ralph orchestrator will publish the structured result.`;
+  const reviewPrompt = buildMilestoneReviewPrompt(config, milestone, pullRequest);
 
   console.log(
     `\n=== Milestone review for PR #${pullRequest.number} (${config.milestoneReview.model}) ===\n`,
@@ -2707,6 +2716,7 @@ if (isMainModule) {
 export {
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
+  buildMilestoneReviewPrompt,
   createStateStore,
   createOrReopenReviewIssues,
   executeMode,
