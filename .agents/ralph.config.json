@@ -46,6 +46,7 @@
   },
 
   "developmentModel": "gpt-5.6-terra",
+  "autoApproveConfiguredIssues": true,
   "trustedIssueAuthors": ["codex-ai-Goo"],
   "rulesFile": ".agents/ralph-rules.md",
   "prompt": "Прочитай .agents/RALPH.md и следуй правилам оттуда. Возьми issue #{issue_number} «{issue_title}» из milestone «{milestone}» и реализуй её. Соблюдай AGENTS.md и переданные ниже правила Ralph Loop.",

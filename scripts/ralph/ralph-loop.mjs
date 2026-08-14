@@ -805,6 +805,7 @@ function loadConfig() {
   config.runtime.reviewRetryAttempts ??= 3;
   config.developmentModel ??= 'gpt-5.6-terra';
   config.rulesFile ??= '.agents/ralph-rules.md';
+  config.autoApproveConfiguredIssues ??= true;
   config.trustedIssueAuthors ??= [];
   config.approvedIssueSnapshotsFile ??= 'scripts/ralph/approved-issues.json';
   if (
@@ -866,6 +867,9 @@ function loadConfig() {
   }
   if (typeof config.draftPullRequest !== 'boolean') {
     fail('Поле "draftPullRequest" должно быть true или false.');
+  }
+  if (typeof config.autoApproveConfiguredIssues !== 'boolean') {
+    fail('Поле "autoApproveConfiguredIssues" должно быть true или false.');
   }
   if (!Number.isInteger(config.maxIterations) || config.maxIterations < 1) {
     fail('Поле "maxIterations" должно быть целым числом больше 0.');
@@ -1146,6 +1150,7 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
       baseBranch: config.baseBranch,
       milestone: config.milestone,
       iterationsUsed: 0,
+      approvedIssueSnapshots: {},
       issue: null,
       updatedAt: new Date().toISOString(),
     };
@@ -1170,6 +1175,19 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
     },
     get phaseCount() {
       return state?.phaseCount ?? configuredPhaseCount;
+    },
+    get approvedIssueSnapshots() {
+      return state?.approvedIssueSnapshots ?? {};
+    },
+    approveIssueSnapshot(issueNumber, snapshot, replace = false) {
+      if (!state) return snapshot;
+      state.approvedIssueSnapshots ??= {};
+      const key = String(issueNumber);
+      const existing = state.approvedIssueSnapshots[key];
+      if (existing && !replace) return existing;
+      state.approvedIssueSnapshots[key] = snapshot;
+      persist();
+      return snapshot;
     },
     beginIssue(issue, startingCommit, continuation = false) {
       if (!state) return;
@@ -1550,13 +1568,7 @@ function issueContentHash(issue) {
     .digest('hex');
 }
 
-function rejectUntrustedIssue(message) {
-  const error = new Error(message);
-  error.code = 'RALPH_UNTRUSTED_ISSUE';
-  throw error;
-}
-
-function assertTrustedIssue(config, issue, repository) {
+function assertTrustedIssueAuthor(config, issue, repository) {
   if (isRalphInfrastructureIssue(issue)) {
     rejectUntrustedIssue(
       `Issue #${issue.number} относится к Ralph-инфраструктуре. ` +
@@ -1576,6 +1588,43 @@ function assertTrustedIssue(config, issue, repository) {
         'Only the repository owner or authors configured in trustedIssueAuthors may provide AFK instructions.',
     );
   }
+}
+
+function approveConfiguredIssue(
+  config,
+  issue,
+  repository,
+  stateStore = activeStateStore,
+  { replace = false } = {},
+) {
+  const key = String(issue.number);
+  if ((config.approvedIssueSnapshots?.[key] && !replace) || !config.autoApproveConfiguredIssues) {
+    return issue;
+  }
+
+  assertTrustedIssueAuthor(config, issue, repository);
+  const snapshot = {
+    title: issue.title,
+    body: issueBodyWithoutRalphMetadata(issue),
+  };
+  const approvedSnapshot =
+    stateStore?.approveIssueSnapshot(issue.number, snapshot, replace) ?? snapshot;
+  config.approvedIssueSnapshots[key] = approvedSnapshot;
+  console.log(
+    `Issue #${issue.number}: immutable snapshot автоматически зафиксирован ` +
+      'закоммиченным планом phases.',
+  );
+  return issue;
+}
+
+function rejectUntrustedIssue(message) {
+  const error = new Error(message);
+  error.code = 'RALPH_UNTRUSTED_ISSUE';
+  throw error;
+}
+
+function assertTrustedIssue(config, issue, repository) {
+  assertTrustedIssueAuthor(config, issue, repository);
   const snapshot = config.approvedIssueSnapshots?.[String(issue.number)];
   if (!snapshot) {
     rejectUntrustedIssue(
@@ -3372,8 +3421,12 @@ async function runContinuousLoop(context, actions) {
         fail('Milestone review завершился с FAIL, но ни одной issue исправления не создано.');
       }
       for (const issue of reviewIssues) {
-        completedIssueNumbers.delete(issue.number);
-        pendingIssues.set(issue.number, issue);
+        const refreshedReviewIssue = actions.refreshIssue(repository, issue.number, issue);
+        approveConfiguredIssue(config, refreshedReviewIssue, repository, stateStore, {
+          replace: true,
+        });
+        completedIssueNumbers.delete(refreshedReviewIssue.number);
+        pendingIssues.set(refreshedReviewIssue.number, refreshedReviewIssue);
       }
       console.log(
         `Milestone review создал или переоткрыл ${reviewIssues.length} issues. Ralph продолжает цикл исправлений.`,
@@ -3398,6 +3451,7 @@ async function runContinuousLoop(context, actions) {
       completedIssueNumbers.add(currentIssue.number);
       continue;
     }
+    approveConfiguredIssue(config, refreshedIssue, repository, stateStore);
     currentIssue = refreshedIssue;
     const completion = issueCompletionState(currentIssue);
     const storedPhase =
@@ -3464,6 +3518,7 @@ async function executeMode(context, actions) {
       context.stateStore?.finish();
       return { mode: 'once', completed: 0 };
     }
+    approveConfiguredIssue(config, issues[0], repository, context.stateStore);
     const completion = issueCompletionState(issues[0]);
     const storedPhase =
       context.stateStore?.issue?.number === issues[0].number
@@ -3600,6 +3655,7 @@ async function main() {
         branch: firstPhaseConfig.branch,
       });
       activeStateStore = createStateStore(firstPhaseConfig, mode);
+      Object.assign(config.approvedIssueSnapshots, activeStateStore.approvedIssueSnapshots);
       const rules = loadRalphRules(config);
       verifyTools();
       if (mode !== '--check') {
@@ -3678,6 +3734,7 @@ if (isMainModule) {
 }
 
 export {
+  approveConfiguredIssue,
   assertTrustedIssue,
   assertTrustedControlFilesUnchanged,
   alreadyFixedCommitFromAgent,

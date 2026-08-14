@@ -1,8 +1,13 @@
 # Ralph validation isolation
 
-`approved-issues.json` is the tracked approval ledger for AFK issue prompts. Ralph
-requires an exact title/body match before it starts Codex; a GitHub edit therefore
-stops the run until a trusted maintainer reviews and updates the snapshot.
+`approved-issues.json` is the tracked approval ledger for explicitly pinned AFK
+issue prompts. By default, `autoApproveConfiguredIssues=true` also treats a
+committed `phases` plan as approval of the current title/body of issues in those
+milestones, provided their author is trusted. Ralph freezes the exact content in
+its persistent run state before Codex starts; later GitHub edits therefore stop
+the run. Review issues created by Ralph are frozen through the same mechanism, so
+an enabled milestone recovery loop can remain unattended. Set the option to
+`false` when every issue must be added to the tracked ledger manually.
 
 Ralph only implements product work. `.agents/**`, `scripts/ralph/**`, and every
 `AGENTS.md` are manual control-plane paths: milestone reviews do not create issues

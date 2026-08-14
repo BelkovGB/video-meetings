@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   agentReportedWriteAccessFailure,
+  approveConfiguredIssue,
   assertTrustedIssue,
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
@@ -96,6 +97,76 @@ test('only an approved immutable issue snapshot can supply an AFK implementation
     issueContentHash({ ...approvedIssue, body: `${approvedIssue.body}\r\n` }),
     issueContentHash(approvedIssue),
   );
+});
+
+test('a committed phase plan automatically freezes trusted issue content for AFK', () => {
+  const approvals = {};
+  const stateStore = {
+    approveIssueSnapshot(number, snapshot) {
+      approvals[String(number)] ??= snapshot;
+      return approvals[String(number)];
+    },
+  };
+  const config = {
+    autoApproveConfiguredIssues: true,
+    trustedIssueAuthors: ['BelkovGB'],
+    approvedIssueSnapshots: {},
+  };
+  const issue = {
+    number: 26,
+    title: 'Implement the configured phase task',
+    body: 'Exact approved requirements.',
+    authorLogin: 'BelkovGB',
+  };
+
+  approveConfiguredIssue(config, issue, 'BelkovGB/video-meetings', stateStore);
+  assert.deepEqual(config.approvedIssueSnapshots['26'], {
+    title: issue.title,
+    body: issue.body,
+  });
+  assert.doesNotThrow(() => assertTrustedIssue(config, issue, 'BelkovGB/video-meetings'));
+  assert.throws(
+    () =>
+      assertTrustedIssue(
+        config,
+        { ...issue, body: 'Requirements changed after the snapshot.' },
+        'BelkovGB/video-meetings',
+      ),
+    /does not match the approved immutable snapshot/,
+  );
+});
+
+test('Ralph can rotate the frozen snapshot for a review issue it regenerated', () => {
+  const approvals = {
+    67: { title: '[P2] Old finding', body: 'Old reviewed head.' },
+  };
+  const stateStore = {
+    approveIssueSnapshot(number, snapshot, replace) {
+      if (replace || !approvals[String(number)]) approvals[String(number)] = snapshot;
+      return approvals[String(number)];
+    },
+  };
+  const config = {
+    autoApproveConfiguredIssues: true,
+    trustedIssueAuthors: ['BelkovGB'],
+    approvedIssueSnapshots: { ...approvals },
+  };
+  const regenerated = {
+    number: 67,
+    title: '[P2] Current finding',
+    body: 'Current reviewed head.',
+    authorLogin: 'BelkovGB',
+  };
+
+  approveConfiguredIssue(config, regenerated, 'BelkovGB/video-meetings', stateStore, {
+    replace: true,
+  });
+
+  assert.deepEqual(config.approvedIssueSnapshots['67'], {
+    title: regenerated.title,
+    body: regenerated.body,
+  });
+  assert.doesNotThrow(() => assertTrustedIssue(config, regenerated, 'BelkovGB/video-meetings'));
 });
 
 test('Ralph accepts its own lifecycle metadata while preserving approved requirements and review findings', () => {
@@ -791,6 +862,28 @@ test('persistent state survives restart and enforces branch identity', () => {
 
     resumed.finish();
     assert.equal(existsSync(statePath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('automatic issue approvals survive an AFK process restart', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-state-approvals-'));
+  const statePath = path.join(directory, 'state.json');
+  const config = {
+    branch: 'feature/approved',
+    baseBranch: 'master',
+    milestone: 'Approved phase',
+  };
+  const snapshot = { title: 'Trusted task', body: 'Frozen requirements.' };
+
+  try {
+    const first = createStateStore(config, '--run', statePath);
+    first.approveIssueSnapshot(26, snapshot);
+
+    const resumed = createStateStore(config, '--run', statePath);
+    assert.deepEqual(resumed.approvedIssueSnapshots, { 26: snapshot });
+    resumed.finish();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
