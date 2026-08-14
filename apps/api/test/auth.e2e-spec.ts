@@ -98,3 +98,51 @@ describe('Authentication (e2e)', () => {
     await request(app.getHttpServer()).post('/auth/login').send(credentials).expect(400);
   });
 });
+
+describe('Authentication rate limiting (e2e)', () => {
+  let app: INestApplication;
+
+  beforeEach(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it.each(['/auth/register', '/auth/login'])(
+    'returns 429 after too many requests to %s from one IP address',
+    async (path) => {
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await request(app.getHttpServer())
+          .post(path)
+          .send({ email: createEmail(`rate-limit-${attempt}`), password: 'short' })
+          .expect(path === '/auth/register' ? 400 : 401);
+      }
+
+      await request(app.getHttpServer())
+        .post(path)
+        .send({ email: createEmail('rate-limit-blocked'), password: 'short' })
+        .expect('Retry-After', /\d+/)
+        .expect(429);
+    },
+  );
+
+  it('limits repeated login attempts for the same account', async () => {
+    const credentials = {
+      email: createEmail('account-rate-limit'),
+      password: validPassword,
+    };
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await request(app.getHttpServer()).post('/auth/login').send(credentials).expect(401);
+    }
+
+    await request(app.getHttpServer()).post('/auth/login').send(credentials).expect(429);
+  });
+});
