@@ -49,6 +49,8 @@ import {
   verifyCodexAuthentication,
 } from './ralph-loop.mjs';
 
+const executableTempDirectory = fileURLToPath(new URL('../../node_modules/', import.meta.url));
+
 test('only an approved immutable issue snapshot can supply an AFK implementation prompt', () => {
   const approvedIssue = {
     number: 66,
@@ -375,6 +377,7 @@ test('validation image provisions the configured database from a pinned Dockerfi
   );
 
   assert.match(dockerfile, /COPY apps\/api\/prisma apps\/api\/prisma/);
+  assert.match(dockerfile, /apt-get install --yes --no-install-recommends git postgresql/);
   assert.match(dockerfile, /--mount=type=cache,target=\/root\/\.npm,sharing=locked/);
   assert.match(dockerfile, /fetch-retries 5/);
   assert.match(dockerfile, /until npm ci; do/);
@@ -995,7 +998,10 @@ test('GitHub pagination combines pages and fails instead of silently truncating'
 });
 
 function fakeCodexScript(source) {
-  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-fake-codex-'));
+  // Validation deliberately mounts /tmp with noexec. Keep fake executables in
+  // the executable workspace instead; node_modules is ignored and writable in
+  // both local and isolated test runs.
+  const directory = mkdtempSync(path.join(executableTempDirectory, '.ralph-fake-codex-'));
   const scriptPath = path.join(directory, 'fake-codex.mjs');
   writeFileSync(scriptPath, source, 'utf8');
 
