@@ -14,3 +14,9 @@ no network, no Docker socket, a read-only image, and a bind mount containing onl
 tracked or non-ignored workspace files. The container starts an ephemeral local
 PostgreSQL instance and uses `.env.example`, so host `.env` secrets and host
 credential helpers are never available to generated scripts.
+
+The dependency image generates Prisma Client while network access is available
+and then proves that client regeneration and migrations succeed with networking
+disabled. Runtime validations mount the reviewed source snapshot, reuse that
+pinned client and Linux engine, and build both workspaces without downloading
+binaries from mutable product scripts.

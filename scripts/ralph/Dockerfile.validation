@@ -23,6 +23,9 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     attempt=$((attempt + 1)); \
     sleep $((attempt * 5)); \
   done \
+  && cp .env.example .env \
+  && npm run prisma:generate --workspace @video-meetings/api \
+  && rm .env \
   && PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright npx --no-install playwright install --with-deps chromium \
   && chown -R 65532:65532 /opt/ralph-dependencies /opt/ms-playwright
 
@@ -37,8 +40,12 @@ RUN chmod 0555 /usr/local/bin/ralph-validation /usr/local/bin/docker \
 
 USER 65532:65532
 
-# This proves the image carries Prisma's Linux engines and that the entrypoint
-# creates the database configured by .env.example without network access.
-RUN --network=none /usr/local/bin/ralph-validation db:migrate
+# This proves the image can regenerate Prisma Client with its Linux engine and
+# provision the database without network access. Runtime validation mounts the
+# reviewed source snapshot before it builds both workspaces.
+RUN --network=none cp .env.example .env \
+  && npm run prisma:generate --workspace @video-meetings/api \
+  && rm .env \
+  && /usr/local/bin/ralph-validation db:migrate
 
 ENTRYPOINT ["/usr/local/bin/ralph-validation"]
