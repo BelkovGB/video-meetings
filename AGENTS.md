@@ -39,3 +39,19 @@
 - Put module instructions in an `AGENTS.md` beside the module, not in a shared
   file, and do not repeat the parent. A new one changes Ralph's trusted set, so
   add it between runs.
+
+## Code structure and naming
+
+- A name must not promise more than the code delivers. A misleading name is
+  worse than a vague one: a vague name makes the reader open the code, a
+  misleading one does not.
+- One name, one behaviour. Two same-named functions with different output are a
+  silent bug waiting for the next person who deduplicates them.
+- Name the unit or the scope whenever more than one exists — `validationTimeoutMs`
+  per container next to `validationRunTimeoutMs` per run.
+- A shared type belongs to the contract module, not to the component that first
+  needed it.
+- Size is a signal, not a target. Split where a unit has more than one reason to
+  change, so one subject area lives in one file and can be read without reading
+  its neighbours. Do not split into single-method helpers: that makes things
+  harder to find, not easier.
