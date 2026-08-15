@@ -301,6 +301,100 @@ test('uploads, previews, replaces, validates, and synchronizes the current-user 
   ).toHaveAttribute('src', /^blob:/);
 });
 
+test('removes an avatar with recovery on failure and synchronizes the fallback identity', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-avatar-removal');
+  const image = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL9HwAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const savedAvatar = {
+    mimeType: 'image/png',
+    sizeBytes: image.length,
+    updatedAt: '2026-08-15T10:00:00.000Z',
+  };
+  let avatar: typeof savedAvatar | null = savedAvatar;
+  let shouldFailRemoval = true;
+
+  await page.route('**/users/me', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ email: session.email, displayName: 'Алексей', avatar }),
+    });
+  });
+  await page.route('**/users/me/avatar', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ status: 200, contentType: 'image/png', body: image });
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (shouldFailRemoval) {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Не удалось удалить аватар.' }),
+      });
+      return;
+    }
+
+    avatar = null;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ email: session.email, displayName: 'Алексей', avatar }),
+    });
+  });
+  await authenticate(page, session);
+  await page.goto('/profile');
+
+  const removeButton = page.getByRole('button', { name: 'Удалить аватар' });
+  await expect(removeButton).toBeVisible();
+  await expect(page.getByTestId('current-user-avatar')).toHaveAttribute('src', /^blob:/);
+  await expect(page.getByTestId('avatar-controls')).toHaveScreenshot(
+    'avatar-removal-controls.png',
+    {
+      // Linux CI renders the native file input differently from the Windows
+      // authoring browser; the widest observed difference is 2,816 pixels.
+      // This retains the visual guard around the control and button while
+      // allowing the platform-owned native control rasterization variance.
+      maxDiffPixels: 3000,
+    },
+  );
+  await removeButton.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Удаляем аватар…' })).toBeDisabled();
+  await expect(page.getByLabel('Выбрать файл аватара')).toBeDisabled();
+  await expect(page.locator('#avatar-upload-error')).toHaveText('Не удалось удалить аватар.');
+  await expect(removeButton).toBeFocused();
+  await expect(page.getByTestId('current-user-avatar')).toHaveAttribute('src', /^blob:/);
+
+  shouldFailRemoval = false;
+  await removeButton.click();
+  await expect(page.locator('#avatar-upload-status')).toHaveText('Аватар удалён.');
+  await expect(page.locator('#avatar-upload-status')).toBeFocused();
+  await expect(page.getByTestId('current-user-avatar')).toHaveText('А');
+  await expect(page.getByTestId('current-user-avatar')).not.toHaveAttribute('src');
+  await expect(removeButton).toHaveCount(0);
+  await expect(page.getByLabel('Email')).toHaveText(session.email);
+  await expect(page.getByLabel('Отображаемое имя')).toHaveValue('Алексей');
+
+  await page.getByRole('link', { name: 'К встречам' }).click();
+  await expect(page.locator('a[href="/profile"]').getByTestId('current-user-avatar')).toHaveText(
+    'А',
+  );
+  await expect(
+    page.locator('a[href="/profile"]').getByTestId('current-user-avatar'),
+  ).not.toHaveAttribute('src');
+});
+
 test('manages the display name while preserving saved profile details', async ({
   page,
   request,

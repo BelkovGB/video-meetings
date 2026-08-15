@@ -316,6 +316,11 @@ export default function ProfilePage() {
                   currentProfile ? { ...currentProfile, avatar: updatedAvatar } : currentProfile,
                 )
               }
+              onAvatarRemoved={() =>
+                setProfile((currentProfile) =>
+                  currentProfile ? { ...currentProfile, avatar: null } : currentProfile,
+                )
+              }
               onUnauthorized={handleUnauthorized}
             />
             <div className="grid gap-2 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center">
