@@ -7,8 +7,8 @@
   affected interactions, keyboard accessibility, and the configured desktop,
   mobile, and mobile-landscape Playwright projects.
 - Use the Playwright tooling available in the execution environment. Interactive
-  agents may use Playwright MCP; Ralph sessions follow `.agents/RALPH.md` and
-  treat orchestrator validation as authoritative.
+  agents may use Playwright MCP; Ralph sessions treat orchestrator validation as
+  authoritative.
 - Run focused checks during implementation. Do not reinstall browsers or rerun
   the complete validation suite from an isolated Ralph agent session.
 - Update visual snapshots only for intentional rendered changes and inspect the

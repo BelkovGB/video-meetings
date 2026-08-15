@@ -7,8 +7,9 @@
 - Shared validation: `npm run format:check`, `npm run lint`, and `npm run build`.
   Tests: `npm run test:e2e:api`, `npm run test:e2e:web`, and `npm run test:ralph`.
 - Update relevant documentation when changing architecture or public contracts.
-- Ralph AFK sessions follow `.agents/RALPH.md`; the orchestrator owns complete
-  validation runs.
+- Ralph AFK sessions receive their full contract inside the prompt and must not
+  read `.agents/RALPH.md`, which is operator documentation. The orchestrator owns
+  complete validation runs.
 
 ## Token efficiency
 
