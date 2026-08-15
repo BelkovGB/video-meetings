@@ -40,6 +40,19 @@ import {
   scopeMilestoneReviewToProduct,
 } from './ralph-scope.mjs';
 
+import {
+  applyRuntimeSettings,
+  commandSpec,
+  credentialFreeEnvironment,
+  credentialFreeEnvironmentVariables,
+  executable,
+  inheritableEnvironmentVariables,
+  outputTail,
+  run,
+  runNetwork,
+  runtimeSettings,
+} from './ralph-process-runner.mjs';
+
 // -----------------------------------------------------------------------------
 // Пути проекта и режим запуска
 // -----------------------------------------------------------------------------
@@ -57,44 +70,12 @@ const runtimeLockPath = path.join(runtimeDirectory, 'run.lock');
 const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
 const runtimeAttestationsPath = path.join(runtimeDirectory, 'validation-attestations.json');
 const commandRunnerPath = path.join(scriptDirectory, 'ralph-command-runner.mjs');
-let runtimeSettings = {
-  commandTimeoutMs: 300_000,
-  validationTimeoutMs: 1_800_000,
-  validationRunTimeoutMs: 3_600_000,
-  codexTimeoutMs: 5_400_000,
-  networkRetryAttempts: 3,
-  networkRetryBaseDelayMs: 2_000,
-  maxPages: 20,
-  reviewRetryAttempts: 3,
-};
 let activeStateStore = null;
 const preparedValidationImages = new Set();
 
 // -----------------------------------------------------------------------------
 // Запуск внешних команд: Git, GitHub CLI, npm и Codex CLI
 // -----------------------------------------------------------------------------
-
-function executable(name) {
-  if (process.platform !== 'win32') {
-    return name;
-  }
-
-  return `${name}.exe`;
-}
-
-function commandSpec(name, args) {
-  const useWindowsCommandShim =
-    process.platform === 'win32' && ['codex', 'npm', 'npx'].includes(name);
-  const command = useWindowsCommandShim ? (process.env.ComSpec ?? 'cmd.exe') : executable(name);
-  const commandArgs = useWindowsCommandShim ? ['/d', '/s', '/c', `${name}.cmd`, ...args] : args;
-
-  return { command, commandArgs };
-}
-
-function outputTail(value, maxLength = 20_000) {
-  const text = String(value ?? '').trim();
-  return text.length > maxLength ? `…${text.slice(-maxLength)}` : text;
-}
 
 // -----------------------------------------------------------------------------
 // Структурированная сводка упавшей проверки
@@ -252,53 +233,6 @@ function recoveryPrompt(storedIssue) {
   );
 }
 
-// Полный allowlist переменных, которые дочерний процесс может унаследовать.
-// Сам по себе он не является политикой: home/config-переменные указывают на
-// каталоги с учётными данными, поэтому единственная применяемая политика ниже
-// вычитает их. Список остаётся отдельно, чтобы вычитание было видимым.
-const inheritableEnvironmentVariables = [
-  'PATH',
-  'Path',
-  'PATHEXT',
-  'ComSpec',
-  'SystemRoot',
-  'SYSTEMROOT',
-  'WINDIR',
-  'TEMP',
-  'TMP',
-  'TMPDIR',
-  'HOME',
-  'USERPROFILE',
-  'APPDATA',
-  'LOCALAPPDATA',
-  'XDG_CONFIG_HOME',
-  'XDG_CACHE_HOME',
-  'CODEX_HOME',
-];
-
-const credentialFreeEnvironmentVariables = inheritableEnvironmentVariables.filter(
-  (name) =>
-    ![
-      'HOME',
-      'USERPROFILE',
-      'APPDATA',
-      'LOCALAPPDATA',
-      'XDG_CONFIG_HOME',
-      'XDG_CACHE_HOME',
-      'CODEX_HOME',
-    ].includes(name),
-);
-
-function createEnvironment(variableNames, source = process.env) {
-  return Object.fromEntries(
-    variableNames.flatMap((name) => (source[name] === undefined ? [] : [[name, source[name]]])),
-  );
-}
-
-function credentialFreeEnvironment(source = process.env) {
-  return createEnvironment(credentialFreeEnvironmentVariables, source);
-}
-
 function codexAuthenticationFile(source = process.env) {
   const codexHome = source.CODEX_HOME?.trim();
   if (codexHome) return path.join(codexHome, 'auth.json');
@@ -368,103 +302,6 @@ function createSandboxedCodexEnvironment(source = process.env, options = {}) {
       TMPDIR: temp,
     },
   };
-}
-
-function run(name, args, options = {}) {
-  const commandTarget = commandSpec(name, args);
-  const useCommandRunner = process.platform === 'win32';
-  const command = useCommandRunner ? process.execPath : commandTarget.command;
-  const commandArgs = useCommandRunner ? [commandRunnerPath] : commandTarget.commandArgs;
-  const stdio = options.inherit ? ['pipe', 'inherit', 'inherit'] : 'pipe';
-  const timeoutMs = options.timeoutMs ?? runtimeSettings.commandTimeoutMs;
-  const startedAt = Date.now();
-  console.log(`Команда: ${name} ${args[0] ?? ''}`.trim());
-  const result = spawnSync(command, commandArgs, {
-    cwd: projectRoot,
-    encoding: 'utf8',
-    input: useCommandRunner
-      ? JSON.stringify({
-          command: commandTarget.command,
-          args: commandTarget.commandArgs,
-          cwd: projectRoot,
-          input: options.input,
-          timeoutMs,
-          env: options.env,
-        })
-      : options.input,
-    stdio,
-    timeout: useCommandRunner ? timeoutMs + 25_000 : timeoutMs,
-    killSignal: 'SIGTERM',
-    maxBuffer: 50 * 1024 * 1024,
-    windowsHide: true,
-    ...(options.env === undefined ? {} : { env: options.env }),
-  });
-
-  const commandRunnerTimedOut =
-    useCommandRunner &&
-    result.status === 124 &&
-    String(result.stderr ?? '').includes('RALPH_COMMAND_TIMEOUT:');
-  if (result.error?.code === 'ETIMEDOUT' || commandRunnerTimedOut) {
-    throw commandTimeoutError(name, args, timeoutMs, result);
-  }
-  if (result.error) {
-    const error = new Error(`Не удалось запустить ${name}: ${result.error.message}`);
-    error.code = result.error.code;
-    error.stdout = result.stdout?.trim() ?? '';
-    error.stderr = result.stderr?.trim() ?? '';
-    throw error;
-  }
-  if (result.status === null) {
-    const error = new Error(
-      `Команда ${name} ${args[0] ?? ''} завершилась без exit code` +
-        `${result.signal ? ` (сигнал ${result.signal})` : ''}.`,
-    );
-    error.code = 'RALPH_COMMAND_TERMINATED';
-    error.stdout = outputTail(result.stdout);
-    error.stderr = outputTail(result.stderr);
-    throw error;
-  }
-
-  const allowedExitCodes = new Set(options.allowedExitCodes ?? []);
-  if (result.status !== 0 && !options.allowFailure && !allowedExitCodes.has(result.status)) {
-    const details = [result.stderr, result.stdout]
-      .filter(Boolean)
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .join('\n');
-    const error = new Error(
-      `Команда ${name} ${args[0] ?? ''} завершилась с кодом ${result.status}.` +
-        `${details ? `\n${outputTail(details)}` : ''}`,
-    );
-    error.code = 'RALPH_COMMAND_FAILED';
-    error.status = result.status;
-    error.stdout = result.stdout?.trim() ?? '';
-    error.stderr = result.stderr?.trim() ?? '';
-    throw error;
-  }
-
-  if (options.echoOutput) {
-    if (result.stdout?.trim()) console.log(outputTail(result.stdout, 100_000));
-    if (result.stderr?.trim()) console.error(outputTail(result.stderr, 100_000));
-  }
-  console.log(`Команда ${name} завершена за ${Date.now() - startedAt} ms.`);
-
-  return {
-    status: result.status,
-    stdout: result.stdout?.trim() ?? '',
-    stderr: result.stderr?.trim() ?? '',
-  };
-}
-
-function runNetwork(name, args, options = {}) {
-  return retryTransientOperation(() => run(name, args, options), {
-    attempts: runtimeSettings.networkRetryAttempts,
-    baseDelayMs: runtimeSettings.networkRetryBaseDelayMs,
-    onRetry: (error, attempt, delay) =>
-      console.error(
-        `Временная ошибка ${name} (попытка ${attempt}): ${error.message}. Повтор через ${delay} ms.`,
-      ),
-  });
 }
 
 function terminateProcessTree(child, force = false) {
@@ -661,7 +498,7 @@ async function runCodexWithTurnLimit(args, options) {
   });
 
   child.stdin.end(options.input);
-  const timeoutMs = options.timeoutMs ?? runtimeSettings.codexTimeoutMs;
+  const timeoutMs = options.timeoutMs ?? runtimeSettings().codexTimeoutMs;
   let wallTimer;
   const wallTimeout = new Promise((resolve) => {
     wallTimer = setTimeout(() => {
@@ -1288,6 +1125,7 @@ function loadConfig() {
     config.validationContainer.dockerfilePath,
     commandRunnerPath,
     path.join(scriptDirectory, 'ralph-runtime.mjs'),
+    path.join(scriptDirectory, 'ralph-process-runner.mjs'),
     path.join(scriptDirectory, 'ralph-scope.mjs'),
     path.join(scriptDirectory, 'ralph-validation-docker-shim.sh'),
     path.join(scriptDirectory, 'ralph-validation-entrypoint.sh'),
@@ -1306,7 +1144,7 @@ function loadConfig() {
     }),
   );
 
-  runtimeSettings = { ...config.runtime };
+  applyRuntimeSettings(config.runtime);
   return config;
 }
 
@@ -1614,7 +1452,7 @@ function verifyCodexAuthentication(dependencies = {}) {
   try {
     execute('codex', ['login', 'status'], {
       env: childEnvironment.env,
-      timeoutMs: runtimeSettings.commandTimeoutMs,
+      timeoutMs: runtimeSettings().commandTimeoutMs,
     });
   } catch (cause) {
     const error = new Error(
@@ -1724,7 +1562,7 @@ function repositoryName() {
 
 function githubPagedArray(repository, resource, fields, source, dependencies = {}) {
   const execute = dependencies.runNetwork ?? runNetwork;
-  const maxPages = dependencies.maxPages ?? runtimeSettings.maxPages;
+  const maxPages = dependencies.maxPages ?? runtimeSettings().maxPages;
   const items = [];
   for (let page = 1; page <= maxPages; page += 1) {
     const args = [
