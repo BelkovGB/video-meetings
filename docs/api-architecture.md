@@ -7,9 +7,9 @@
 - `UsersModule` owns credential-oriented user persistence. It exposes
   `UsersSecurityPort` as its security boundary for creating users and finding a
   user by email.
-- `ProfileModule` owns the protected current-user profile and avatar HTTP APIs.
-  It reads and updates only safe profile fields for the authenticated user and
-  owns private avatar storage separately from meeting files.
+- `ProfileModule` owns the protected current-user profile, avatar, and
+  self-service password-change HTTP APIs. It owns private avatar storage
+  separately from meeting files.
 - `MeetingsModule` owns the meetings HTTP API and uses CQRS for all operations.
 - `FilesModule` owns local meeting-file storage and its protected HTTP API.
 - `PrismaModule` owns the shared Prisma database client.
@@ -54,16 +54,19 @@ including password hashes. This security pattern keeps hashes inside the
 module-to-module boundary while preventing authentication from depending on the
 users persistence implementation.
 
-`ProfileModule` is deliberately outside `UsersSecurityPort`: profile reads,
-updates, and avatar operations are not credential operations. It imports
-`AuthModule` only for `JwtAuthGuard`, takes the caller ID exclusively from the
-verified JWT `sub`, and uses `PrismaModule` to select or update `id`, `email`,
-`displayName`, and private avatar metadata. It never selects password hashes,
-and it has no operation accepting a target user ID or an email update. Thus the
-credential flow in `AuthModule` has no direct `User` model dependency,
-`AuthSessionService` is its only Prisma-backed authentication state,
-`UsersModule` does not expose general user CRUD, and the profile HTTP surface is limited to
-`GET`/`PATCH /users/me` and `POST`/`GET`/`DELETE /users/me/avatar` documented
+`ProfileModule` is deliberately outside `UsersSecurityPort`: its profile reads,
+updates, and avatar operations are not credential operations. Its one credential
+boundary is the authenticated `POST /users/me/password` operation: it accepts
+only the verified JWT subject and session ID, selects that subject's password
+hash inside its transaction, verifies the current password, atomically replaces
+the hash, and revokes that same session. It never returns or logs a password or
+hash, has no operation accepting a target user ID or an email update, and rate
+limits password verification by both caller account and client IP. Other profile
+operations use `PrismaModule` only for safe fields (`id`, `email`, `displayName`,
+and private avatar metadata). Thus the credential flow in `AuthModule` has no
+direct `User` model dependency, `AuthSessionService` is its only Prisma-backed
+authentication state, `UsersModule` does not expose general user CRUD, and the
+profile HTTP surface is limited to the authenticated caller endpoints documented
 in `docs/api.md`.
 
 There is no general users controller: user creation and credential lookup are

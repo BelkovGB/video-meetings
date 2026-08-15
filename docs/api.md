@@ -174,6 +174,11 @@ UTF-8 bytes. `confirmation` must exactly match `newPassword`. Invalid input or
 an incorrect current password returns `400 Bad Request`; the password and the
 caller session remain valid.
 
+Password-change attempts are limited to five per account in fifteen minutes and
+thirty per client IP per minute. A rejected excess attempt returns `429 Too Many
+Requests` with `Retry-After`; it does not change the password or revoke the
+caller session.
+
 On success, the password replacement and revocation of the calling JWT session
 are atomic. That JWT can no longer access protected routes, while the user's
 other existing sessions remain valid. Passwords and password hashes are never

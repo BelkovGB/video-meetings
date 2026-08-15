@@ -35,6 +35,6 @@ const commandHandlers = [RegisterUserHandler, LoginUserHandler];
     JwtAuthGuard,
     ...commandHandlers,
   ],
-  exports: [JwtModule, JwtAuthGuard, AuthSessionService],
+  exports: [JwtModule, JwtAuthGuard, AuthSessionService, AuthRateLimiterService],
 })
 export class AuthModule {}

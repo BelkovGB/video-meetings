@@ -259,6 +259,36 @@ describe('Current user profile (e2e)', () => {
     await loginUser(user.email, validPassword);
   });
 
+  it('limits repeated password-change attempts without changing the password or session', async () => {
+    const user = await registerUser('password-change-rate-limit');
+    const invalidChange = {
+      currentPassword: 'not-the-current-password',
+      newPassword: 'new-password-123',
+      confirmation: 'new-password-123',
+    };
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await request(app.getHttpServer())
+        .post('/users/me/password')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .send(invalidChange)
+        .expect(400);
+    }
+
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send(invalidChange)
+      .expect('Retry-After', /\d+/)
+      .expect(429);
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(200);
+    await loginUser(user.email, validPassword);
+  });
+
   it('changes the password, revokes only the caller session, and permits login with the new password', async () => {
     const user = await registerUser('password-change-success');
     const secondSessionToken = await loginUser(user.email, validPassword);

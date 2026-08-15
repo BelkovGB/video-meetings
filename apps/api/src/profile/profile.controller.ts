@@ -25,6 +25,7 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { avatarConfig } from './avatar.config';
 import { AvatarUploadExceptionFilter } from './avatar-upload-exception.filter';
+import { PasswordChangeRateLimitGuard } from './password-change-rate-limit.guard';
 import { ProfileService } from './profile.service';
 
 @Controller('users/me')
@@ -86,6 +87,7 @@ export class ProfileController {
 
   @Post('password')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(PasswordChangeRateLimitGuard)
   async changePassword(
     @Body() changePasswordDto: ChangePasswordDto,
     @Req() request: AuthenticatedRequest,
