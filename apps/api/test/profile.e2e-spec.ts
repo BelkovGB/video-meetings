@@ -260,6 +260,68 @@ describe('Current user profile (e2e)', () => {
     expect(Buffer.from(retrieved.body as Buffer)).toEqual(validPng);
   });
 
+  it('replaces an avatar only after the new image is retained', async () => {
+    const user = await registerUser('avatar-replacement');
+    const storedBefore = await readdir(join(avatarUploadRoot, 'files'));
+
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
+    expect(await readdir(join(avatarUploadRoot, 'files'))).toHaveLength(storedBefore.length + 1);
+
+    const replacement = await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validJpeg, { filename: 'replacement.jpg', contentType: 'image/jpeg' })
+      .expect(201);
+
+    expect(replacement.body).toEqual({
+      mimeType: 'image/jpeg',
+      sizeBytes: validJpeg.length,
+      updatedAt: expect.any(String),
+    });
+    expect(await readdir(join(avatarUploadRoot, 'files'))).toHaveLength(storedBefore.length + 1);
+
+    const retrieved = await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect('Content-Type', /image\/jpeg/)
+      .expect(200);
+    expect(Buffer.from(retrieved.body as Buffer)).toEqual(validJpeg);
+  });
+
+  it.each([
+    ['invalid', 'portrait.gif', 'image/gif', Buffer.from('GIF89a'), 415],
+    ['oversized', 'portrait.png', 'image/png', Buffer.concat([validPng, Buffer.alloc(1024)]), 413],
+  ])(
+    'keeps the previous avatar retrievable when a %s replacement is rejected',
+    async (_case, filename, contentType, content, status) => {
+      const user = await registerUser('avatar-replacement-rejected');
+
+      await request(app.getHttpServer())
+        .post('/users/me/avatar')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post('/users/me/avatar')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .attach('avatar', content, { filename, contentType })
+        .expect(status);
+
+      const retrieved = await request(app.getHttpServer())
+        .get('/users/me/avatar')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .expect('Content-Type', /image\/png/)
+        .expect(200);
+      expect(Buffer.from(retrieved.body as Buffer)).toEqual(validPng);
+      await expect(readdir(join(avatarUploadRoot, 'temp'))).resolves.toEqual([]);
+    },
+  );
+
   it.each([
     ['portrait.jpg', 'image/jpeg', validJpeg],
     ['portrait.webp', 'image/webp', validWebp],

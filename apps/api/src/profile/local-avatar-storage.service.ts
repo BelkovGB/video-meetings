@@ -40,11 +40,15 @@ export class LocalAvatarStorageService implements OnModuleInit {
     if (!isInside(avatarConfig.tempDirectory, source)) {
       throw new Error('Avatar temporary path is outside the configured directory');
     }
+    let destinationDirectoryCreated = false;
     try {
       await mkdir(destinationDirectory, { mode: 0o700 });
+      destinationDirectoryCreated = true;
       await rename(source, destination);
     } catch (error) {
-      await rm(destinationDirectory, { recursive: true, force: true });
+      if (destinationDirectoryCreated) {
+        await rm(destinationDirectory, { recursive: true, force: true });
+      }
       throw new ServiceUnavailableException({
         message: 'Avatar storage is unavailable',
         code: 'AVATAR_STORAGE_UNAVAILABLE',

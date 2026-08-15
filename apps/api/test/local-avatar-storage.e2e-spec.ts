@@ -35,6 +35,34 @@ describe('LocalAvatarStorageService', () => {
     await expect(storage.open(storageKey)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('keeps existing private content when finalizing a replacement to an occupied key fails', async () => {
+    const occupiedKey = `${storageKey}-occupied`;
+    const originalTempPath = join(avatarConfig.tempDirectory, `${occupiedKey}-original.part`);
+    const replacementTempPath = join(avatarConfig.tempDirectory, `${occupiedKey}-replacement.part`);
+    const originalContent = Buffer.from('original private avatar content');
+
+    try {
+      await writeFile(originalTempPath, originalContent);
+      await storage.finalize(originalTempPath, occupiedKey);
+      await writeFile(replacementTempPath, Buffer.from('replacement private avatar content'));
+
+      await expect(storage.finalize(replacementTempPath, occupiedKey)).rejects.toMatchObject({
+        response: { code: 'AVATAR_STORAGE_UNAVAILABLE' },
+      });
+
+      const stream = await storage.open(occupiedKey);
+      const received: Buffer[] = [];
+      for await (const chunk of stream) {
+        received.push(Buffer.from(chunk));
+      }
+      expect(Buffer.concat(received)).toEqual(originalContent);
+    } finally {
+      await storage.discardTemp(originalTempPath);
+      await storage.discardTemp(replacementTempPath);
+      await storage.discard(occupiedKey);
+    }
+  });
+
   it('removes interrupted temporary avatar uploads when storage starts', async () => {
     await writeFile(tempPath, content);
     const staleAt = new Date(Date.now() - avatarConfig.temporaryUploadGraceMs - 1_000);
