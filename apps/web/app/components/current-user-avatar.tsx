@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type Avatar = {
   mimeType: string;
@@ -18,6 +18,7 @@ const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
 export function CurrentUserAvatar({ avatar, displayName, className = '' }: CurrentUserAvatarProps) {
   const [image, setImage] = useState<{ url: string; updatedAt: string } | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
   const trimmedDisplayName = displayName?.trim() || null;
   const accessibleName = trimmedDisplayName
     ? `Аватар пользователя ${trimmedDisplayName}`
@@ -53,7 +54,11 @@ export function CurrentUserAvatar({ avatar, displayName, className = '' }: Curre
 
         objectUrl = URL.createObjectURL(await response.blob());
         if (isActive) {
+          objectUrlRef.current = objectUrl;
           setImage({ url: objectUrl, updatedAt: avatar.updatedAt });
+        } else {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
         }
       } catch {
         if (isActive) {
@@ -66,8 +71,9 @@ export function CurrentUserAvatar({ avatar, displayName, className = '' }: Curre
 
     return () => {
       isActive = false;
-      if (objectUrl) {
+      if (objectUrl && objectUrlRef.current === objectUrl) {
         URL.revokeObjectURL(objectUrl);
+        objectUrlRef.current = null;
       }
     };
   }, [avatar?.updatedAt]);
@@ -79,7 +85,13 @@ export function CurrentUserAvatar({ avatar, displayName, className = '' }: Curre
         src={imageUrl}
         alt={accessibleName}
         className={`shrink-0 rounded-full object-cover ${className}`}
-        onError={() => setImage(null)}
+        onError={() => {
+          if (objectUrlRef.current === imageUrl) {
+            URL.revokeObjectURL(imageUrl);
+            objectUrlRef.current = null;
+          }
+          setImage(null);
+        }}
       />
     );
   }

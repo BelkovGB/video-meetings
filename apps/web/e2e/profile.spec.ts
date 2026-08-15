@@ -87,6 +87,7 @@ test('renders the current-user avatar with accessible image and fallback states'
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL9HwAAAABJRU5ErkJggg==',
     'base64',
   );
+  const invalidAvatarImage = Buffer.from('not a decodable image');
   let profileResponse: { displayName: string | null; avatar: object | null } = {
     displayName: 'Алексей',
     avatar: {
@@ -95,7 +96,17 @@ test('renders the current-user avatar with accessible image and fallback states'
       updatedAt: new Date().toISOString(),
     },
   };
-  let avatarResponse: 'image' | 'error' = 'image';
+  let avatarResponse: 'image' | 'request-error' | 'load-error' = 'image';
+
+  await page.addInitScript(() => {
+    const revokedObjectUrls: string[] = [];
+    const revokeObjectUrl = URL.revokeObjectURL.bind(URL);
+    URL.revokeObjectURL = (url) => {
+      revokedObjectUrls.push(url);
+      revokeObjectUrl(url);
+    };
+    (window as Window & { __revokedObjectUrls?: string[] }).__revokedObjectUrls = revokedObjectUrls;
+  });
 
   await page.route('**/users/me', async (route) => {
     if (route.request().method() !== 'GET') {
@@ -110,12 +121,16 @@ test('renders the current-user avatar with accessible image and fallback states'
     });
   });
   await page.route('**/users/me/avatar', async (route) => {
-    if (avatarResponse === 'error') {
+    if (avatarResponse === 'request-error') {
       await route.fulfill({ status: 500 });
       return;
     }
 
-    await route.fulfill({ status: 200, contentType: 'image/png', body: avatarImage });
+    await route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: avatarResponse === 'load-error' ? invalidAvatarImage : avatarImage,
+    });
   });
   await authenticate(page, session);
 
@@ -123,14 +138,17 @@ test('renders the current-user avatar with accessible image and fallback states'
   const avatar = page.getByTestId('current-user-avatar');
   await expect(avatar).toHaveAccessibleName('Аватар пользователя Алексей');
   await expect(avatar).toHaveAttribute('src', /^blob:/);
+  await expect(avatar).toHaveScreenshot('current-user-avatar-image.png');
 
   await page.goto('/');
   const accountEntry = page.locator('a[href="/profile"]');
   await expect(
     accountEntry.getByRole('img', { name: 'Аватар пользователя Алексей' }),
   ).toHaveAttribute('src', /^blob:/);
-  await accountEntry.focus();
+  await page.keyboard.press('Tab');
   await expect(accountEntry).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL('/profile');
 
   profileResponse = { displayName: 'Нина', avatar: null };
   await page.goto('/profile');
@@ -146,11 +164,30 @@ test('renders the current-user avatar with accessible image and fallback states'
       updatedAt: new Date().toISOString(),
     },
   };
-  avatarResponse = 'error';
+  avatarResponse = 'request-error';
   await page.reload();
   await expect(avatar).toHaveAccessibleName('Аватар пользователя Мария');
   await expect(avatar).toHaveText('М');
   await expect(avatar).not.toHaveAttribute('src');
+
+  avatarResponse = 'load-error';
+  await page.reload();
+  await expect(avatar).toHaveAccessibleName('Аватар пользователя Мария');
+  await expect(avatar).toHaveText('М');
+  await expect(avatar).not.toHaveAttribute('src');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as Window & { __revokedObjectUrls?: string[] }).__revokedObjectUrls?.length,
+      ),
+    )
+    .toBeGreaterThan(0);
+  await expect(avatar).toHaveScreenshot('current-user-avatar-load-error-fallback.png', {
+    // Glyph anti-aliasing differs slightly between the Windows authoring browser
+    // and the Linux CI browser. Keep the visual assertion while allowing that
+    // platform-specific rasterization variance.
+    maxDiffPixels: 120,
+  });
 
   profileResponse = { displayName: null, avatar: null };
   await page.reload();
