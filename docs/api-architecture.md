@@ -48,11 +48,14 @@ used to revoke a single JWT without affecting a user's other sessions.
 
 Instead, it depends on the `UsersSecurityPort` token exported by `UsersModule`.
 The port offers only the credential-oriented operations authentication needs:
-create a user and find one by email. `UsersModule` implements that contract with
-`UsersService`. It owns the Prisma queries that return credential material,
-including password hashes. This security pattern keeps hashes inside the
-module-to-module boundary while preventing authentication from depending on the
-users persistence implementation.
+create a user, find one by email, and run a callback with credentials serialized
+by user. The serialization operation obtains the same per-user transaction lock
+used by password changes, then re-reads the credentials before the callback
+verifies the password and creates the authentication session in that transaction.
+`UsersModule` implements that contract with `UsersService`. It owns the Prisma
+queries that return credential material, including password hashes. This security
+pattern keeps hashes inside the module-to-module boundary while preventing
+authentication from depending on the `User` persistence model.
 
 `ProfileModule` is deliberately outside `UsersSecurityPort`: its profile reads,
 updates, and avatar operations are not credential operations. Its one credential

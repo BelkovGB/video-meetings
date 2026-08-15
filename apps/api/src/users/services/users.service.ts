@@ -23,6 +23,35 @@ export class UsersService implements UsersSecurityPort {
     });
   }
 
+  async withLockedCredentialsByEmail<T>(
+    email: string,
+    callback: (user: SecurityUser, transaction: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T | null> {
+    const user = await this.findByEmail(email);
+    if (!user) {
+      return null;
+    }
+
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${user.id}, 0))`,
+      );
+      const lockedUser = await transaction.user.findUnique({
+        where: { id: user.id },
+        select: {
+          id: true,
+          email: true,
+          passwordHash: true,
+        },
+      });
+      if (!lockedUser) {
+        return null;
+      }
+
+      return callback(lockedUser, transaction);
+    });
+  }
+
   async create({ email, passwordHash }: CreateSecurityUserInput): Promise<SecurityUser | null> {
     try {
       return await this.prisma.user.create({

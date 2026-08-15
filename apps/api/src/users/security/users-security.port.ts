@@ -18,6 +18,11 @@ export type CreateSecurityUserInput = {
 export interface UsersSecurityPort {
   findByEmail(email: string): Promise<SecurityUser | null>;
   create(input: CreateSecurityUserInput): Promise<SecurityUser | null>;
+  withLockedCredentialsByEmail<T>(
+    email: string,
+    callback: (user: SecurityUser, transaction: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T | null>;
 }
 
 export const USERS_SECURITY_PORT = Symbol('USERS_SECURITY_PORT');
+import { Prisma } from '@prisma/client';
