@@ -793,9 +793,9 @@ test('issue review prompt requires one exhaustive in-scope audit', () => {
   assert.match(prompt, /Do not stop after the first problem/);
   assert.match(prompt, /Return every distinct, actionable finding/);
   assert.match(prompt, /public API response contracts, documentation, configuration/);
-  assert.match(prompt, /Discover documentation paths before reading them/);
+  assert.match(prompt, /Discover documentation paths/i);
   assert.match(prompt, /rg --files docs/);
-  assert.match(prompt, /Never guess conventional paths such as `docs\/README\.md`/);
+  assert.match(prompt, /guess conventional paths such as `docs\/README\.md`/i);
   assert.match(prompt, /`docs\/api\.md`.*`docs\/api-architecture\.md`/);
   assert.match(prompt, /Ignore unrelated pre-existing debt/);
 });
@@ -816,9 +816,9 @@ test('milestone review stays within milestone scope and trusts completed validat
   assert.match(prompt, /Do not rerun npm, npx, builds, linters, type checks, tests/);
   assert.match(prompt, /every configured preflight and validation script successfully/);
   assert.match(prompt, /Never report findings for \.agents\/\*\*, scripts\/ralph\/\*\*/);
-  assert.match(prompt, /Discover documentation paths first/);
+  assert.match(prompt, /Discover documentation paths/i);
   assert.match(prompt, /rg --files docs/);
-  assert.match(prompt, /never guess conventional paths such as `docs\/README\.md`/);
+  assert.match(prompt, /guess conventional paths such as `docs\/README\.md`/i);
   assert.match(prompt, /`docs\/api\.md`.*`docs\/api-architecture\.md`/);
 });
 

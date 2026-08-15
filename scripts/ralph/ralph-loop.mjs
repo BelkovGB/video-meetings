@@ -1983,6 +1983,15 @@ function renderPrompt(config, issue, rules) {
   return `${prompt}\n\n## Текущая issue\n\n- Number: #${issue.number}\n- Title: ${issue.title}\n- URL: ${issue.url}\n\n### Body и критерии готовности\n\n${issueBody}\n\n---\n\n${renderedRules}`;
 }
 
+// Both review prompts carried these blocks verbatim, so editing one silently
+// left the other reviewer on an older contract. They live here once.
+const reviewShellGuidance =
+  'Read efficiently on this Windows/PowerShell host: locate code with `rg -n` before opening a file, read bounded ranges rather than whole files, and pass every discovered path to file cmdlets with `-LiteralPath` so Next.js route segments such as `apps/web/app/meetings/[id]` are not treated as wildcard patterns. Do not dump full logs, lockfiles, or generated files.';
+const reviewDocumentationDiscovery =
+  'Discover documentation paths before reading them: use `rg --files docs` and repository file listings, then read only paths confirmed to exist. Never guess conventional paths such as `docs/README.md`. For public API work in this repository, treat `README.md`, `docs/api.md`, and `docs/api-architecture.md` as canonical entry points when those files exist, while still inspecting the scope-specific documents returned by discovery.';
+const reviewVerdictContract =
+  'Use verdict "fail" when at least one actionable finding exists; otherwise use "pass" with an empty findings array.';
+
 function buildIndependentReviewPrompt(issue, commit) {
   const issueBody = issue.body?.trim() || '(empty)';
 
@@ -2000,11 +2009,11 @@ Audit all of these areas:
 - public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant;
 - whether tests assert the real externally observable behavior rather than only an implementation detail.
 
-Read efficiently on this Windows/PowerShell host: locate code with \`rg -n\` before opening a file, read bounded ranges rather than whole files, and pass every discovered path to file cmdlets with \`-LiteralPath\` so Next.js route segments such as \`apps/web/app/meetings/[id]\` are not treated as wildcard patterns. Do not dump full logs, lockfiles, or generated files.
+${reviewShellGuidance}
 
-Discover documentation paths before reading them: use \`rg --files docs\` and repository file listings, then read only paths confirmed to exist. Never guess conventional paths such as \`docs/README.md\`. For public API work in this repository, treat \`README.md\`, \`docs/api.md\`, and \`docs/api-architecture.md\` as canonical entry points when those files exist, while still inspecting issue-specific documents returned by discovery.
+${reviewDocumentationDiscovery}
 
-Only report findings caused by the claimed implementation, regressions at current HEAD, or work required by the issue. Ignore unrelated pre-existing debt. Use verdict \"fail\" when at least one actionable finding exists; otherwise use \"pass\" with an empty findings array. Do not edit files.`;
+Only report findings caused by the claimed implementation, regressions at current HEAD, or work required by the issue. Ignore unrelated pre-existing debt. ${reviewVerdictContract} Do not edit files.`;
 }
 
 // -----------------------------------------------------------------------------
@@ -3388,13 +3397,13 @@ The branch and pull request may be cumulative and contain work from other milest
 
 Ralph's control plane is maintained manually outside the product loop. Never report findings for .agents/**, scripts/ralph/**, AGENTS.md, or nested **/AGENTS.md files. Those paths must never become milestone issues and must never be modified by an AFK implementation session.
 
-Read efficiently on this Windows/PowerShell host: locate code with \`rg -n\` before opening a file, read bounded ranges rather than whole files, and pass every discovered path to file cmdlets with \`-LiteralPath\` so Next.js route segments such as \`apps/web/app/meetings/[id]\` are not treated as wildcard patterns. Do not dump full logs, lockfiles, or generated files.
+${reviewShellGuidance}
 
-Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. Discover documentation paths first with \`rg --files docs\` and repository file listings, then read only paths confirmed to exist; never guess conventional paths such as \`docs/README.md\`. For public API work in this repository, treat \`README.md\`, \`docs/api.md\`, and \`docs/api-architecture.md\` as canonical entry points when those files exist, while still inspecting relevant milestone-specific documents returned by discovery. Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
+Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. ${reviewDocumentationDiscovery} Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
 
 The Ralph orchestrator has already completed every configured preflight and validation script successfully for the exact reviewed head. Do not rerun npm, npx, builds, linters, type checks, tests, dev servers, or any command that writes caches or artifacts. Use read-only file and git inspection only.
 
-Report every distinct actionable finding in scope in this single response. Use verdict "fail" when at least one actionable finding exists; otherwise use "pass" with an empty findings array. Do not edit files, create comments, change GitHub state, or run destructive commands. The Ralph orchestrator will publish the structured result.`;
+Report every distinct actionable finding in scope in this single response. ${reviewVerdictContract} Do not edit files, create comments, change GitHub state, or run destructive commands. The Ralph orchestrator will publish the structured result.`;
 }
 
 async function runMilestoneReview(config, repository, milestone, pullRequest) {
