@@ -244,20 +244,30 @@ test('uploads, previews, replaces, validates, and synchronizes the current-user 
     await route.fulfill({
       status: 201,
       contentType: 'application/json',
-      body: JSON.stringify({ email: session.email, displayName: 'Алексей', avatar }),
+      body: JSON.stringify(avatar),
     });
   });
   await authenticate(page, session);
   await page.goto('/profile');
 
   const avatarInput = page.getByLabel('Выбрать файл аватара');
+  await page.locator('body').click({ position: { x: 1, y: 1 } });
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await expect(avatarInput).toBeFocused();
   await avatarInput.setInputFiles({ name: 'avatar.png', mimeType: 'image/png', buffer: image });
   await expect(page.getByTestId('avatar-preview')).toHaveAttribute('src', /^blob:/);
+  await expect(page.getByTestId('avatar-preview-panel')).toHaveScreenshot(
+    'avatar-preview-panel.png',
+  );
   await page.getByRole('button', { name: 'Загрузить аватар' }).click();
   await expect(page.getByRole('button', { name: 'Загружаем аватар…' })).toBeDisabled();
   await expect(avatarInput).toBeDisabled();
   await expect(page.getByText('Аватар сохранён.', { exact: true })).toBeVisible();
   await expect(page.getByTestId('current-user-avatar')).toHaveAttribute('src', /^blob:/);
+  await expect(page.getByLabel('Email')).toHaveText(session.email);
 
   await avatarInput.setInputFiles({ name: 'avatar-2.png', mimeType: 'image/png', buffer: image });
   await page.getByRole('button', { name: 'Заменить аватар' }).click();

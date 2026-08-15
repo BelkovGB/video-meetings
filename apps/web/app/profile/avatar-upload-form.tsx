@@ -8,15 +8,9 @@ type Avatar = {
   updatedAt: string;
 };
 
-type Profile = {
-  email: string;
-  displayName: string | null;
-  avatar: Avatar | null;
-};
-
 type AvatarUploadFormProps = {
   avatar: Avatar | null;
-  onAvatarSaved: (profile: Profile) => void;
+  onAvatarSaved: (avatar: Avatar) => void;
   onUnauthorized: () => void;
 };
 
@@ -114,8 +108,8 @@ export function AvatarUploadForm({ avatar, onAvatarSaved, onUnauthorized }: Avat
         return;
       }
 
-      const updatedProfile = (await response.json()) as Profile;
-      onAvatarSaved(updatedProfile);
+      const updatedAvatar = (await response.json()) as Avatar;
+      onAvatarSaved(updatedAvatar);
       setFile(null);
       setPreviewUrl(null);
       if (inputRef.current) {
@@ -155,7 +149,10 @@ export function AvatarUploadForm({ avatar, onAvatarSaved, onUnauthorized }: Avat
           JPEG, PNG или WebP, не более 5 МБ.
         </p>
         {previewUrl ? (
-          <div className="mt-4 flex items-center gap-3 rounded-xl border border-cyan-200 bg-cyan-50 p-3">
+          <div
+            data-testid="avatar-preview-panel"
+            className="mt-4 flex items-center gap-3 rounded-xl border border-cyan-200 bg-cyan-50 p-3"
+          >
             <img
               data-testid="avatar-preview"
               src={previewUrl}

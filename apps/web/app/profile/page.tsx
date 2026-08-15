@@ -311,7 +311,11 @@ export default function ProfilePage() {
             </form>
             <AvatarUploadForm
               avatar={profile.avatar}
-              onAvatarSaved={(updatedProfile) => setProfile(updatedProfile)}
+              onAvatarSaved={(updatedAvatar) =>
+                setProfile((currentProfile) =>
+                  currentProfile ? { ...currentProfile, avatar: updatedAvatar } : currentProfile,
+                )
+              }
               onUnauthorized={handleUnauthorized}
             />
             <div className="grid gap-2 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center">
