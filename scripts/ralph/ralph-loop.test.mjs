@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -356,9 +357,20 @@ test('Ralph configuration pins approved AFK inputs before starting an agent sess
     'apps/api/AGENTS.md',
     'apps/web/AGENTS.md',
     'scripts/ralph/ralph-runtime.mjs',
+    'scripts/ralph/ralph-scope.mjs',
     'scripts/ralph/ralph-validation-entrypoint.sh',
   ]) {
     assert.equal(config.trustedControlFileHashes.has(path.join(process.cwd(), relativePath)), true);
+  }
+
+  // Splitting the orchestrator must not move code outside the tamper boundary:
+  // every .mjs beside it has to be a trusted control file.
+  const trustedNames = new Set(
+    [...config.trustedControlFileHashes.keys()].map((file) => path.basename(file)),
+  );
+  for (const name of readdirSync(path.join(process.cwd(), 'scripts', 'ralph'))) {
+    if (!name.endsWith('.mjs') || name.endsWith('.test.mjs')) continue;
+    assert.equal(trustedNames.has(name), true, `${name} must be a trusted control file`);
   }
 });
 

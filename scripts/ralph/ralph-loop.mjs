@@ -32,6 +32,14 @@ import {
   writeJsonAtomic,
 } from './ralph-runtime.mjs';
 
+import {
+  fail,
+  isRalphInfrastructureIssue,
+  isRalphInfrastructurePath,
+  ralphInfrastructureLabel,
+  scopeMilestoneReviewToProduct,
+} from './ralph-scope.mjs';
+
 // -----------------------------------------------------------------------------
 // Пути проекта и режим запуска
 // -----------------------------------------------------------------------------
@@ -49,7 +57,6 @@ const runtimeLockPath = path.join(runtimeDirectory, 'run.lock');
 const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
 const runtimeAttestationsPath = path.join(runtimeDirectory, 'validation-attestations.json');
 const commandRunnerPath = path.join(scriptDirectory, 'ralph-command-runner.mjs');
-const ralphInfrastructureLabel = 'ralph-infrastructure';
 let runtimeSettings = {
   commandTimeoutMs: 300_000,
   validationTimeoutMs: 1_800_000,
@@ -66,67 +73,6 @@ const preparedValidationImages = new Set();
 // -----------------------------------------------------------------------------
 // Запуск внешних команд: Git, GitHub CLI, npm и Codex CLI
 // -----------------------------------------------------------------------------
-
-function fail(message) {
-  throw new Error(message);
-}
-
-// Ralph is the control plane for product work. Its own implementation and
-// instructions are maintained manually in this chat and are never product work.
-function isRalphInfrastructurePath(file) {
-  const normalized = String(file ?? '')
-    .trim()
-    .replaceAll('\\', '/')
-    .replace(/^\.\//, '')
-    .replace(/:\d+(?::\d+)?$/, '');
-
-  return (
-    normalized === 'AGENTS.md' ||
-    normalized.endsWith('/AGENTS.md') ||
-    normalized === '.agents' ||
-    normalized.startsWith('.agents/') ||
-    normalized === 'scripts/ralph' ||
-    normalized.startsWith('scripts/ralph/')
-  );
-}
-
-function issueLabels(issue) {
-  return (issue?.labels ?? []).map((label) =>
-    typeof label === 'string' ? label : String(label?.name ?? ''),
-  );
-}
-
-function milestoneFindingPath(issue) {
-  if (!String(issue?.body ?? '').includes('<!-- ralph-milestone-finding ')) return null;
-  return String(issue.body).match(/^\*\*Location:\*\*\s+`([^`]+)`\s*$/m)?.[1] ?? null;
-}
-
-function isRalphInfrastructureIssue(issue) {
-  return (
-    issueLabels(issue).some((label) => label.toLowerCase() === ralphInfrastructureLabel) ||
-    isRalphInfrastructurePath(milestoneFindingPath(issue))
-  );
-}
-
-function scopeMilestoneReviewToProduct(review) {
-  const productFindings = review.findings.filter(
-    (finding) => !isRalphInfrastructurePath(finding.file),
-  );
-  const ignoredCount = review.findings.length - productFindings.length;
-  if (ignoredCount === 0) return review;
-
-  console.log(
-    `Milestone review: ${ignoredCount} замечаний к Ralph-инфраструктуре исключены из продуктовой очереди.`,
-  );
-  return {
-    ...review,
-    verdict: productFindings.length > 0 ? 'fail' : 'pass',
-    summary:
-      `${review.summary} ${ignoredCount} Ralph infrastructure finding(s) were excluded ` +
-      'from the product milestone and must be handled manually in the configuration chat.',
-    findings: productFindings,
-  };
-}
 
 function executable(name) {
   if (process.platform !== 'win32') {
@@ -1342,6 +1288,7 @@ function loadConfig() {
     config.validationContainer.dockerfilePath,
     commandRunnerPath,
     path.join(scriptDirectory, 'ralph-runtime.mjs'),
+    path.join(scriptDirectory, 'ralph-scope.mjs'),
     path.join(scriptDirectory, 'ralph-validation-docker-shim.sh'),
     path.join(scriptDirectory, 'ralph-validation-entrypoint.sh'),
     fileURLToPath(import.meta.url),
