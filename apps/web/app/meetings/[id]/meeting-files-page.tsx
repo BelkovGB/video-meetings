@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
 import type { ApiError, Meeting, MeetingFile } from '../../../lib/api/contracts';
+import { formatMeetingDateWithYear, formatUploadDate } from '../../../lib/format/dates';
 import { formatFileSize } from '../../../lib/format/file-size';
 import { MeetingFileUpload } from './meeting-file-upload';
 
@@ -45,24 +46,6 @@ function formatFileCount(count: number): string {
   }
 
   return `${count} файлов`;
-}
-
-function formatMeetingDate(date: string): string {
-  return new Intl.DateTimeFormat('ru-RU', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(date));
-}
-
-function formatUploadDate(date: string): string {
-  return new Intl.DateTimeFormat('ru-RU', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  }).format(new Date(date));
 }
 
 function getApiMessage(error: ApiError, fallback: string): string {
@@ -297,7 +280,9 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
                   <span className="rounded-full border border-cyan-200/20 bg-cyan-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-cyan-100">
                     {meeting.accessRole === 'owner' ? 'Владелец' : 'Участник'}
                   </span>
-                  <span className="text-sm text-slate-400">{formatMeetingDate(meeting.date)}</span>
+                  <span className="text-sm text-slate-400">
+                    {formatMeetingDateWithYear(meeting.date)}
+                  </span>
                 </div>
                 <h1 className="mt-4 max-w-4xl break-words text-3xl font-semibold tracking-tight sm:text-5xl">
                   {meeting.title}

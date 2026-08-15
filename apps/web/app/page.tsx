@@ -17,6 +17,7 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { apiUrl } from '../lib/api/config';
 import type { ApiError, CurrentUserProfile, Meeting } from '../lib/api/contracts';
+import { formatMeetingDateShort } from '../lib/format/dates';
 import { CurrentUserAvatar } from './components/current-user-avatar';
 
 type FormErrors = {
@@ -58,15 +59,6 @@ function getEmailFromToken(token: string) {
   } catch {
     return '';
   }
-}
-
-function formatMeetingDate(date: string) {
-  return new Intl.DateTimeFormat('ru-RU', {
-    day: 'numeric',
-    month: 'long',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(date));
 }
 
 function getApiErrorMessage(error: ApiError) {
@@ -555,7 +547,9 @@ export default function DashboardPage() {
                     <CalendarIcon />
                   </span>
                   <h3 className="mt-5 text-lg font-semibold text-white">{meeting.title}</h3>
-                  <p className="mt-2 text-sm text-slate-300">{formatMeetingDate(meeting.date)}</p>
+                  <p className="mt-2 text-sm text-slate-300">
+                    {formatMeetingDateShort(meeting.date)}
+                  </p>
                   <span className="mt-4 inline-flex rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-cyan-100">
                     {meeting.accessRole === 'owner' ? 'Владелец' : 'Участник'}
                   </span>
