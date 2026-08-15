@@ -145,6 +145,8 @@ test('renders the current-user avatar with accessible image and fallback states'
   await expect(
     accountEntry.getByRole('img', { name: 'Аватар пользователя Алексей' }),
   ).toHaveAttribute('src', /^blob:/);
+  await expect(accountEntry).toHaveScreenshot('dashboard-account-entry.png');
+  await expect(page.locator('header')).toHaveScreenshot('dashboard-account-header.png');
   await page.keyboard.press('Tab');
   await expect(accountEntry).toBeFocused();
   await page.keyboard.press('Enter');
