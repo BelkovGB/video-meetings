@@ -12,10 +12,14 @@ const maximumPasswordBytes = 72;
 @ValidatorConstraint({ name: 'isNewPassword', async: false })
 class IsNewPasswordConstraint implements ValidatorConstraintInterface {
   validate(value: unknown) {
+    if (typeof value !== 'string') {
+      return false;
+    }
+
+    const normalizedValue = value.normalize('NFC');
     return (
-      typeof value === 'string' &&
-      Array.from(value).length >= minimumPasswordLength &&
-      Buffer.byteLength(value, 'utf8') <= maximumPasswordBytes
+      Array.from(normalizedValue).length >= minimumPasswordLength &&
+      Buffer.byteLength(normalizedValue, 'utf8') <= maximumPasswordBytes
     );
   }
 

@@ -259,6 +259,23 @@ describe('Current user profile (e2e)', () => {
     await loginUser(user.email, validPassword);
   });
 
+  it('rejects a password below the minimum after NFC normalization', async () => {
+    const user = await registerUser('password-change-decomposed-too-short');
+    const newPassword = 'e\u0301'.repeat(5);
+
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ currentPassword: validPassword, newPassword, confirmation: newPassword })
+      .expect(400);
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(200);
+    await loginUser(user.email, validPassword);
+  });
+
   it('limits repeated password-change attempts without changing the password or session', async () => {
     const user = await registerUser('password-change-rate-limit');
     const invalidChange = {

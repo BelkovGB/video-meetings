@@ -170,9 +170,9 @@ Request:
 
 `currentPassword` must match the account's current password. `newPassword` must
 differ from it, contain at least 9 Unicode characters, and use no more than 72
-UTF-8 bytes. `confirmation` must exactly match `newPassword`. Invalid input or
-an incorrect current password returns `400 Bad Request`; the password and the
-caller session remain valid.
+UTF-8 bytes, measured after NFC normalization. `confirmation` must exactly match
+the supplied `newPassword` value. Invalid input or an incorrect current password
+returns `400 Bad Request`; the password and the caller session remain valid.
 
 Password-change attempts are limited to five per account in fifteen minutes and
 thirty per client IP per minute. A rejected excess attempt returns `429 Too Many
