@@ -1,31 +1,24 @@
 # Project instructions
 
-## Structure
+- Monorepo: `apps/web` is Next.js and `apps/api` is NestJS. Run npm workspace
+  commands from the repository root.
+- Before changing any part of the meeting-file storage lifecycle, read
+  `docs/research-meetings-upload.md`.
+- Shared validation: `npm run format:check`, `npm run lint`, and `npm run build`.
+  Tests: `npm run test:e2e:api`, `npm run test:e2e:web`, and `npm run test:ralph`.
+- Update relevant documentation when changing architecture or public contracts.
+- Ralph AFK sessions follow `.agents/RALPH.md`; the orchestrator owns complete
+  validation runs.
 
-- `apps/web` is the Next.js web application.
-- `apps/api` is the NestJS API.
-- Use npm workspaces and run shared commands from the repository root.
+## Token efficiency
 
-## Meeting file uploads
-
-- Read [`docs/research-meetings-upload.md`](docs/research-meetings-upload.md)
-  before implementing or changing meeting file uploads. It documents the
-  recommended architecture, security controls, and evolution path for meeting
-  file storage and transfer.
-
-## Commands
-
-- Install: `npm ci`
-- Develop both apps: `npm run dev`
-- Validate formatting: `npm run format:check`
-- Lint: `npm run lint`
-- Build: `npm run build`
-
-## Conventions
-
-- Write new application code in TypeScript.
-- Keep formatting compatible with Prettier and linting compatible with the root ESLint config.
-- Do not add a dependency unless it is needed for the requested work.
-- Keep web and API concerns in their respective workspaces.
-- When changing the project architecture, update the relevant documentation in the same change.
-- For every UI change, use the `ui-ux-pro-max` skill and visually test the changed interface through Playwright MCP before delivery. Verify the affected interactions and responsive behaviour, not only the code or build output. A UI task is complete only after these checks pass.
+- Start with compact output and expand it only when needed to diagnose a failure.
+- Use `git status --short`, `git diff --unified=0`, and `git log --oneline -10`.
+- Request only needed GitHub fields, for example
+  `gh issue list --limit 100 --json number,title`.
+- Suppress npm wrapper noise with `npm run --silent <script>`.
+- For TypeScript diagnostics, use `npx tsc --noEmit --pretty false` and initially
+  show only the last five lines. Preserve the compiler exit code when piping;
+  use `Select-Object -Last 5` in PowerShell and `tail -5` with `pipefail` in POSIX.
+- Prefer `rg` and targeted file ranges. Do not dump complete logs, generated
+  files, lockfiles, or large JSON documents when a focused query is sufficient.

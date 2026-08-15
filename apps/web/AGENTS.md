@@ -1,13 +1,20 @@
 # Web application instructions
 
-This workspace is a Next.js App Router application.
-
-- Put routes and route-level UI in `app/`.
-- Prefer Server Components; add `'use client'` only when browser state, effects, or event handlers are required.
-- Keep metadata in `app/layout.tsx` or the relevant route.
-- Use the workspace commands: `npm run dev --workspace @video-meetings/web`, `npm run lint --workspace @video-meetings/web`, and `npm run build --workspace @video-meetings/web`.
-- Do not access API secrets from browser code; only variables prefixed with `NEXT_PUBLIC_` may be exposed to the client.
-- All screenshots save to /screenshot folder
+- Use the Next.js App Router under `app/`. Prefer Server Components; add
+  `'use client'` only for browser state, effects, or event handlers.
+- Never expose server secrets; only `NEXT_PUBLIC_` variables may reach the client.
+- For user-visible changes, read `.agents/skills/ui-ux-pro-max/SKILL.md` and verify
+  affected interactions, keyboard accessibility, and the configured desktop,
+  mobile, and mobile-landscape Playwright projects.
+- Use the Playwright tooling available in the execution environment. Interactive
+  agents may use Playwright MCP; Ralph sessions follow `.agents/RALPH.md` and
+  treat orchestrator validation as authoritative.
+- Run focused checks during implementation. Do not reinstall browsers or rerun
+  the complete validation suite from an isolated Ralph agent session.
+- Update visual snapshots only for intentional rendered changes and inspect the
+  resulting images before accepting them.
+- Save manual screenshots under the repository-relative `screenshot/` directory;
+  keep Playwright snapshots and failure artifacts in their configured locations.
 
 <!-- BEGIN:nextjs-agent-rules -->
 
