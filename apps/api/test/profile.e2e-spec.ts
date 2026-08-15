@@ -103,10 +103,10 @@ describe('Current user profile (e2e)', () => {
       .set('X-Forwarded-For', `198.51.100.${authenticationRequestCount}`);
   }
 
-  async function registerUser(prefix: string): Promise<UserSession> {
+  async function registerUser(prefix: string, password = validPassword): Promise<UserSession> {
     const email = createEmail(prefix);
     const response = await authenticationRequest('/auth/register')
-      .send({ email, password: validPassword })
+      .send({ email, password })
       .expect(201);
 
     return {
@@ -259,6 +259,28 @@ describe('Current user profile (e2e)', () => {
     }
 
     await loginUser(user.email, validPassword);
+  });
+
+  it('rejects an oversized current password without changing the password or session', async () => {
+    const currentPassword = '😀'.repeat(18);
+    const user = await registerUser('password-change-oversized-current', currentPassword);
+    const newPassword = 'new-password-123';
+
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({
+        currentPassword: `${currentPassword}suffix`,
+        newPassword,
+        confirmation: newPassword,
+      })
+      .expect(400);
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(200);
+    await loginUser(user.email, currentPassword);
   });
 
   it('rejects a password below the minimum after NFC normalization', async () => {

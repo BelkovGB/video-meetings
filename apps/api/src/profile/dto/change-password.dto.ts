@@ -28,9 +28,24 @@ class IsNewPasswordConstraint implements ValidatorConstraintInterface {
   }
 }
 
+@ValidatorConstraint({ name: 'isCurrentPassword', async: false })
+class IsCurrentPasswordConstraint implements ValidatorConstraintInterface {
+  validate(value: unknown) {
+    return (
+      typeof value === 'string' &&
+      Buffer.byteLength(value.normalize('NFC'), 'utf8') <= maximumPasswordBytes
+    );
+  }
+
+  defaultMessage() {
+    return `currentPassword must contain no more than ${maximumPasswordBytes} UTF-8 bytes`;
+  }
+}
+
 export class ChangePasswordDto {
   @IsString()
   @IsNotEmpty()
+  @Validate(IsCurrentPasswordConstraint)
   currentPassword!: string;
 
   @Validate(IsNewPasswordConstraint)
