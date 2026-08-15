@@ -1,18 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import {
-  copyFileSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -22,9 +11,7 @@ import {
   acquireRunLock,
   initializePersistentLog,
   readJsonFile,
-  removeFileIfExists,
   waitSync,
-  writeJsonAtomic,
 } from './ralph-runtime.mjs';
 
 import {
@@ -55,7 +42,6 @@ import {
 } from './ralph-codex-session.mjs';
 
 import {
-  agentInstructionFiles,
   agentSkillFiles,
   configForPhase,
   configPath,
@@ -65,7 +51,6 @@ import {
   parseJson,
   parseSkillFrontmatter,
   phasePlanId,
-  trustedFileHash,
   verifyAgentSkills,
 } from './ralph-config.mjs';
 
@@ -81,10 +66,26 @@ import {
   formatFailureSummary,
   recordedFailure,
   recoveryPrompt,
-  stripAnsi,
   summarizeCommandFailure,
   uniqueFailedTests,
 } from './ralph-failure-summary.mjs';
+
+import {
+  assertTrustedControlFilesUnchanged,
+  createTrustedValidationDependencySnapshot,
+  ensureValidationImage,
+  failedValidationScript,
+  hasValidationAttestation,
+  purgeValidationAttestations,
+  readValidationAttestations,
+  recordValidationAttestation,
+  runConfiguredScripts,
+  runConfiguredValidation,
+  runPreflight,
+  validationAttestationKey,
+  validationContainerRunArgs,
+  validationImageForSnapshot,
+} from './ralph-validation-runner.mjs';
 
 // -----------------------------------------------------------------------------
 // Пути проекта и режим запуска
@@ -96,46 +97,6 @@ const supportedModes = new Set(['--check', '--once', '--run']);
 const runtimeDirectory = path.join(projectRoot, '.git', 'ralph-loop');
 const runtimeLockPath = path.join(runtimeDirectory, 'run.lock');
 const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
-const runtimeAttestationsPath = path.join(runtimeDirectory, 'validation-attestations.json');
-const preparedValidationImages = new Set();
-
-// -----------------------------------------------------------------------------
-// Проверка неизменности доверенного control plane
-// -----------------------------------------------------------------------------
-
-function assertTrustedControlFilesUnchanged(config, options = {}) {
-  const attestationsPath = options.attestationsPath ?? runtimeAttestationsPath;
-  // Доверенный control plane входит в ключ attestation косвенно, через snapshot.
-  // Явная очистка нужна на случай, когда подделка обнаружена до нового хеша:
-  // ни одна ранее выданная запись не должна пережить обнаруженный tamper.
-  const rejectTamper = (message) => {
-    purgeValidationAttestations(attestationsPath);
-    fail(message);
-  };
-  const trustedAgentInstructionFiles = new Set(
-    [...(config.trustedControlFileHashes?.keys() ?? [])].filter(
-      (file) => path.basename(file) === 'AGENTS.md',
-    ),
-  );
-  const currentAgentInstructionFiles = new Set(agentInstructionFiles());
-  if (
-    trustedAgentInstructionFiles.size !== currentAgentInstructionFiles.size ||
-    [...currentAgentInstructionFiles].some((file) => !trustedAgentInstructionFiles.has(file))
-  ) {
-    rejectTamper(
-      'AFK-сессия изменила набор доверенных файлов AGENTS.md. ' +
-        'Изменение отклонено до валидации, commit и push.',
-    );
-  }
-  for (const [file, expectedHash] of config.trustedControlFileHashes ?? []) {
-    if (!existsSync(file) || trustedFileHash(file) !== expectedHash) {
-      rejectTamper(
-        `AFK-сессия изменила доверенный файл ${file}. ` +
-          'Изменение отклонено до валидации, commit и push.',
-      );
-    }
-  }
-}
 
 function commitTrailerForIssue(issue) {
   return `Ralph-Issue: #${issue.number}`;
@@ -1386,318 +1347,6 @@ function verifyReviewedPullRequestHead(config, repository, pullRequest) {
   }
   verifyPushedHead(config, pullRequest.headRefOid);
   return refreshed;
-}
-
-function validationContainerRunArgs(config, scripts, snapshotPath) {
-  const scriptList = Array.isArray(scripts) ? scripts : [scripts];
-  return [
-    'run',
-    '--rm',
-    '--init',
-    '--network',
-    'none',
-    '--read-only',
-    '--cap-drop',
-    'ALL',
-    '--security-opt',
-    'no-new-privileges',
-    '--pids-limit',
-    '512',
-    '--user',
-    '65532:65532',
-    '--tmpfs',
-    '/workspace:rw,exec,nosuid,nodev,size=4g,uid=65532,gid=65532',
-    '--tmpfs',
-    '/tmp:rw,noexec,nosuid,nodev,size=1g,uid=65532,gid=65532',
-    '--mount',
-    `type=bind,source=${snapshotPath},target=/source,readonly`,
-    '--workdir',
-    '/workspace',
-    '--env',
-    'HOME=/tmp',
-    config.validationContainer.image,
-    ...scriptList,
-  ];
-}
-
-function createValidationWorkspaceSnapshot() {
-  const snapshotPath = mkdtempSync(path.join(tmpdir(), 'ralph-validation-'));
-  try {
-    const files = run('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])
-      .stdout.split('\0')
-      .filter(Boolean);
-    for (const relativePath of files) {
-      const normalizedPath = path.normalize(relativePath);
-      if (
-        normalizedPath === '.' ||
-        path.isAbsolute(normalizedPath) ||
-        normalizedPath.startsWith(`..${path.sep}`) ||
-        normalizedPath === '..'
-      ) {
-        fail(`Небезопасный путь в git ls-files: ${relativePath}`);
-      }
-      const sourcePath = path.join(projectRoot, normalizedPath);
-      if (lstatSync(sourcePath).isSymbolicLink()) {
-        fail(`Validation snapshot не допускает symbolic link: ${relativePath}`);
-      }
-      const destinationPath = path.join(snapshotPath, normalizedPath);
-      mkdirSync(path.dirname(destinationPath), { recursive: true });
-      copyFileSync(sourcePath, destinationPath);
-    }
-    return snapshotPath;
-  } catch (error) {
-    rmSync(snapshotPath, { recursive: true, force: true });
-    throw error;
-  }
-}
-
-const validationDependencyFiles = [
-  '.env.example',
-  'package.json',
-  'package-lock.json',
-  'apps/api/package.json',
-  'apps/web/package.json',
-  'scripts/ralph/ralph-validation-docker-shim.sh',
-  'scripts/ralph/ralph-validation-entrypoint.sh',
-];
-
-function createTrustedValidationDependencySnapshot() {
-  const snapshotPath = mkdtempSync(path.join(tmpdir(), 'ralph-validation-dependencies-'));
-  try {
-    const prismaFiles = run('git', [
-      'ls-tree',
-      '-r',
-      '--name-only',
-      'HEAD',
-      '--',
-      'apps/api/prisma',
-    ])
-      .stdout.split('\n')
-      .filter(Boolean);
-    for (const relativePath of [...validationDependencyFiles, ...prismaFiles]) {
-      const gitPath = relativePath.split(path.sep).join('/');
-      const destinationPath = path.join(snapshotPath, relativePath);
-      mkdirSync(path.dirname(destinationPath), { recursive: true });
-      writeFileSync(destinationPath, run('git', ['show', `HEAD:${gitPath}`]).stdout);
-    }
-    return snapshotPath;
-  } catch (error) {
-    rmSync(snapshotPath, { recursive: true, force: true });
-    throw error;
-  }
-}
-
-function validationInputHash(snapshotPath, hash = createHash('sha256'), relativePath = '') {
-  const entries = readdirSync(snapshotPath, { withFileTypes: true }).sort((left, right) =>
-    left.name.localeCompare(right.name),
-  );
-  for (const entry of entries) {
-    const nextRelativePath = path.join(relativePath, entry.name);
-    const entryPath = path.join(snapshotPath, entry.name);
-    if (entry.isDirectory()) {
-      validationInputHash(entryPath, hash, nextRelativePath);
-    } else if (entry.isFile()) {
-      hash
-        .update(`${nextRelativePath.replaceAll(path.sep, '/')}\0`)
-        .update(readFileSync(entryPath));
-    } else {
-      fail(`Validation dependency snapshot содержит неподдерживаемый файл: ${nextRelativePath}`);
-    }
-  }
-  return hash;
-}
-
-function validationImageForSnapshot(config, snapshotPath) {
-  const inputsHash = validationInputHash(snapshotPath);
-  const dockerfilePath =
-    config.validationContainer.frozenDockerfilePath ?? config.validationContainer.dockerfilePath;
-  if (dockerfilePath) {
-    inputsHash.update('Dockerfile.validation\0').update(readFileSync(dockerfilePath));
-  }
-  const inputHash = inputsHash.digest('hex').slice(0, 16);
-  const imageRepository = config.validationContainer.image.split('@', 1)[0];
-  return `${imageRepository}-inputs-${inputHash}`;
-}
-
-function ensureValidationImage(config, snapshotPath, dependencies = {}) {
-  const execute = dependencies.run ?? run;
-  const dockerfilePath =
-    config.validationContainer.frozenDockerfilePath ?? config.validationContainer.dockerfilePath;
-  const image = validationImageForSnapshot(config, snapshotPath);
-  if (preparedValidationImages.has(image)) return image;
-  const existingImage = execute('docker', ['image', 'inspect', image], {
-    allowFailure: true,
-    allowedExitCodes: [1],
-    env: credentialFreeEnvironment(),
-  });
-  if (existingImage.status === 0) {
-    preparedValidationImages.add(image);
-    return image;
-  }
-  if (existingImage.status !== 1) {
-    fail(`Не удалось проверить образ изоляции валидации ${image}.`);
-  }
-  console.log(`\n=== Validation isolation: docker build ${image} ===\n`);
-  execute('docker', ['build', '--file', dockerfilePath, '--tag', image, snapshotPath], {
-    echoOutput: true,
-    timeoutMs: config.runtime.validationTimeoutMs,
-    env: credentialFreeEnvironment(),
-  });
-  preparedValidationImages.add(image);
-  return image;
-}
-
-// -----------------------------------------------------------------------------
-// Validation attestation
-//
-// PASS принадлежит не «issue» и не «run», а точной тройке
-// (байты проверяемого source, упорядоченный список scripts, образ). Поэтому
-// запись переиспользуется только при полном совпадении всех входов и не зависит
-// от runId. Любое изменение кода, конфигурации, Dockerfile или образа меняет
-// хотя бы один вход. VALIDATION_CONTRACT_VERSION поднимается вручную, когда
-// меняется смысл самого прогона.
-// -----------------------------------------------------------------------------
-
-const VALIDATION_CONTRACT_VERSION = 1;
-const maxStoredValidationAttestations = 32;
-
-function validationAttestationKey(inputs) {
-  return createHash('sha256')
-    .update(
-      JSON.stringify({
-        version: VALIDATION_CONTRACT_VERSION,
-        workspaceHash: inputs.workspaceHash,
-        dependencyHash: inputs.dependencyHash,
-        imageDigest: inputs.imageDigest,
-        scripts: inputs.scripts,
-      }),
-    )
-    .digest('hex');
-}
-
-function readValidationAttestations(attestationsPath = runtimeAttestationsPath) {
-  const stored = readJsonFile(attestationsPath, null);
-  if (stored?.version !== VALIDATION_CONTRACT_VERSION || !Array.isArray(stored.entries)) return [];
-  return stored.entries.filter((entry) => typeof entry?.key === 'string');
-}
-
-function hasValidationAttestation(key, attestationsPath = runtimeAttestationsPath) {
-  return readValidationAttestations(attestationsPath).some((entry) => entry.key === key);
-}
-
-function recordValidationAttestation(key, details, attestationsPath = runtimeAttestationsPath) {
-  const entries = [
-    { key, ...details, recordedAt: new Date().toISOString() },
-    ...readValidationAttestations(attestationsPath).filter((entry) => entry.key !== key),
-  ].slice(0, maxStoredValidationAttestations);
-  writeJsonAtomic(attestationsPath, { version: VALIDATION_CONTRACT_VERSION, entries });
-}
-
-function purgeValidationAttestations(attestationsPath = runtimeAttestationsPath) {
-  removeFileIfExists(attestationsPath);
-}
-
-function validationImageDigest(image, execute) {
-  const inspected = execute('docker', ['image', 'inspect', '--format', '{{.Id}}', image], {
-    allowFailure: true,
-    allowedExitCodes: [1],
-    env: credentialFreeEnvironment(),
-  });
-  const digest = inspected.status === 0 ? inspected.stdout.trim() : '';
-  // Без подтверждённого digest тег остаётся изменяемым указателем, поэтому
-  // attestation не выдаётся вообще: лучше лишний прогон, чем ложный PASS.
-  return digest === '' ? null : digest;
-}
-
-// Entrypoint печатает этот маркер перед каждым script. `set -eu` останавливает
-// цикл на первой ошибке, поэтому последний маркер и есть упавший script.
-const validationScriptMarkerPattern = /RALPH_VALIDATION_SCRIPT=(\S+)/g;
-
-function failedValidationScript(error) {
-  const output = stripAnsi([error?.stdout, error?.stderr].filter(Boolean).join('\n'));
-  const markers = [...output.matchAll(validationScriptMarkerPattern)];
-  return markers.at(-1)?.[1] ?? null;
-}
-
-function runConfiguredScripts(config, scripts, label, options = {}) {
-  const includePreflight = options.includePreflight ?? true;
-  const execute = options.run ?? run;
-  if (scripts.length === 0) return;
-  assertTrustedControlFilesUnchanged(config, {
-    attestationsPath: options.attestationsPath ?? runtimeAttestationsPath,
-  });
-  // Один контейнер на весь набор. Изоляция от хоста сохраняется, а workspace,
-  // node_modules, PostgreSQL и migrations готовятся один раз вместо одного раза
-  // на каждый script. Entrypoint выполняет scripts последовательно и
-  // останавливается на первой ошибке.
-  const isolatedScripts = includePreflight
-    ? [...config.preflightScripts, ...scripts]
-    : [...scripts];
-  const createWorkspaceSnapshot =
-    options.createWorkspaceSnapshot ?? createValidationWorkspaceSnapshot;
-  const createDependencySnapshot =
-    options.createDependencySnapshot ?? createTrustedValidationDependencySnapshot;
-  const snapshotPath = createWorkspaceSnapshot();
-  const dependencySnapshotPath = createDependencySnapshot();
-  console.log(`\n=== ${label}: isolated npm run ${isolatedScripts.join(', ')} ===\n`);
-  try {
-    const image = ensureValidationImage(config, dependencySnapshotPath, { run: execute });
-    const attestationsPath = options.attestationsPath ?? runtimeAttestationsPath;
-    const imageDigest = validationImageDigest(image, execute);
-    const attestationKey = imageDigest
-      ? validationAttestationKey({
-          workspaceHash: validationInputHash(snapshotPath).digest('hex'),
-          dependencyHash: validationInputHash(dependencySnapshotPath).digest('hex'),
-          imageDigest,
-          scripts: isolatedScripts,
-        })
-      : null;
-    if (attestationKey && hasValidationAttestation(attestationKey, attestationsPath)) {
-      console.log(
-        `${label}: тот же source, тот же набор scripts и тот же образ уже прошли проверку ` +
-          `(attestation ${attestationKey.slice(0, 12)}). Повторный прогон пропущен.`,
-      );
-      return;
-    }
-    execute(
-      'docker',
-      validationContainerRunArgs(
-        { ...config, validationContainer: { ...config.validationContainer, image } },
-        isolatedScripts,
-        snapshotPath,
-      ),
-      {
-        echoOutput: true,
-        timeoutMs: config.runtime.validationRunTimeoutMs,
-        env: credentialFreeEnvironment(),
-      },
-    );
-    if (attestationKey) {
-      recordValidationAttestation(
-        attestationKey,
-        { label, scripts: isolatedScripts, image, imageDigest },
-        attestationsPath,
-      );
-    }
-  } catch (error) {
-    error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
-    error.script = failedValidationScript(error) ?? isolatedScripts.join(', ');
-    throw error;
-  } finally {
-    rmSync(snapshotPath, { recursive: true, force: true });
-    rmSync(dependencySnapshotPath, { recursive: true, force: true });
-  }
-}
-
-function runPreflight(config) {
-  runConfiguredScripts(config, config.preflightScripts, 'Preflight', { includePreflight: false });
-}
-
-function runConfiguredValidation(config) {
-  // Каждый validation-запуск получает новый контейнер с новой изолированной БД и
-  // выполняет preflight первым, чтобы migration текущей issue была применена
-  // внутри того же контейнера, что и остальные scripts.
-  runConfiguredScripts(config, config.validationScripts, 'Validation');
 }
 
 function createPullRequest(config, repository) {
