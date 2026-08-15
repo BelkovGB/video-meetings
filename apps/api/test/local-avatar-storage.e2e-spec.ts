@@ -63,6 +63,29 @@ describe('LocalAvatarStorageService', () => {
     }
   });
 
+  it('retries a failed finalized-avatar deletion during periodic reconciliation', async () => {
+    const retryKey = `${storageKey}-retry`;
+    const retryTempPath = join(avatarConfig.tempDirectory, `${retryKey}.part`);
+
+    try {
+      await writeFile(retryTempPath, content);
+      await storage.finalize(retryTempPath, retryKey);
+      const discard = jest
+        .spyOn(storage, 'discard')
+        .mockRejectedValueOnce(new Error('storage temporarily unavailable'));
+
+      await storage.discardEventually(retryKey);
+      await storage.reconcile();
+
+      expect(discard).toHaveBeenCalledTimes(2);
+      await expect(storage.open(retryKey)).rejects.toMatchObject({ code: 'ENOENT' });
+      discard.mockRestore();
+    } finally {
+      await storage.discardTemp(retryTempPath);
+      await storage.discard(retryKey);
+    }
+  });
+
   it('removes interrupted temporary avatar uploads when storage starts', async () => {
     await writeFile(tempPath, content);
     const staleAt = new Date(Date.now() - avatarConfig.temporaryUploadGraceMs - 1_000);
@@ -97,6 +120,8 @@ describe('LocalAvatarStorageService', () => {
       await storage.finalize(retainedTempPath, retainedKey);
       await writeFile(orphanedTempPath, content);
       await storage.finalize(orphanedTempPath, orphanedKey);
+      const staleAt = new Date(Date.now() - avatarConfig.temporaryUploadGraceMs - 1_000);
+      await utimes(join(avatarConfig.directory, orphanedKey), staleAt, staleAt);
 
       await new LocalAvatarStorageService(prisma as never).onModuleInit();
 

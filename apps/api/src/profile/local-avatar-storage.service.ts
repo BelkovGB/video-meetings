@@ -1,4 +1,10 @@
-import { Injectable, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ReadStream } from 'node:fs';
 import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -12,7 +18,12 @@ function isInside(root: string, target: string): boolean {
 }
 
 @Injectable()
-export class LocalAvatarStorageService implements OnModuleInit {
+export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(LocalAvatarStorageService.name);
+  private readonly pendingDiscards = new Set<string>();
+  private reconciliationTimer: NodeJS.Timeout | undefined;
+  private reconciliationRunning = false;
+
   constructor(private readonly prisma?: PrismaService) {}
 
   async onModuleInit(): Promise<void> {
@@ -28,12 +39,29 @@ export class LocalAvatarStorageService implements OnModuleInit {
       }
       await this.reconcileTemporaryUploads();
       await this.reconcileUnreferencedAvatars();
+      if (this.prisma) {
+        this.reconciliationTimer = setInterval(() => {
+          void this.reconcile().catch((error: unknown) => {
+            this.logger.error(
+              'Failed to reconcile avatar storage',
+              error instanceof Error ? error.stack : undefined,
+            );
+          });
+        }, avatarConfig.reconciliationIntervalMs);
+        this.reconciliationTimer.unref();
+      }
     } catch (error) {
       throw new ServiceUnavailableException({
         message: 'Avatar storage is unavailable',
         code: 'AVATAR_STORAGE_UNAVAILABLE',
         cause: error instanceof Error ? error.message : undefined,
       });
+    }
+  }
+
+  onModuleDestroy(): void {
+    if (this.reconciliationTimer) {
+      clearInterval(this.reconciliationTimer);
     }
   }
 
@@ -74,6 +102,19 @@ export class LocalAvatarStorageService implements OnModuleInit {
     }
   }
 
+  async discardEventually(storageKey: string | null): Promise<void> {
+    if (!storageKey) {
+      return;
+    }
+
+    try {
+      await this.discard(storageKey);
+      this.pendingDiscards.delete(storageKey);
+    } catch {
+      this.pendingDiscards.add(storageKey);
+    }
+  }
+
   async open(storageKey: string): Promise<ReadStream> {
     try {
       const handle = await open(resolve(this.resolveDirectory(storageKey), 'content'), 'r');
@@ -86,6 +127,23 @@ export class LocalAvatarStorageService implements OnModuleInit {
         message: 'Avatar storage is unavailable',
         code: 'AVATAR_STORAGE_UNAVAILABLE',
       });
+    }
+  }
+
+  async reconcile(): Promise<void> {
+    if (this.reconciliationRunning) {
+      return;
+    }
+
+    this.reconciliationRunning = true;
+    try {
+      await Promise.all(
+        [...this.pendingDiscards].map(async (storageKey) => this.discardEventually(storageKey)),
+      );
+      await this.reconcileTemporaryUploads();
+      await this.reconcileUnreferencedAvatars();
+    } finally {
+      this.reconciliationRunning = false;
     }
   }
 
@@ -133,10 +191,15 @@ export class LocalAvatarStorageService implements OnModuleInit {
       users.flatMap((user) => (user.avatarStorageKey ? [user.avatarStorageKey] : [])),
     );
     const entries = await readdir(avatarConfig.directory, { withFileTypes: true });
+    const staleBefore = Date.now() - avatarConfig.temporaryUploadGraceMs;
     await Promise.all(
       entries.map(async (entry) => {
         if (entry.isDirectory() && !activeKeys.has(entry.name)) {
-          await rm(resolve(avatarConfig.directory, entry.name), { recursive: true, force: true });
+          const path = resolve(avatarConfig.directory, entry.name);
+          const metadata = await stat(path);
+          if (metadata.mtimeMs < staleBefore) {
+            await rm(path, { recursive: true, force: true });
+          }
         }
       }),
     );

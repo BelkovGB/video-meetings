@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_TEMPORARY_UPLOAD_GRACE_MS = 60 * 60 * 1000;
+const DEFAULT_RECONCILIATION_INTERVAL_MS = 60 * 1000;
 
 function readPositiveInteger(name: string, fallback: number): number {
   const value = process.env[name];
@@ -26,5 +27,9 @@ export const avatarConfig = {
   temporaryUploadGraceMs: readPositiveInteger(
     'AVATAR_TEMPORARY_UPLOAD_GRACE_MS',
     DEFAULT_TEMPORARY_UPLOAD_GRACE_MS,
+  ),
+  reconciliationIntervalMs: readPositiveInteger(
+    'AVATAR_RECONCILIATION_INTERVAL_MS',
+    DEFAULT_RECONCILIATION_INTERVAL_MS,
   ),
 };

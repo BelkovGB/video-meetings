@@ -1,5 +1,5 @@
 import { INestApplication } from '@nestjs/common';
-import { readdir, rm } from 'node:fs/promises';
+import { readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
@@ -7,6 +7,8 @@ import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { LocalAvatarStorageService } from '../src/profile/local-avatar-storage.service';
+import { AvatarValidationService } from '../src/profile/avatar-validation.service';
+import { ProfileService } from '../src/profile/profile.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 type UserSession = {
@@ -336,6 +338,9 @@ describe('Current user profile (e2e)', () => {
     const update = jest
       .spyOn(prisma.user, 'update')
       .mockRejectedValueOnce(new Error('database unavailable'));
+    const transaction = jest
+      .spyOn(prisma, '$transaction')
+      .mockImplementation(async (operation) => operation(prisma as never));
 
     await request(app.getHttpServer())
       .post('/users/me/avatar')
@@ -344,6 +349,7 @@ describe('Current user profile (e2e)', () => {
       .expect(500);
 
     update.mockRestore();
+    transaction.mockRestore();
     const retrieved = await request(app.getHttpServer())
       .get('/users/me/avatar')
       .set('Authorization', `Bearer ${user.accessToken}`)
@@ -352,6 +358,77 @@ describe('Current user profile (e2e)', () => {
     expect(Buffer.from(retrieved.body as Buffer)).toEqual(validPng);
     expect(await readdir(join(avatarUploadRoot, 'files'))).toHaveLength(storedBefore.length + 1);
     await expect(readdir(join(avatarUploadRoot, 'temp'))).resolves.toEqual([]);
+  });
+
+  it('serializes concurrent replacements from separate API instances', async () => {
+    const user = await registerUser('avatar-multi-instance-replacement');
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
+
+    const storage = app.get(LocalAvatarStorageService);
+    const firstTempPath = join(avatarUploadRoot, 'temp', `${user.id}-first.part`);
+    const secondTempPath = join(avatarUploadRoot, 'temp', `${user.id}-second.part`);
+    const firstContent = Buffer.from('first concurrent replacement');
+    const secondContent = Buffer.from('second concurrent replacement');
+    await writeFile(firstTempPath, firstContent);
+    await writeFile(secondTempPath, secondContent);
+
+    const firstPrisma = new PrismaService();
+    const secondPrisma = new PrismaService();
+    await Promise.all([firstPrisma.onModuleInit(), secondPrisma.onModuleInit()]);
+    let releaseFirstFinalize: (() => void) | undefined;
+    const firstFinalizeStarted = new Promise<void>((resolve) => {
+      releaseFirstFinalize = resolve;
+    });
+    const originalFinalize = storage.finalize.bind(storage);
+    const finalize = jest.spyOn(storage, 'finalize').mockImplementation(async (path, key) => {
+      if (finalize.mock.calls.length === 1) {
+        releaseFirstFinalize?.();
+        await new Promise<void>((resolve) => {
+          releaseFirstFinalize = resolve;
+        });
+      }
+      await originalFinalize(path, key);
+    });
+    const validation = {
+      validate: jest
+        .fn()
+        .mockResolvedValue({ mimeType: 'image/png', sizeBytes: firstContent.length }),
+    } as unknown as AvatarValidationService;
+    const firstService = new ProfileService(firstPrisma, storage, validation);
+    const secondService = new ProfileService(secondPrisma, storage, validation);
+
+    try {
+      const first = firstService.uploadAvatar(user.id, {
+        path: firstTempPath,
+      } as Express.Multer.File);
+      await firstFinalizeStarted;
+      const second = secondService.uploadAvatar(user.id, {
+        path: secondTempPath,
+      } as Express.Multer.File);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(finalize).toHaveBeenCalledTimes(1);
+
+      releaseFirstFinalize?.();
+      await Promise.all([first, second]);
+
+      const activeAvatar = await app.get(PrismaService).user.findUniqueOrThrow({
+        where: { id: user.id },
+        select: { avatarStorageKey: true },
+      });
+      const stream = await storage.open(activeAvatar.avatarStorageKey!);
+      const received: Buffer[] = [];
+      for await (const chunk of stream) {
+        received.push(Buffer.from(chunk));
+      }
+      expect(Buffer.concat(received)).toEqual(secondContent);
+    } finally {
+      finalize.mockRestore();
+      await Promise.all([firstPrisma.onModuleDestroy(), secondPrisma.onModuleDestroy()]);
+    }
   });
 
   it.each([

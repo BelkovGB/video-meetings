@@ -10,19 +10,31 @@ describe('ProfileService avatar replacement', () => {
   const avatar = { mimeType: 'image/png', sizeBytes: 123 };
 
   function createService(options?: { finalizeError?: Error; updateError?: Error }) {
-    const prisma = {
+    const prisma: any = {};
+    Object.assign(prisma, {
+      $transaction: jest.fn(async (operation: (client: typeof prisma) => unknown) =>
+        operation(prisma),
+      ),
+      $executeRaw: jest.fn().mockResolvedValue(1),
       user: {
         findUnique: jest.fn().mockResolvedValue({ avatarStorageKey: existingStorageKey }),
         update: options?.updateError
           ? jest.fn().mockRejectedValue(options.updateError)
           : jest.fn().mockResolvedValue(undefined),
       },
-    };
+    });
     const avatars = {
       finalize: options?.finalizeError
         ? jest.fn().mockRejectedValue(options.finalizeError)
         : jest.fn().mockResolvedValue(undefined),
       discard: jest.fn().mockResolvedValue(undefined),
+      discardEventually: jest.fn(async (storageKey: string | null) => {
+        try {
+          await avatars.discard(storageKey);
+        } catch {
+          // The storage service queues retryable deletion failures.
+        }
+      }),
       discardTemp: jest.fn().mockResolvedValue(undefined),
     };
     const validation = { validate: jest.fn().mockResolvedValue(avatar) };
@@ -45,6 +57,7 @@ describe('ProfileService avatar replacement', () => {
     await expect(service.uploadAvatar(userId, file)).rejects.toThrow(storageError);
 
     expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
     expect(avatars.discard).not.toHaveBeenCalledWith(existingStorageKey);
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
   });
@@ -61,6 +74,16 @@ describe('ProfileService avatar replacement', () => {
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
   });
 
+  it('does not fail a successful replacement when deleting the superseded avatar is transiently unavailable', async () => {
+    const { service, avatars } = createService();
+    avatars.discard.mockRejectedValueOnce(new Error('storage temporarily unavailable'));
+
+    await expect(service.uploadAvatar(userId, file)).resolves.toMatchObject(avatar);
+
+    expect(avatars.discard).toHaveBeenCalledWith(existingStorageKey);
+    expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
+  });
+
   it('serializes replacements for the same user so every superseded avatar is discarded', async () => {
     let releaseFirstFinalize: (() => void) | undefined;
     const firstFinalizeStarted = new Promise<void>((resolve) => {
@@ -70,7 +93,15 @@ describe('ProfileService avatar replacement', () => {
     const firstFinalizeCanFinish = new Promise<void>((resolve) => {
       continueFirstFinalize = resolve;
     });
-    const prisma = {
+    let transactionTail: Promise<unknown> = Promise.resolve();
+    const prisma: any = {};
+    Object.assign(prisma, {
+      $transaction: jest.fn((operation: (client: typeof prisma) => Promise<unknown>) => {
+        const result = transactionTail.then(() => operation(prisma));
+        transactionTail = result.catch(() => undefined);
+        return result;
+      }),
+      $executeRaw: jest.fn().mockResolvedValue(1),
       user: {
         findUnique: jest
           .fn()
@@ -78,7 +109,7 @@ describe('ProfileService avatar replacement', () => {
           .mockResolvedValueOnce({ avatarStorageKey: 'first-avatar' }),
         update: jest.fn().mockResolvedValue(undefined),
       },
-    };
+    });
     const avatars = {
       finalize: jest.fn(async () => {
         if (avatars.finalize.mock.calls.length === 1) {
@@ -87,17 +118,29 @@ describe('ProfileService avatar replacement', () => {
         }
       }),
       discard: jest.fn().mockResolvedValue(undefined),
+      discardEventually: jest.fn(async (storageKey: string | null) => {
+        try {
+          await avatars.discard(storageKey);
+        } catch {
+          // The storage service queues retryable deletion failures.
+        }
+      }),
       discardTemp: jest.fn().mockResolvedValue(undefined),
     };
-    const service = new ProfileService(
+    const firstService = new ProfileService(
+      prisma as unknown as PrismaService,
+      avatars as unknown as LocalAvatarStorageService,
+      { validate: jest.fn().mockResolvedValue(avatar) } as unknown as AvatarValidationService,
+    );
+    const secondService = new ProfileService(
       prisma as unknown as PrismaService,
       avatars as unknown as LocalAvatarStorageService,
       { validate: jest.fn().mockResolvedValue(avatar) } as unknown as AvatarValidationService,
     );
 
-    const first = service.uploadAvatar(userId, { ...file, path: 'first.part' });
+    const first = firstService.uploadAvatar(userId, { ...file, path: 'first.part' });
     await firstFinalizeStarted;
-    const second = service.uploadAvatar(userId, { ...file, path: 'second.part' });
+    const second = secondService.uploadAvatar(userId, { ...file, path: 'second.part' });
 
     await new Promise((resolve) => setImmediate(resolve));
     expect(avatars.finalize).toHaveBeenCalledTimes(1);
@@ -107,5 +150,6 @@ describe('ProfileService avatar replacement', () => {
 
     expect(avatars.discard).toHaveBeenCalledWith(existingStorageKey);
     expect(avatars.discard).toHaveBeenCalledWith('first-avatar');
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
   });
 });
