@@ -183,13 +183,17 @@ export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy 
       return;
     }
 
+    const reservations = await this.prisma.avatarStorageReservation.findMany({
+      select: { storageKey: true },
+    });
     const users = await this.prisma.user.findMany({
       where: { avatarStorageKey: { not: null } },
       select: { avatarStorageKey: true },
     });
-    const activeKeys = new Set(
-      users.flatMap((user) => (user.avatarStorageKey ? [user.avatarStorageKey] : [])),
-    );
+    const activeKeys = new Set([
+      ...reservations.map((reservation) => reservation.storageKey),
+      ...users.flatMap((user) => (user.avatarStorageKey ? [user.avatarStorageKey] : [])),
+    ]);
     const entries = await readdir(avatarConfig.directory, { withFileTypes: true });
     const staleBefore = Date.now() - avatarConfig.temporaryUploadGraceMs;
     await Promise.all(

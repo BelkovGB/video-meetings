@@ -104,12 +104,42 @@ describe('LocalAvatarStorageService', () => {
     await expect(readFile(tempPath)).resolves.toEqual(content);
   });
 
+  it('keeps a finalized replacement reserved while another storage instance reconciles', async () => {
+    const reservedKey = `${storageKey}-reserved`;
+    const reservedTempPath = join(avatarConfig.tempDirectory, `${reservedKey}.part`);
+    const prisma = {
+      avatarStorageReservation: {
+        findMany: jest.fn().mockResolvedValue([{ storageKey: reservedKey }]),
+      },
+      user: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    };
+
+    try {
+      await writeFile(reservedTempPath, content);
+      await storage.finalize(reservedTempPath, reservedKey);
+      const staleAt = new Date(Date.now() - avatarConfig.temporaryUploadGraceMs - 1_000);
+      await utimes(join(avatarConfig.directory, reservedKey), staleAt, staleAt);
+
+      await new LocalAvatarStorageService(prisma as never).onModuleInit();
+
+      await expect(storage.open(reservedKey)).resolves.toBeDefined();
+    } finally {
+      await storage.discardTemp(reservedTempPath);
+      await storage.discard(reservedKey);
+    }
+  });
+
   it('removes finalized avatars that are no longer referenced by a user', async () => {
     const retainedKey = `${storageKey}-retained`;
     const orphanedKey = `${storageKey}-orphaned`;
     const retainedTempPath = join(avatarConfig.tempDirectory, `${retainedKey}.part`);
     const orphanedTempPath = join(avatarConfig.tempDirectory, `${orphanedKey}.part`);
     const prisma = {
+      avatarStorageReservation: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
       user: {
         findMany: jest.fn().mockResolvedValue([{ avatarStorageKey: retainedKey }]),
       },

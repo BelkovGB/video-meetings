@@ -26,6 +26,14 @@ model User {
   @@map("users")
 }
 
+model AvatarStorageReservation {
+  storageKey String   @id @map("storage_key")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("avatar_storage_reservations")
+}
+
 model Meeting {
   id           String               @id @default(cuid())
   title        String               @db.VarChar(255)

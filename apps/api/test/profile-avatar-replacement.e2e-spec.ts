@@ -22,6 +22,10 @@ describe('ProfileService avatar replacement', () => {
           ? jest.fn().mockRejectedValue(options.updateError)
           : jest.fn().mockResolvedValue(undefined),
       },
+      avatarStorageReservation: {
+        create: jest.fn().mockResolvedValue(undefined),
+        delete: jest.fn().mockResolvedValue(undefined),
+      },
     });
     const avatars = {
       finalize: options?.finalizeError
@@ -59,6 +63,9 @@ describe('ProfileService avatar replacement', () => {
     expect(prisma.user.update).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
     expect(avatars.discard).not.toHaveBeenCalledWith(existingStorageKey);
+    expect(prisma.avatarStorageReservation.delete).toHaveBeenCalledWith({
+      where: { storageKey: expect.any(String) },
+    });
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
   });
 
@@ -71,6 +78,9 @@ describe('ProfileService avatar replacement', () => {
     expect(prisma.user.update).toHaveBeenCalledTimes(1);
     expect(avatars.discard).toHaveBeenCalledWith(expect.any(String));
     expect(avatars.discard).not.toHaveBeenCalledWith(existingStorageKey);
+    expect(prisma.avatarStorageReservation.delete).toHaveBeenCalledWith({
+      where: { storageKey: expect.any(String) },
+    });
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
   });
 
@@ -82,6 +92,22 @@ describe('ProfileService avatar replacement', () => {
 
     expect(avatars.discard).toHaveBeenCalledWith(existingStorageKey);
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
+  });
+
+  it('keeps a durable reservation while the finalized replacement awaits its database reference', async () => {
+    const { service, prisma, avatars } = createService();
+
+    await expect(service.uploadAvatar(userId, file)).resolves.toMatchObject(avatar);
+
+    expect(prisma.avatarStorageReservation.create).toHaveBeenCalledWith({
+      data: { storageKey: expect.any(String) },
+    });
+    expect(prisma.avatarStorageReservation.create.mock.invocationCallOrder[0]).toBeLessThan(
+      avatars.finalize.mock.invocationCallOrder[0],
+    );
+    expect(prisma.avatarStorageReservation.delete.mock.invocationCallOrder[0]).toBeGreaterThan(
+      prisma.user.update.mock.invocationCallOrder[0],
+    );
   });
 
   it('serializes replacements for the same user so every superseded avatar is discarded', async () => {
@@ -108,6 +134,10 @@ describe('ProfileService avatar replacement', () => {
           .mockResolvedValueOnce({ avatarStorageKey: existingStorageKey })
           .mockResolvedValueOnce({ avatarStorageKey: 'first-avatar' }),
         update: jest.fn().mockResolvedValue(undefined),
+      },
+      avatarStorageReservation: {
+        create: jest.fn().mockResolvedValue(undefined),
+        delete: jest.fn().mockResolvedValue(undefined),
       },
     });
     const avatars = {

@@ -74,7 +74,9 @@ export class ProfileService {
   ) {
     const storageKey = randomUUID();
     const updatedAt = new Date();
+    let switched = false;
     try {
+      await this.prisma.avatarStorageReservation.create({ data: { storageKey } });
       const existingStorageKey = await this.prisma.$transaction(async (transaction) => {
         await transaction.$executeRaw(
           Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))`,
@@ -99,9 +101,14 @@ export class ProfileService {
         });
         return existing.avatarStorageKey;
       });
+      switched = true;
       await this.discardSafely(existingStorageKey);
+      await this.releaseReservationSafely(storageKey);
     } catch (error) {
-      await this.discardSafely(storageKey);
+      if (!switched) {
+        await this.discardSafely(storageKey);
+        await this.releaseReservationSafely(storageKey);
+      }
       throw error;
     }
     return { ...avatar, updatedAt };
@@ -109,6 +116,14 @@ export class ProfileService {
 
   private async discardSafely(storageKey: string | null): Promise<void> {
     await this.avatars.discardEventually(storageKey);
+  }
+
+  private async releaseReservationSafely(storageKey: string): Promise<void> {
+    try {
+      await this.prisma.avatarStorageReservation.delete({ where: { storageKey } });
+    } catch {
+      // The reservation only delays orphan cleanup; keeping it is safer than failing after a switch.
+    }
   }
 
   async openCurrentAvatar(
