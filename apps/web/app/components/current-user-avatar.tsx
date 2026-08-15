@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
 import type { Avatar } from '../../lib/api/contracts';
+import { readAccessToken } from '../../lib/auth/session';
 
 type CurrentUserAvatarProps = {
   avatar: Avatar | null;
@@ -29,7 +30,7 @@ export function CurrentUserAvatar({ avatar, displayName, className = '' }: Curre
       return;
     }
 
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
     if (!token) {
       setImage(null);
       return;

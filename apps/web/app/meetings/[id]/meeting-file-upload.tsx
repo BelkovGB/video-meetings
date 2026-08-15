@@ -5,6 +5,7 @@ import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
 import type { MeetingFile, UploadApiError } from '../../../lib/api/contracts';
+import { clearSessionIdentity, readAccessToken } from '../../../lib/auth/session';
 import { formatFileSize } from '../../../lib/format/file-size';
 
 type MeetingFileUploadProps = {
@@ -163,7 +164,7 @@ export function MeetingFileUpload({
       return;
     }
 
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
     if (!token) {
       router.replace('/login');
       return;
@@ -213,8 +214,7 @@ export function MeetingFileUpload({
       setCanCancel(false);
 
       if (request.status === 401) {
-        sessionStorage.removeItem('accessToken');
-        sessionStorage.removeItem('userEmail');
+        clearSessionIdentity();
         router.replace('/login');
         return;
       }

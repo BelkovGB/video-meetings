@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
+import { startSession } from '../../lib/auth/session';
 import type { ApiError } from '../../lib/api/contracts';
 
 const minimumPasswordLength = 9;
@@ -132,9 +133,7 @@ export default function RegisterPage() {
         return;
       }
 
-      sessionStorage.setItem('accessToken', data.accessToken);
-      sessionStorage.setItem('userEmail', email.trim().toLowerCase());
-      sessionStorage.removeItem('userDisplayName');
+      startSession(data.accessToken, email);
       router.replace('/');
     } catch {
       setError('Нет соединения с сервером. Убедитесь, что API запущен, и повторите попытку.');

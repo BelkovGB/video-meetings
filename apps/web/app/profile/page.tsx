@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { apiUrl } from '../../lib/api/config';
 import type { CurrentUserProfile } from '../../lib/api/contracts';
+import { clearSession, readAccessToken, writeDisplayName } from '../../lib/auth/session';
 import { CurrentUserAvatar } from '../components/current-user-avatar';
 import { AvatarUploadForm } from './avatar-upload-form';
 
@@ -22,7 +23,7 @@ export default function ProfilePage() {
   const saveStatusRef = useRef<HTMLParagraphElement>(null);
 
   useEffect(() => {
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
 
     if (!token) {
       router.replace('/login');
@@ -38,9 +39,7 @@ export default function ProfilePage() {
         });
 
         if (response.status === 401) {
-          sessionStorage.removeItem('accessToken');
-          sessionStorage.removeItem('userEmail');
-          sessionStorage.removeItem('userDisplayName');
+          clearSession();
           router.replace('/login');
           return;
         }
@@ -94,7 +93,7 @@ export default function ProfilePage() {
       return;
     }
 
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
     if (!token) {
       router.replace('/login');
       return;
@@ -115,9 +114,7 @@ export default function ProfilePage() {
       });
 
       if (response.status === 401) {
-        sessionStorage.removeItem('accessToken');
-        sessionStorage.removeItem('userEmail');
-        sessionStorage.removeItem('userDisplayName');
+        clearSession();
         router.replace('/login');
         return;
       }
@@ -130,7 +127,7 @@ export default function ProfilePage() {
       const updatedProfile = (await response.json()) as CurrentUserProfile;
       setProfile(updatedProfile);
       setDisplayNameInput(updatedProfile.displayName ?? '');
-      sessionStorage.setItem('userDisplayName', updatedProfile.displayName ?? '');
+      writeDisplayName(updatedProfile.displayName ?? '');
       setSaveStatus(`Имя «${updatedProfile.displayName ?? ''}» сохранено.`);
     } catch {
       setDisplayNameError('Не удалось сохранить имя. Проверьте соединение и повторите попытку.');
@@ -187,9 +184,7 @@ export default function ProfilePage() {
 
   const displayName = profile.displayName?.trim() || 'Не указано';
   const handleUnauthorized = () => {
-    sessionStorage.removeItem('accessToken');
-    sessionStorage.removeItem('userEmail');
-    sessionStorage.removeItem('userDisplayName');
+    clearSession();
     router.replace('/login');
   };
 

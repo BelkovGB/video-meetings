@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
 import type { ApiError, Meeting, MeetingFile } from '../../../lib/api/contracts';
+import { clearAccessToken, clearSessionIdentity, readAccessToken } from '../../../lib/auth/session';
 import { formatMeetingDateWithYear, formatUploadDate } from '../../../lib/format/dates';
 import { formatFileSize } from '../../../lib/format/file-size';
 import { MeetingFileUpload } from './meeting-file-upload';
@@ -83,7 +84,7 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
   }, [statusMessage]);
 
   useEffect(() => {
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
 
     if (!token) {
       router.replace('/login');
@@ -101,8 +102,7 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
         ]);
 
         if (meetingResponse.status === 401 || filesResponse.status === 401) {
-          sessionStorage.removeItem('accessToken');
-          sessionStorage.removeItem('userEmail');
+          clearSessionIdentity();
           router.replace('/login');
           return;
         }
@@ -141,7 +141,7 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
   };
 
   const downloadFile = async (file: MeetingFile) => {
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
 
     if (!token) {
       router.replace('/login');
@@ -163,7 +163,7 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
       const data = (await response.json()) as { ticket?: string } & ApiError;
 
       if (response.status === 401) {
-        sessionStorage.removeItem('accessToken');
+        clearAccessToken();
         router.replace('/login');
         return;
       }
@@ -188,7 +188,7 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
   };
 
   const deleteFile = async (file: MeetingFile) => {
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
 
     if (!token) {
       router.replace('/login');
@@ -206,7 +206,7 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
       });
 
       if (response.status === 401) {
-        sessionStorage.removeItem('accessToken');
+        clearAccessToken();
         router.replace('/login');
         return;
       }

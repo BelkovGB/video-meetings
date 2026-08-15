@@ -17,6 +17,14 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { apiUrl } from '../lib/api/config';
 import type { ApiError, CurrentUserProfile, Meeting } from '../lib/api/contracts';
+import {
+  clearSession,
+  readAccessToken,
+  readDisplayName,
+  readUserEmail,
+  removeStoredDisplayName,
+  writeDisplayName,
+} from '../lib/auth/session';
 import { formatMeetingDateShort } from '../lib/format/dates';
 import { CurrentUserAvatar } from './components/current-user-avatar';
 
@@ -88,24 +96,22 @@ export default function DashboardPage() {
   const dateInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
 
     if (!token) {
       router.replace('/login');
       return;
     }
 
-    const email = sessionStorage.getItem('userEmail') ?? getEmailFromToken(token);
-    const savedDisplayName = sessionStorage.getItem('userDisplayName')?.trim() || null;
+    const email = readUserEmail() ?? getEmailFromToken(token);
+    const savedDisplayName = readDisplayName();
     setDisplayName(savedDisplayName);
     setIdentity(savedDisplayName || email);
     let isDashboardActive = true;
     const currentUserRequest = new AbortController();
 
     const clearSessionAndRedirectToLogin = () => {
-      sessionStorage.removeItem('accessToken');
-      sessionStorage.removeItem('userEmail');
-      sessionStorage.removeItem('userDisplayName');
+      clearSession();
       router.replace('/login');
     };
 
@@ -136,9 +142,9 @@ export default function DashboardPage() {
         const savedDisplayName = profile.displayName?.trim() || null;
 
         if (savedDisplayName) {
-          sessionStorage.setItem('userDisplayName', savedDisplayName);
+          writeDisplayName(savedDisplayName);
         } else {
-          sessionStorage.removeItem('userDisplayName');
+          removeStoredDisplayName();
         }
 
         setDisplayName(savedDisplayName);
@@ -188,9 +194,7 @@ export default function DashboardPage() {
   };
 
   const logout = () => {
-    sessionStorage.removeItem('accessToken');
-    sessionStorage.removeItem('userEmail');
-    sessionStorage.removeItem('userDisplayName');
+    clearSession();
     router.replace('/login');
   };
 
@@ -232,7 +236,7 @@ export default function DashboardPage() {
 
   const createMeeting = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
 
     if (!token) {
       router.replace('/login');

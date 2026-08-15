@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
 import type { Avatar } from '../../lib/api/contracts';
+import { readAccessToken } from '../../lib/auth/session';
 
 type AvatarUploadFormProps = {
   avatar: Avatar | null;
@@ -91,7 +92,7 @@ export function AvatarUploadForm({
       return;
     }
 
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
     if (!token) {
       onUnauthorized();
       return;
@@ -135,7 +136,7 @@ export function AvatarUploadForm({
   };
 
   const removeAvatar = async () => {
-    const token = sessionStorage.getItem('accessToken');
+    const token = readAccessToken();
     if (!token) {
       onUnauthorized();
       return;
