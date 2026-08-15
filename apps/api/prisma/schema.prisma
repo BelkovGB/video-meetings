@@ -30,11 +30,14 @@ model User {
 model AuthSession {
   id        String    @id @default(cuid())
   userId    String    @map("user_id")
+  expiresAt DateTime  @map("expires_at")
   revokedAt DateTime? @map("revoked_at")
   createdAt DateTime  @default(now()) @map("created_at")
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
   @@map("auth_sessions")
 }
 

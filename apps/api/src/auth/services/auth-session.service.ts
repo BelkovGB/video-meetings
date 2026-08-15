@@ -1,21 +1,47 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 
 import { PrismaService } from '../../prisma/prisma.service';
 
+const cleanupIntervalMs = 60_000;
+const cleanupBatchSize = 100;
+
 @Injectable()
-export class AuthSessionService {
+export class AuthSessionService implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly logger = new Logger(AuthSessionService.name);
+  private cleanupTimer: NodeJS.Timeout | undefined;
+  private cleanupRunning = false;
+
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(userId: string) {
+  async onApplicationBootstrap(): Promise<void> {
+    await this.pruneExpiredAndRevoked();
+    this.cleanupTimer = setInterval(() => {
+      void this.pruneExpiredAndRevoked().catch((error: unknown) => {
+        this.logger.error(
+          'Failed to prune expired authentication sessions',
+          error instanceof Error ? error.stack : undefined,
+        );
+      });
+    }, cleanupIntervalMs);
+    this.cleanupTimer.unref();
+  }
+
+  onModuleDestroy(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+    }
+  }
+
+  async create(userId: string, expiresAt: Date) {
     return this.prisma.authSession.create({
-      data: { userId },
+      data: { userId, expiresAt },
       select: { id: true },
     });
   }
 
-  async isActive(sessionId: string, userId: string): Promise<boolean> {
+  async isActive(sessionId: string, userId: string, now = new Date()): Promise<boolean> {
     const session = await this.prisma.authSession.findFirst({
-      where: { id: sessionId, userId, revokedAt: null },
+      where: { id: sessionId, userId, revokedAt: null, expiresAt: { gt: now } },
       select: { id: true },
     });
 
@@ -27,5 +53,30 @@ export class AuthSessionService {
       where: { id: sessionId, userId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+  }
+
+  async pruneExpiredAndRevoked(now = new Date()): Promise<void> {
+    if (this.cleanupRunning) {
+      return;
+    }
+
+    this.cleanupRunning = true;
+    try {
+      const sessions = await this.prisma.authSession.findMany({
+        where: {
+          OR: [{ expiresAt: { lte: now } }, { revokedAt: { not: null } }],
+        },
+        select: { id: true },
+        take: cleanupBatchSize,
+      });
+
+      if (sessions.length > 0) {
+        await this.prisma.authSession.deleteMany({
+          where: { id: { in: sessions.map((session) => session.id) } },
+        });
+      }
+    } finally {
+      this.cleanupRunning = false;
+    }
   }
 }

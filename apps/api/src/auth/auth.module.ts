@@ -10,7 +10,7 @@ import { AuthRateLimitGuard } from './guards/auth-rate-limit.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { LoginUserHandler } from './handlers/login-user.handler';
 import { RegisterUserHandler } from './handlers/register-user.handler';
-import { AuthTokenService } from './services/auth-token.service';
+import { accessTokenLifetimeSeconds, AuthTokenService } from './services/auth-token.service';
 import { AuthRateLimiterService } from './services/auth-rate-limiter.service';
 import { AuthSessionService } from './services/auth-session.service';
 
@@ -23,7 +23,7 @@ const commandHandlers = [RegisterUserHandler, LoginUserHandler];
     CqrsModule,
     JwtModule.register({
       secret: environment.jwtSecret,
-      signOptions: { expiresIn: '1h' },
+      signOptions: { expiresIn: accessTokenLifetimeSeconds },
     }),
   ],
   controllers: [AuthController],
