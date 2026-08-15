@@ -95,15 +95,22 @@ the object's internal path.
 
 ## Ownership and authorization
 
-The JWT payload contains the user ID in `sub` and a unique authentication-session
-ID in `sid`. When registration or login issues a JWT, `AuthSessionService` first
-creates an `auth_sessions` row for that user; `sid` identifies that row. The
-guard verifies the JWT, requires a non-empty string `sid`, and accepts it only
-when the matching row belongs to `sub` and has no `revoked_at` value. A missing,
-malformed, unknown, or revoked session identity is rejected as `401`. Revoking a
-row therefore invalidates only its bearer token; other session rows for the same
-user remain valid. There is intentionally no session-management or bulk-device
-termination API.
+The JWT payload contains the user ID in `sub` and, for newly issued tokens, a
+unique authentication-session ID in `sid`. When registration or login issues a
+JWT, `AuthSessionService` first creates an `auth_sessions` row for that user;
+`sid` identifies that row. The guard verifies a non-empty `sid` against a row
+belonging to `sub` with no `revoked_at` value. Revoking a row therefore
+invalidates only its bearer token; other session rows for the same user remain
+valid. There is intentionally no session-management or bulk-device termination
+API.
+
+`sid` was added after JWTs had already been issued. During the rollout,
+`ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true` temporarily admits signed legacy tokens
+that lack it, avoiding a global logout. Such a token cannot change a password,
+because it has no session row to revoke. After at least the one-hour maximum JWT
+lifetime, deployments set the flag to `false`; missing, malformed, unknown, or
+revoked session identities are then rejected as `401` and every protected token
+is selectively revocable.
 
 After this verification, the guard attaches the payload to the Nest request.
 The controller passes only `sub` to the command or query. Collection and detail

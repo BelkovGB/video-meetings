@@ -2,12 +2,13 @@ import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 
+import { environment } from '../../config/environment';
 import { AuthSessionService } from '../services/auth-session.service';
 
 type AccessTokenPayload = {
   sub: string;
   email: string;
-  sid: string;
+  sid?: string;
 };
 
 export type AuthenticatedRequest = Request & {
@@ -32,12 +33,21 @@ export class JwtAuthGuard implements CanActivate {
     try {
       const payload = await this.jwtService.verifyAsync<AccessTokenPayload>(token);
 
-      if (!payload.sub || typeof payload.sid !== 'string' || !payload.sid) {
+      if (!payload.sub) {
         throw new UnauthorizedException();
       }
 
-      if (!(await this.authSessionService.isActive(payload.sid, payload.sub))) {
-        throw new UnauthorizedException();
+      if (payload.sid === undefined) {
+        if (!environment.acceptLegacyJwtWithoutSession) {
+          throw new UnauthorizedException();
+        }
+      } else {
+        if (typeof payload.sid !== 'string' || !payload.sid) {
+          throw new UnauthorizedException();
+        }
+        if (!(await this.authSessionService.isActive(payload.sid, payload.sub))) {
+          throw new UnauthorizedException();
+        }
       }
 
       request.user = payload;

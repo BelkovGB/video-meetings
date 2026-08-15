@@ -10,6 +10,7 @@ import {
   Req,
   Res,
   StreamableFile,
+  UnauthorizedException,
   UploadedFile,
   UseFilters,
   UseGuards,
@@ -92,6 +93,9 @@ export class ProfileController {
     @Body() changePasswordDto: ChangePasswordDto,
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
+    if (!request.user.sid) {
+      throw new UnauthorizedException('Sign in again before changing your password');
+    }
     await this.profileService.changePassword(request.user.sub, request.user.sid, changePasswordDto);
   }
 }

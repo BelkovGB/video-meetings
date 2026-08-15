@@ -1,4 +1,5 @@
 import { INestApplication } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -272,6 +273,29 @@ describe('Current user profile (e2e)', () => {
     await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(200);
+    await loginUser(user.email, validPassword);
+  });
+
+  it('requires a session-aware token to change a password during the JWT migration', async () => {
+    const user = await registerUser('password-change-legacy-session');
+    const legacyAccessToken = await app
+      .get(JwtService)
+      .signAsync({ sub: user.id, email: user.email });
+
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${legacyAccessToken}`)
+      .send({
+        currentPassword: validPassword,
+        newPassword: 'new-password-123',
+        confirmation: 'new-password-123',
+      })
+      .expect(401);
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${legacyAccessToken}`)
       .expect(200);
     await loginUser(user.email, validPassword);
   });

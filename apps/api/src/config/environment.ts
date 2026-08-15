@@ -13,6 +13,25 @@ function getRequiredEnvironmentVariable(name: string): string {
   return value;
 }
 
+function getBooleanEnvironmentVariable(name: string, defaultValue: boolean): boolean {
+  const value = process.env[name];
+
+  if (value === undefined) {
+    return defaultValue;
+  }
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+  throw new Error(`${name} must be either true or false`);
+}
+
 export const environment = {
   jwtSecret: getRequiredEnvironmentVariable('JWT_SECRET'),
+  acceptLegacyJwtWithoutSession: getBooleanEnvironmentVariable(
+    'ACCEPT_LEGACY_JWT_WITHOUT_SESSION',
+    true,
+  ),
 };

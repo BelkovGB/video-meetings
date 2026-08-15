@@ -184,6 +184,23 @@ are atomic. That JWT can no longer access protected routes, while the user's
 other existing sessions remain valid. Passwords and password hashes are never
 included in responses or application logs.
 
+### JWT session migration rollout
+
+New registration and login tokens include a session ID (`sid`) and are checked
+against the persisted session on every protected request. To deploy this change
+without globally invalidating still-valid tokens issued before `sid` existed,
+the API accepts those legacy tokens by default (`ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true`).
+They continue to work on protected routes until their normal JWT expiry, but
+cannot call `POST /users/me/password`: that operation returns `401` and requires
+the user to sign in again, because a legacy token has no session row that can be
+selectively revoked.
+
+Keep this compatibility setting enabled for at least the maximum JWT lifetime
+(currently one hour) after deploying the version that starts issuing `sid`
+tokens. Then set `ACCEPT_LEGACY_JWT_WITHOUT_SESSION=false` and redeploy. From
+that point the guard rejects missing session IDs and all protected JWTs support
+selective current-session revocation.
+
 ## Meetings
 
 Every meetings endpoint requires an access token. Send it in the HTTP header:

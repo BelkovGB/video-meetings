@@ -137,11 +137,28 @@ describe('Authentication (e2e)', () => {
       .expect(200);
   });
 
-  it.each([
-    ['is missing', { sub: 'user-without-session', email: 'user@example.com' }],
-    ['is malformed', { sub: 'user-with-invalid-session', email: 'user@example.com', sid: 42 }],
-  ])('rejects a token whose session identity %s', async (_description, payload) => {
-    const accessToken = await app.get(JwtService).signAsync(payload);
+  it('temporarily accepts a legacy token without a session identity', async () => {
+    const registration = await request(app.getHttpServer())
+      .post('/auth/register')
+      .send({ email: createEmail('legacy-session'), password: validPassword })
+      .expect(201);
+    const payload = JSON.parse(
+      Buffer.from((registration.body.accessToken as string).split('.')[1], 'base64url').toString(),
+    ) as { sub: string; email: string };
+    const accessToken = await app
+      .get(JwtService)
+      .signAsync({ sub: payload.sub, email: payload.email });
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+  });
+
+  it('rejects a token with a malformed session identity', async () => {
+    const accessToken = await app
+      .get(JwtService)
+      .signAsync({ sub: 'user-with-invalid-session', email: 'user@example.com', sid: 42 });
 
     await request(app.getHttpServer())
       .get('/users/me')
