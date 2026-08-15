@@ -24,6 +24,8 @@ export type Profile = {
 
 @Injectable()
 export class ProfileService {
+  private readonly avatarReplacementQueues = new Map<string, Promise<void>>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly avatars: LocalAvatarStorageService,
@@ -57,36 +59,70 @@ export class ProfileService {
   async uploadAvatar(userId: string, file: Express.Multer.File | undefined) {
     try {
       const avatar = await this.avatarValidation.validate(file);
-      const existing = await this.prisma.user.findUnique({
-        where: { id: userId },
-        select: { avatarStorageKey: true },
-      });
-      if (!existing) {
-        throw new NotFoundException('User not found');
-      }
 
-      const storageKey = randomUUID();
-      await this.avatars.finalize(file!.path, storageKey);
-      const updatedAt = new Date();
-      try {
-        await this.prisma.user.update({
-          where: { id: userId },
-          data: {
-            avatarStorageKey: storageKey,
-            avatarMimeType: avatar.mimeType,
-            avatarSizeBytes: avatar.sizeBytes,
-            avatarUpdatedAt: updatedAt,
-          },
-        });
-      } catch (error) {
-        await this.avatars.discard(storageKey);
-        throw error;
-      }
-      await this.avatars.discard(existing.avatarStorageKey);
-      return { ...avatar, updatedAt };
+      return await this.withAvatarReplacementLock(userId, async () => {
+        return this.retainAvatar(userId, file, avatar);
+      });
     } finally {
       if (file) {
         await this.avatars.discardTemp(file.path);
+      }
+    }
+  }
+
+  private async retainAvatar(
+    userId: string,
+    file: Express.Multer.File | undefined,
+    avatar: AvatarMetadata,
+  ) {
+    const existing = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { avatarStorageKey: true },
+    });
+    if (!existing) {
+      throw new NotFoundException('User not found');
+    }
+
+    const storageKey = randomUUID();
+    await this.avatars.finalize(file!.path, storageKey);
+    const updatedAt = new Date();
+    try {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          avatarStorageKey: storageKey,
+          avatarMimeType: avatar.mimeType,
+          avatarSizeBytes: avatar.sizeBytes,
+          avatarUpdatedAt: updatedAt,
+        },
+      });
+    } catch (error) {
+      await this.avatars.discard(storageKey);
+      throw error;
+    }
+    await this.avatars.discard(existing.avatarStorageKey);
+    return { ...avatar, updatedAt };
+  }
+
+  private async withAvatarReplacementLock<T>(
+    userId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.avatarReplacementQueues.get(userId) ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.catch(() => undefined).then(() => current);
+    this.avatarReplacementQueues.set(userId, queued);
+
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release?.();
+      if (this.avatarReplacementQueues.get(userId) === queued) {
+        this.avatarReplacementQueues.delete(userId);
       }
     }
   }

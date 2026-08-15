@@ -6,6 +6,8 @@ import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { LocalAvatarStorageService } from '../src/profile/local-avatar-storage.service';
+import { PrismaService } from '../src/prisma/prisma.service';
 
 type UserSession = {
   accessToken: string;
@@ -290,6 +292,66 @@ describe('Current user profile (e2e)', () => {
       .expect('Content-Type', /image\/jpeg/)
       .expect(200);
     expect(Buffer.from(retrieved.body as Buffer)).toEqual(validJpeg);
+  });
+
+  it('keeps the prior avatar retrievable when storage rejects a replacement', async () => {
+    const user = await registerUser('avatar-replacement-storage-failure');
+    const storedBefore = await readdir(join(avatarUploadRoot, 'files'));
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
+    const storage = app.get(LocalAvatarStorageService);
+    const finalize = jest
+      .spyOn(storage, 'finalize')
+      .mockRejectedValueOnce(new Error('storage unavailable'));
+
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validJpeg, { filename: 'replacement.jpg', contentType: 'image/jpeg' })
+      .expect(500);
+
+    finalize.mockRestore();
+    const retrieved = await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect('Content-Type', /image\/png/)
+      .expect(200);
+    expect(Buffer.from(retrieved.body as Buffer)).toEqual(validPng);
+    expect(await readdir(join(avatarUploadRoot, 'files'))).toHaveLength(storedBefore.length + 1);
+    await expect(readdir(join(avatarUploadRoot, 'temp'))).resolves.toEqual([]);
+  });
+
+  it('removes a retained replacement when persistence fails and preserves the prior avatar', async () => {
+    const user = await registerUser('avatar-replacement-persistence-failure');
+    const storedBefore = await readdir(join(avatarUploadRoot, 'files'));
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
+    const prisma = app.get(PrismaService);
+    const update = jest
+      .spyOn(prisma.user, 'update')
+      .mockRejectedValueOnce(new Error('database unavailable'));
+
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validJpeg, { filename: 'replacement.jpg', contentType: 'image/jpeg' })
+      .expect(500);
+
+    update.mockRestore();
+    const retrieved = await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect('Content-Type', /image\/png/)
+      .expect(200);
+    expect(Buffer.from(retrieved.body as Buffer)).toEqual(validPng);
+    expect(await readdir(join(avatarUploadRoot, 'files'))).toHaveLength(storedBefore.length + 1);
+    await expect(readdir(join(avatarUploadRoot, 'temp'))).resolves.toEqual([]);
   });
 
   it.each([

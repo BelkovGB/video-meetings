@@ -80,4 +80,33 @@ describe('LocalAvatarStorageService', () => {
 
     await expect(readFile(tempPath)).resolves.toEqual(content);
   });
+
+  it('removes finalized avatars that are no longer referenced by a user', async () => {
+    const retainedKey = `${storageKey}-retained`;
+    const orphanedKey = `${storageKey}-orphaned`;
+    const retainedTempPath = join(avatarConfig.tempDirectory, `${retainedKey}.part`);
+    const orphanedTempPath = join(avatarConfig.tempDirectory, `${orphanedKey}.part`);
+    const prisma = {
+      user: {
+        findMany: jest.fn().mockResolvedValue([{ avatarStorageKey: retainedKey }]),
+      },
+    };
+
+    try {
+      await writeFile(retainedTempPath, content);
+      await storage.finalize(retainedTempPath, retainedKey);
+      await writeFile(orphanedTempPath, content);
+      await storage.finalize(orphanedTempPath, orphanedKey);
+
+      await new LocalAvatarStorageService(prisma as never).onModuleInit();
+
+      await expect(storage.open(retainedKey)).resolves.toBeDefined();
+      await expect(storage.open(orphanedKey)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await storage.discardTemp(retainedTempPath);
+      await storage.discardTemp(orphanedTempPath);
+      await storage.discard(retainedKey);
+      await storage.discard(orphanedKey);
+    }
+  });
 });

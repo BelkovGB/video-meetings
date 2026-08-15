@@ -60,4 +60,52 @@ describe('ProfileService avatar replacement', () => {
     expect(avatars.discard).not.toHaveBeenCalledWith(existingStorageKey);
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
   });
+
+  it('serializes replacements for the same user so every superseded avatar is discarded', async () => {
+    let releaseFirstFinalize: (() => void) | undefined;
+    const firstFinalizeStarted = new Promise<void>((resolve) => {
+      releaseFirstFinalize = resolve;
+    });
+    let continueFirstFinalize: (() => void) | undefined;
+    const firstFinalizeCanFinish = new Promise<void>((resolve) => {
+      continueFirstFinalize = resolve;
+    });
+    const prisma = {
+      user: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce({ avatarStorageKey: existingStorageKey })
+          .mockResolvedValueOnce({ avatarStorageKey: 'first-avatar' }),
+        update: jest.fn().mockResolvedValue(undefined),
+      },
+    };
+    const avatars = {
+      finalize: jest.fn(async () => {
+        if (avatars.finalize.mock.calls.length === 1) {
+          releaseFirstFinalize?.();
+          await firstFinalizeCanFinish;
+        }
+      }),
+      discard: jest.fn().mockResolvedValue(undefined),
+      discardTemp: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new ProfileService(
+      prisma as unknown as PrismaService,
+      avatars as unknown as LocalAvatarStorageService,
+      { validate: jest.fn().mockResolvedValue(avatar) } as unknown as AvatarValidationService,
+    );
+
+    const first = service.uploadAvatar(userId, { ...file, path: 'first.part' });
+    await firstFinalizeStarted;
+    const second = service.uploadAvatar(userId, { ...file, path: 'second.part' });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(avatars.finalize).toHaveBeenCalledTimes(1);
+
+    continueFirstFinalize?.();
+    await Promise.all([first, second]);
+
+    expect(avatars.discard).toHaveBeenCalledWith(existingStorageKey);
+    expect(avatars.discard).toHaveBeenCalledWith('first-avatar');
+  });
 });

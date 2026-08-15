@@ -4,6 +4,7 @@ import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 
 import { avatarConfig } from './avatar.config';
+import { PrismaService } from '../prisma/prisma.service';
 
 function isInside(root: string, target: string): boolean {
   const path = relative(root, target);
@@ -12,6 +13,8 @@ function isInside(root: string, target: string): boolean {
 
 @Injectable()
 export class LocalAvatarStorageService implements OnModuleInit {
+  constructor(private readonly prisma?: PrismaService) {}
+
   async onModuleInit(): Promise<void> {
     try {
       await mkdir(avatarConfig.directory, { recursive: true, mode: 0o700 });
@@ -24,6 +27,7 @@ export class LocalAvatarStorageService implements OnModuleInit {
         throw new Error('Avatar directories must be on the same filesystem');
       }
       await this.reconcileTemporaryUploads();
+      await this.reconcileUnreferencedAvatars();
     } catch (error) {
       throw new ServiceUnavailableException({
         message: 'Avatar storage is unavailable',
@@ -112,6 +116,28 @@ export class LocalAvatarStorageService implements OnModuleInit {
           recursive: entry.isDirectory(),
           force: true,
         });
+      }),
+    );
+  }
+
+  private async reconcileUnreferencedAvatars(): Promise<void> {
+    if (!this.prisma) {
+      return;
+    }
+
+    const users = await this.prisma.user.findMany({
+      where: { avatarStorageKey: { not: null } },
+      select: { avatarStorageKey: true },
+    });
+    const activeKeys = new Set(
+      users.flatMap((user) => (user.avatarStorageKey ? [user.avatarStorageKey] : [])),
+    );
+    const entries = await readdir(avatarConfig.directory, { withFileTypes: true });
+    await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.isDirectory() && !activeKeys.has(entry.name)) {
+          await rm(resolve(avatarConfig.directory, entry.name), { recursive: true, force: true });
+        }
       }),
     );
   }
