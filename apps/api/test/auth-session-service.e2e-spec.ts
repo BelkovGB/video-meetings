@@ -2,6 +2,24 @@ import { AuthSessionService } from '../src/auth/services/auth-session.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 describe('AuthSessionService', () => {
+  it('does not block application bootstrap while session cleanup is running', async () => {
+    const prisma = {
+      authSession: {
+        findMany: jest.fn().mockImplementation(() => new Promise(() => undefined)),
+      },
+    };
+    const service = new AuthSessionService(prisma as never);
+    const bootstrapCompleted = jest.fn();
+
+    void service.onApplicationBootstrap().then(bootstrapCompleted);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(bootstrapCompleted).toHaveBeenCalledTimes(1);
+
+    service.onModuleDestroy();
+  });
+
   it('stores the expiry selected for a newly issued token', async () => {
     const expiresAt = new Date('2026-08-15T13:00:01.000Z');
     const prisma = {

@@ -15,14 +15,9 @@ export class AuthSessionService implements OnApplicationBootstrap, OnModuleDestr
   constructor(private readonly prisma: PrismaService) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    await this.pruneExpiredAndRevoked();
+    this.startCleanup();
     this.cleanupTimer = setInterval(() => {
-      void this.pruneExpiredAndRevoked().catch((error: unknown) => {
-        this.logger.error(
-          'Failed to prune expired authentication sessions',
-          error instanceof Error ? error.stack : undefined,
-        );
-      });
+      this.startCleanup();
     }, cleanupIntervalMs);
     this.cleanupTimer.unref();
   }
@@ -31,6 +26,15 @@ export class AuthSessionService implements OnApplicationBootstrap, OnModuleDestr
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
     }
+  }
+
+  private startCleanup(): void {
+    void this.pruneExpiredAndRevoked().catch((error: unknown) => {
+      this.logger.error(
+        'Failed to prune expired authentication sessions',
+        error instanceof Error ? error.stack : undefined,
+      );
+    });
   }
 
   async create(userId: string, expiresAt: Date, transaction?: Prisma.TransactionClient) {
