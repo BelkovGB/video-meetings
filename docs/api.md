@@ -13,6 +13,7 @@ JSON except for the multipart file-upload endpoint.
 | PATCH  | `/users/me`                                          | Bearer JWT         |
 | POST   | `/users/me/avatar`                                   | Bearer JWT         |
 | GET    | `/users/me/avatar`                                   | Bearer JWT         |
+| DELETE | `/users/me/avatar`                                   | Bearer JWT         |
 | POST   | `/meetings`                                          | Bearer JWT         |
 | GET    | `/meetings`                                          | Bearer JWT         |
 | GET    | `/meetings/:id`                                      | Bearer JWT         |
@@ -265,6 +266,23 @@ Streams the authenticated user's avatar with the verified content type,
 `Content-Length`, `Cache-Control: private, no-store`, and
 `X-Content-Type-Options: nosniff`. A user without an avatar receives `404`; one
 authenticated user cannot retrieve another user's avatar.
+
+### `DELETE /users/me/avatar`
+
+Removes the authenticated user's avatar and returns `200 OK` with the same safe
+profile representation as `GET /users/me`, with `avatar: null`. It accepts no
+target user ID. The `null` value is the stable avatar-absent contract: a later
+`GET /users/me/avatar` returns `404`, while the account, email, display name,
+and other profile fields remain unchanged. Removal is idempotent, so repeated
+authenticated requests also return `200` and the avatar-absent profile; an
+unauthenticated request returns `401`.
+
+The API clears avatar metadata atomically before discarding the private object.
+If private-storage cleanup is temporarily unavailable, it still returns the
+avatar-absent profile and queues cleanup for storage reconciliation. It never
+includes a storage key or filesystem path in the response or error. See
+[`profile-avatar-api.md`](profile-avatar-api.md) for the complete removal
+contract.
 
 Avatar files use a storage root separate from meeting files. `AVATAR_DIR` holds
 final files and `AVATAR_TEMP_DIR` holds short-lived upload parts; both must be

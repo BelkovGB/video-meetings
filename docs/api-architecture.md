@@ -61,8 +61,8 @@ verified JWT `sub`, and uses `PrismaModule` to select or update `id`, `email`,
 and it has no operation accepting a target user ID or an email update. Thus
 `AuthModule` has no direct Prisma or `User` model dependency, `UsersModule` does
 not expose general user CRUD, and the profile HTTP surface is limited to
-`GET`/`PATCH /users/me` and `POST`/`GET /users/me/avatar` documented in
-`docs/api.md`.
+`GET`/`PATCH /users/me` and `POST`/`GET`/`DELETE /users/me/avatar` documented
+in `docs/api.md`.
 
 There is no general users controller: user creation and credential lookup are
 available only through the security port, while the profile controller exposes
@@ -83,6 +83,10 @@ than the configured safety window, so a second API instance cannot remove an
 active upload on a shared storage volume. Retrieval has only `GET /users/me/avatar`, which
 streams the requesting user's verified object with private, non-sniffable
 headers. Neither the profile response nor the HTTP API exposes storage keys.
+Avatar removal clears the user-row metadata atomically before private-object
+cleanup. A transient cleanup failure leaves the user in the stable
+avatar-absent state and is reconciled by the storage service without exposing
+the object's internal path.
 
 ## Ownership and authorization
 
