@@ -9,18 +9,32 @@ describe('ProfileService avatar replacement', () => {
   const file = { path: 'temporary-avatar.part' } as Express.Multer.File;
   const avatar = { mimeType: 'image/png', sizeBytes: 123 };
 
-  function createService(options?: { finalizeError?: Error; updateError?: Error }) {
+  function createService(options?: {
+    finalizeError?: Error;
+    updateError?: Error;
+    transactionErrorAfterCommit?: Error;
+  }) {
+    let currentStorageKey = existingStorageKey;
     const prisma: any = {};
     Object.assign(prisma, {
-      $transaction: jest.fn(async (operation: (client: typeof prisma) => unknown) =>
-        operation(prisma),
-      ),
+      $transaction: jest.fn(async (operation: (client: typeof prisma) => unknown) => {
+        const result = await operation(prisma);
+        if (options?.transactionErrorAfterCommit) {
+          throw options.transactionErrorAfterCommit;
+        }
+        return result;
+      }),
       $executeRaw: jest.fn().mockResolvedValue(1),
       user: {
-        findUnique: jest.fn().mockResolvedValue({ avatarStorageKey: existingStorageKey }),
+        findUnique: jest
+          .fn()
+          .mockImplementation(() => Promise.resolve({ avatarStorageKey: currentStorageKey })),
         update: options?.updateError
           ? jest.fn().mockRejectedValue(options.updateError)
-          : jest.fn().mockResolvedValue(undefined),
+          : jest.fn().mockImplementation(({ data }) => {
+              currentStorageKey = data.avatarStorageKey;
+              return Promise.resolve(undefined);
+            }),
       },
       avatarStorageReservation: {
         create: jest.fn().mockResolvedValue(undefined),
@@ -77,6 +91,24 @@ describe('ProfileService avatar replacement', () => {
     expect(avatars.discard).toHaveBeenCalledWith(expect.any(String));
     expect(avatars.discard).not.toHaveBeenCalledWith(existingStorageKey);
     expect(prisma.avatarStorageReservation.delete).not.toHaveBeenCalled();
+    expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
+  });
+
+  it('keeps the replacement when the database committed but confirming the transaction fails', async () => {
+    const commitConfirmationError = new Error('connection lost while confirming commit');
+    const { service, prisma, avatars } = createService({
+      transactionErrorAfterCommit: commitConfirmationError,
+    });
+
+    await expect(service.uploadAvatar(userId, file)).resolves.toMatchObject(avatar);
+
+    const storageKey = prisma.user.update.mock.calls[0][0].data.avatarStorageKey;
+    expect(prisma.user.findUnique).toHaveBeenLastCalledWith({
+      where: { id: userId },
+      select: { avatarStorageKey: true },
+    });
+    expect(avatars.discard).toHaveBeenCalledWith(existingStorageKey);
+    expect(avatars.discard).not.toHaveBeenCalledWith(storageKey);
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
   });
 

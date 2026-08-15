@@ -75,6 +75,7 @@ export class ProfileService {
     const storageKey = randomUUID();
     const updatedAt = new Date();
     let switched = false;
+    let previousStorageKey: string | null = null;
     try {
       const existingStorageKey = await this.prisma.$transaction(async (transaction) => {
         await transaction.$executeRaw(
@@ -90,6 +91,7 @@ export class ProfileService {
         if (!existing) {
           throw new NotFoundException('User not found');
         }
+        previousStorageKey = existing.avatarStorageKey;
 
         await transaction.avatarStorageReservation.create({ data: { storageKey } });
         await this.avatars.finalize(file!.path, storageKey);
@@ -109,7 +111,14 @@ export class ProfileService {
       await this.discardSafely(existingStorageKey);
     } catch (error) {
       if (!switched) {
-        await this.discardSafely(storageKey);
+        const replacementIsActive = await this.isActiveAvatarStorageKey(userId, storageKey);
+        if (replacementIsActive === true) {
+          await this.discardSafely(previousStorageKey);
+          return { ...avatar, updatedAt };
+        }
+        if (replacementIsActive === false) {
+          await this.discardSafely(storageKey);
+        }
       }
       throw error;
     }
@@ -118,6 +127,21 @@ export class ProfileService {
 
   private async discardSafely(storageKey: string | null): Promise<void> {
     await this.avatars.discardEventually(storageKey);
+  }
+
+  private async isActiveAvatarStorageKey(
+    userId: string,
+    storageKey: string,
+  ): Promise<boolean | undefined> {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { avatarStorageKey: true },
+      });
+      return user?.avatarStorageKey === storageKey;
+    } catch {
+      return undefined;
+    }
   }
 
   async openCurrentAvatar(
