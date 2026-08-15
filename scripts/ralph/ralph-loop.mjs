@@ -1717,6 +1717,8 @@ Audit all of these areas:
 - public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant;
 - whether tests assert the real externally observable behavior rather than only an implementation detail.
 
+Discover documentation paths before reading them: use \`rg --files docs\` and repository file listings, then read only paths confirmed to exist. Never guess conventional paths such as \`docs/README.md\`. For public API work in this repository, treat \`README.md\`, \`docs/api.md\`, and \`docs/api-architecture.md\` as canonical entry points when those files exist, while still inspecting issue-specific documents returned by discovery.
+
 Only report findings caused by the claimed implementation, regressions at current HEAD, or work required by the issue. Ignore unrelated pre-existing debt. Use verdict \"fail\" when at least one actionable finding exists; otherwise use \"pass\" with an empty findings array. Do not edit files.`;
 }
 
@@ -2997,7 +2999,7 @@ The branch and pull request may be cumulative and contain work from other milest
 
 Ralph's control plane is maintained manually outside the product loop. Never report findings for .agents/**, scripts/ralph/**, AGENTS.md, or nested **/AGENTS.md files. Those paths must never become milestone issues and must never be modified by an AFK implementation session.
 
-Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
+Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. Discover documentation paths first with \`rg --files docs\` and repository file listings, then read only paths confirmed to exist; never guess conventional paths such as \`docs/README.md\`. For public API work in this repository, treat \`README.md\`, \`docs/api.md\`, and \`docs/api-architecture.md\` as canonical entry points when those files exist, while still inspecting relevant milestone-specific documents returned by discovery. Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
 
 The Ralph orchestrator has already completed every configured preflight and validation script successfully for the exact reviewed head. Do not rerun npm, npx, builds, linters, type checks, tests, dev servers, or any command that writes caches or artifacts. Use read-only file and git inspection only.
 
