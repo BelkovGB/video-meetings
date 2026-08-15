@@ -71,6 +71,9 @@ export class ProfileService {
       throw new BadRequestException('Password confirmation does not match');
     }
 
+    const normalizedCurrentPassword = currentPassword.normalize('NFC');
+    const normalizedNewPassword = newPassword.normalize('NFC');
+
     await this.prisma.$transaction(async (transaction) => {
       await transaction.$executeRaw(
         Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))`,
@@ -82,14 +85,14 @@ export class ProfileService {
       if (!user) {
         throw new NotFoundException('User not found');
       }
-      if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
+      if (!(await bcrypt.compare(normalizedCurrentPassword, user.passwordHash))) {
         throw new BadRequestException('Current password is incorrect');
       }
-      if (await bcrypt.compare(newPassword, user.passwordHash)) {
+      if (await bcrypt.compare(normalizedNewPassword, user.passwordHash)) {
         throw new BadRequestException('New password must differ from the current password');
       }
 
-      const passwordHash = await bcrypt.hash(newPassword, 12);
+      const passwordHash = await bcrypt.hash(normalizedNewPassword, 12);
       await transaction.user.update({ where: { id: userId }, data: { passwordHash } });
       const revokedSession = await transaction.authSession.updateMany({
         where: { id: sessionId, userId, revokedAt: null },

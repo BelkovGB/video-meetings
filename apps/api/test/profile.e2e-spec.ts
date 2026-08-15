@@ -315,6 +315,19 @@ describe('Current user profile (e2e)', () => {
     await loginUser(user.email, newPassword);
   });
 
+  it('permits login after changing to a decomposed Unicode password', async () => {
+    const user = await registerUser('password-change-unicode');
+    const newPassword = 'e\u0301'.repeat(9);
+
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ currentPassword: validPassword, newPassword, confirmation: newPassword })
+      .expect(204);
+
+    await loginUser(user.email, newPassword);
+  });
+
   it('does not allow a client to target another user or change email', async () => {
     const currentUser = await registerUser('profile-owner');
     const anotherUser = await registerUser('profile-target');
