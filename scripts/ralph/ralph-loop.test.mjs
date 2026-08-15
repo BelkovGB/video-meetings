@@ -24,6 +24,7 @@ import {
   createOrReopenReviewIssues,
   executeMode,
   ensureValidationImage,
+  formatFailureSummary,
   githubPagedArray,
   issueBodyWithCompletionState,
   issueBodyWithReviewContext,
@@ -41,6 +42,7 @@ import {
   normalizePhases,
   normalizeReviewResult,
   parseSkillFrontmatter,
+  recoveryPrompt,
   reviewFindingFingerprint,
   reviewFindingMarker,
   renderPrompt,
@@ -52,6 +54,8 @@ import {
   runPhasePlan,
   scopeMilestoneReviewToProduct,
   sanitizedChildEnvironment,
+  summarizeCommandFailure,
+  uniqueFailedTests,
   validationContainerRunArgs,
   validationImageForSnapshot,
   verifyAgentSkills,
@@ -2653,4 +2657,156 @@ test('the milestone review marker records the effective model and effort', () =>
       force: true,
     });
   }
+});
+
+const escape = String.fromCharCode(27);
+const newline = String.fromCharCode(10);
+
+function playwrightFailureOutput() {
+  return [
+    'Running 42 tests using 4 workers',
+    '',
+    `${escape}[31m  1) [chromium] > e2e/profile.spec.ts:42:5 > profile > shows avatar ------${escape}[39m`,
+    '',
+    '    Error: expect(locator).toBeVisible() failed',
+    '',
+    "    Locator: getByRole('img')",
+    '        at ProfilePage.check (e2e/profile.spec.ts:44:12)',
+    '        at runNextTicks (node:internal/process/task_queues:104:5)',
+    '',
+    '    Retry #1 -------------------------------------',
+    '    Error: expect(locator).toBeVisible() failed',
+    '        at ProfilePage.check (e2e/profile.spec.ts:44:12)',
+    '    attachment #1: screenshot (test-results/profile-shows-avatar-chromium/test-failed-1.png)',
+    '',
+    '    Retry #2 -------------------------------------',
+    '    Error: expect(locator).toBeVisible() failed',
+    '',
+    '  1) [chromium] > e2e/profile.spec.ts:42:5 > profile > shows avatar ------',
+    '  2) [mobile] > e2e/files-panel.spec.ts:10:3 > files > uploads ----------',
+    '',
+    '  2 failed',
+    '  40 passed (1.4m)',
+  ].join(newline);
+}
+
+function validationError(output) {
+  return Object.assign(new Error('Команда docker run завершилась с кодом 1.'), {
+    code: 'RALPH_COMMAND_FAILED',
+    status: 1,
+    stdout: output,
+    stderr: '',
+    script: 'test:e2e:web',
+  });
+}
+
+test('a failed validation is stored as a bounded structured summary', () => {
+  const summary = summarizeCommandFailure(validationError(playwrightFailureOutput()));
+
+  assert.equal(summary.command, 'npm run test:e2e:web');
+  assert.equal(summary.exitCode, 1);
+  assert.equal(summary.code, 'RALPH_COMMAND_FAILED');
+  assert.equal(summary.error, 'Error: expect(locator).toBeVisible() failed');
+  assert.deepEqual(summary.failedTests, [
+    '[chromium] > e2e/profile.spec.ts:42:5 > profile > shows avatar',
+    '[mobile] > e2e/files-panel.spec.ts:10:3 > files > uploads',
+  ]);
+  assert.equal(summary.omittedFailedTests, 0);
+  assert.deepEqual(summary.artifacts, [
+    'test-results/profile-shows-avatar-chromium/test-failed-1.png',
+  ]);
+  assert.ok(summary.excerpt.length <= 20);
+  assert.equal(
+    summary.excerpt.some((line) => line.includes(escape)),
+    false,
+    'ANSI colouring must be stripped',
+  );
+  assert.equal(
+    summary.excerpt.some((line) => line.startsWith('at ')),
+    false,
+    'stack frames must be dropped',
+  );
+  assert.equal(
+    summary.excerpt.filter((line) => line === 'Error: expect(locator).toBeVisible() failed').length,
+    1,
+    'identical retry lines must collapse into one',
+  );
+});
+
+test('the rendered failure summary is far smaller than the raw output and points at run.log', () => {
+  const output = [playwrightFailureOutput(), 'noise line '.repeat(4_000)].join(newline);
+  const rendered = formatFailureSummary(summarizeCommandFailure(validationError(output)));
+
+  assert.ok(output.length > 40_000);
+  assert.ok(rendered.length <= 2_100, `summary was ${rendered.length} chars`);
+  assert.match(rendered, /Команда: npm run test:e2e:web/);
+  assert.match(rendered, /Exit code: 1/);
+  assert.match(rendered, /run\.log/);
+});
+
+test('failed tests are deduplicated across retries and bounded with a visible remainder', () => {
+  const many = Array.from(
+    { length: 14 },
+    (_, index) => `  ${index + 1}) [chromium] > e2e/spec-${index}.spec.ts:1:1 > case ${index}`,
+  );
+  const withRetries = [...many, ...many, ...many].join(newline);
+  const { tests, omitted } = uniqueFailedTests(withRetries);
+
+  assert.equal(tests.length, 10);
+  assert.equal(omitted, 4);
+  assert.equal(new Set(tests).size, 10);
+  assert.match(
+    formatFailureSummary(summarizeCommandFailure(validationError(withRetries))),
+    /Упавшие проверки \(показано 10 из 14\):/,
+  );
+});
+
+test('jest and node:test failures are recognized alongside Playwright output', () => {
+  const jest = [
+    'FAIL test/profile.e2e-spec.ts',
+    '  ● profile e2e > rejects an oversized current password',
+    '',
+    '    expect(received).toBe(expected)',
+    '  ● Console',
+    'Tests:       1 failed, 126 passed, 127 total',
+  ].join(newline);
+  assert.deepEqual(uniqueFailedTests(jest).tests, [
+    'profile e2e > rejects an oversized current password',
+  ]);
+
+  const nodeTest = ['✖ config rejects an unsafe model (1.2ms)', 'ℹ fail 1'].join(newline);
+  assert.deepEqual(uniqueFailedTests(nodeTest).tests, ['config rejects an unsafe model']);
+});
+
+test('a failure without command output degrades to the error message', () => {
+  const summary = summarizeCommandFailure(
+    Object.assign(new Error('Изолированный Codex не авторизован.'), {
+      code: 'RALPH_CODEX_AUTH',
+    }),
+  );
+
+  assert.equal(summary.command, null);
+  assert.equal(summary.exitCode, null);
+  assert.equal(summary.code, 'RALPH_CODEX_AUTH');
+  assert.equal(summary.error, 'Изолированный Codex не авторизован.');
+  assert.deepEqual(summary.failedTests, []);
+  assert.match(formatFailureSummary(summary), /Код ошибки: RALPH_CODEX_AUTH/);
+});
+
+test('the recovery prompt carries the summary and tells the agent to rerun only what failed', () => {
+  const summary = summarizeCommandFailure(validationError(playwrightFailureOutput()));
+  const prompt = recoveryPrompt({
+    lastFailure: formatFailureSummary(summary),
+    lastFailureSummary: summary,
+  });
+
+  assert.match(prompt, /## AFK recovery/);
+  assert.match(prompt, /npm run test:e2e:web/);
+  assert.match(prompt, /Сначала повтори только упавшие проверки/);
+  assert.match(prompt, /не дублируй его/);
+  assert.ok(prompt.length < 2_500);
+
+  const withoutFailure = recoveryPrompt({});
+  assert.match(withoutFailure, /процесс завершился до фиксации результата/);
+  assert.equal(/Сначала повтори только упавшие проверки/.test(withoutFailure), false);
 });

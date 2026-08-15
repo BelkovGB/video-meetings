@@ -148,6 +148,162 @@ function outputTail(value, maxLength = 20_000) {
   return text.length > maxLength ? `…${text.slice(-maxLength)}` : text;
 }
 
+// -----------------------------------------------------------------------------
+// Структурированная сводка упавшей проверки
+//
+// Полный вывод остаётся в run.log. В state и в recovery prompt попадает только
+// ограниченная сводка: команда, exit code, уникальные упавшие проверки, основная
+// ошибка, значимые строки и пути к артефактам. Идентичные строки повторных
+// попыток Playwright схлопываются, поэтому retry не раздувает prompt.
+// -----------------------------------------------------------------------------
+
+// ESC + '[' + parameters + final byte. `[[]` is a character class for a literal
+// '[' so the source stays free of escape sequences that tooling can mangle.
+const ansiEscapePattern = new RegExp(`${String.fromCharCode(27)}[[][0-9;]*[A-Za-z]`, 'g');
+
+function stripAnsi(value) {
+  return String(value ?? '').replace(ansiEscapePattern, '');
+}
+
+function significantOutputLines(text) {
+  const seen = new Set();
+  const lines = [];
+  for (const raw of stripAnsi(text).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === '') continue;
+    if (/^[\s\-─━=_*.·•#|+]+$/.test(line)) continue;
+    if (/^at\s/.test(line)) continue;
+    if (/^npm (?:notice|warn|info|WARN)\b/.test(line)) continue;
+    if (seen.has(line)) continue;
+    seen.add(line);
+    lines.push(line);
+  }
+  return lines;
+}
+
+const failedTestPatterns = [
+  // Playwright: "  1) [chromium] › e2e/profile.spec.ts:42:5 › shows avatar ────"
+  /^\s*\d+\)\s+(.+)$/,
+  // Jest: "  ● profile e2e › rejects an oversized password"
+  /^\s*●\s+(.+)$/,
+  // node:test: "✖ my test (1.2ms)"
+  /^\s*[✖✗×]\s+(.+)$/,
+];
+
+function uniqueFailedTests(text, limit = 10) {
+  const seen = new Set();
+  const all = [];
+  for (const line of stripAnsi(text).split(/\r?\n/)) {
+    for (const pattern of failedTestPatterns) {
+      const match = pattern.exec(line);
+      if (!match) continue;
+      const title = match[1]
+        .replace(/[\s\-─━]+$/, '')
+        .replace(/\s+\(\d+(?:\.\d+)?ms\)$/, '')
+        .trim();
+      if (title === '' || /^console$/i.test(title)) break;
+      if (!seen.has(title)) {
+        seen.add(title);
+        all.push(title);
+      }
+      break;
+    }
+  }
+  return { tests: all.slice(0, limit), omitted: Math.max(0, all.length - limit) };
+}
+
+function failureArtifacts(text, limit = 5) {
+  // Backslashes are normalized first so one slash-only pattern covers Windows and
+  // POSIX paths, and the keyword must be a directory segment: a bare word
+  // "screenshot" in prose is not an artifact path.
+  const normalized = stripAnsi(text).split(String.fromCharCode(92)).join('/');
+  const matches =
+    normalized.match(/[^\s"'(),]*(?:test-results|playwright-report|screenshot)\/[^\s"'(),]*/gi) ??
+    [];
+  return [...new Set(matches)].slice(0, limit);
+}
+
+function primaryErrorLine(lines) {
+  return (
+    lines.find((line) => /\berror TS\d+\b/.test(line)) ??
+    lines.find((line) =>
+      /^(?:Error|AssertionError|TypeError|ReferenceError|SyntaxError|RangeError)\b/.test(line),
+    ) ??
+    lines.find((line) => /\b(?:Error|error|failed|FAIL|Ошибка)\b/.test(line)) ??
+    lines[0] ??
+    null
+  );
+}
+
+function summarizeCommandFailure(error, options = {}) {
+  const maxLines = options.maxLines ?? 20;
+  const output =
+    [error?.stdout, error?.stderr].filter(Boolean).join('\n').trim() ||
+    stripAnsi(error?.message ?? '');
+  const lines = significantOutputLines(output);
+  const { tests, omitted } = uniqueFailedTests(output);
+  const primary = primaryErrorLine(lines) ?? String(error?.message ?? '').split(/\r?\n/)[0] ?? '';
+  return {
+    command: error?.script ? `npm run ${error.script}` : (options.command ?? null),
+    exitCode: Number.isInteger(error?.status) ? error.status : null,
+    code: error?.code ?? null,
+    error: primary.length > 300 ? `${primary.slice(0, 300)}…` : primary,
+    failedTests: tests,
+    omittedFailedTests: omitted,
+    excerpt: lines.slice(-maxLines),
+    artifacts: failureArtifacts(output),
+  };
+}
+
+function formatFailureSummary(summary, maxChars = 2_000) {
+  const parts = [];
+  if (summary.command) parts.push(`Команда: ${summary.command}`);
+  if (summary.exitCode !== null) parts.push(`Exit code: ${summary.exitCode}`);
+  else if (summary.code) parts.push(`Код ошибки: ${summary.code}`);
+  if (summary.error) parts.push(`Ошибка: ${summary.error}`);
+  if (summary.failedTests.length > 0) {
+    const total = summary.failedTests.length + summary.omittedFailedTests;
+    parts.push(
+      `Упавшие проверки${summary.omittedFailedTests > 0 ? ` (показано ${summary.failedTests.length} из ${total})` : ''}:`,
+    );
+    parts.push(...summary.failedTests.map((test) => `- ${test}`));
+  }
+  if (summary.excerpt.length > 0) {
+    parts.push('Значимые строки вывода:');
+    parts.push(...summary.excerpt.map((line) => `  ${line}`));
+  }
+  if (summary.artifacts.length > 0) {
+    parts.push(`Артефакты: ${summary.artifacts.join(', ')}`);
+  }
+  parts.push('Полный вывод сохранён в .git/ralph-loop/run.log.');
+  const text = parts.join('\n');
+  return text.length > maxChars
+    ? `${text.slice(0, maxChars)}\n… сводка усечена; полный вывод в run.log.`
+    : text;
+}
+
+function recordedFailure(error, options = {}) {
+  const summary = summarizeCommandFailure(error, options);
+  return { lastFailure: formatFailureSummary(summary), lastFailureSummary: summary };
+}
+
+const clearedFailure = { lastFailure: null, lastFailureSummary: null };
+
+function recoveryPrompt(storedIssue) {
+  const failure = storedIssue?.lastFailure ?? 'процесс завершился до фиксации результата';
+  const failedTests = storedIssue?.lastFailureSummary?.failedTests ?? [];
+  const focus =
+    failedTests.length > 0
+      ? '\n\nСначала повтори только упавшие проверки из списка выше. Полный набор ' +
+        'validationScripts запускает оркестратор; не дублируй его.'
+      : '';
+  return (
+    '\n\n## AFK recovery\n\nЭто продолжение незавершённой сессии Ralph. Не сбрасывай ' +
+    'существующие изменения. Изучи текущий git diff, продолжи реализацию той же issue ' +
+    `и исправь последний сбой оркестратора:\n\n${failure}${focus}`
+  );
+}
+
 const sanitizedChildEnvironmentVariables = [
   'PATH',
   'Path',
@@ -1318,6 +1474,7 @@ function createStateStore(config, selectedMode, statePath = runtimeStatePath) {
         validationFixAttempts: 0,
         agentAttempts: 0,
         lastFailure: null,
+        lastFailureSummary: null,
         commit: null,
         pushedHead: null,
         expectedTree: null,
@@ -1453,7 +1610,7 @@ function reconcileStateAfterCrash(config, stateStore = activeStateStore) {
       );
     }
     const commit = validateRecoveredCommit(storedIssue, storedIssue, currentHead);
-    stateStore.updateIssue({ phase: 'committed', commit, lastFailure: null });
+    stateStore.updateIssue({ phase: 'committed', commit, ...clearedFailure });
     console.log(`Issue #${storedIssue.number}: распознан commit ${commit} после crash.`);
     return;
   }
@@ -1472,7 +1629,7 @@ function reconcileStateAfterCrash(config, stateStore = activeStateStore) {
     storedIssue,
     run('git', ['rev-parse', 'HEAD']).stdout,
   );
-  stateStore.updateIssue({ phase: 'committed', commit, lastFailure: null });
+  stateStore.updateIssue({ phase: 'committed', commit, ...clearedFailure });
   console.log(`Issue #${storedIssue.number}: staging завершён commit ${commit} после crash.`);
 }
 
@@ -2254,7 +2411,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
     phase: 'pushed',
     commit,
     pushedHead,
-    lastFailure: null,
+    ...clearedFailure,
   });
 
   if (!config.review.enabled) {
@@ -2282,7 +2439,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
   } catch (error) {
     activeStateStore?.updateIssue({
       phase: 'pushed',
-      lastFailure: error.message,
+      ...recordedFailure(error),
     });
     try {
       reopenIssueWithComment(
@@ -2379,7 +2536,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       activeStateStore?.updateIssue({
         phase: 'working-tree',
         validationFixAttempts: attempts,
-        lastFailure: error.message,
+        ...recordedFailure(error),
       });
       if (attempts >= config.maxTestFixAttempts) throw error;
       console.error(
@@ -2402,7 +2559,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     activeStateStore?.updateIssue({
       phase: 'working-tree',
       validationFixAttempts: attempts,
-      lastFailure: error.message,
+      ...recordedFailure(error),
     });
     if (attempts >= config.maxTestFixAttempts) throw error;
     console.error(
@@ -2458,7 +2615,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     phase: 'committed',
     commit,
     pushedHead: null,
-    lastFailure: null,
+    ...clearedFailure,
   });
   return reviewAndCloseCommittedIssue(config, repository, issue, commit);
 }
@@ -2484,7 +2641,7 @@ async function runCodex(config, repository, issue, rules) {
     try {
       runConfiguredValidation(config);
     } catch (error) {
-      activeStateStore.updateIssue({ phase: resumePhase, lastFailure: error.message });
+      activeStateStore.updateIssue({ phase: resumePhase, ...recordedFailure(error) });
       throw error;
     }
     return reviewAndCloseCommittedIssue(config, repository, issue, commit);
@@ -2529,11 +2686,7 @@ async function runCodex(config, repository, issue, rules) {
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
   try {
     codexResult = await runCodexWithTurnLimit(developmentCodexArguments(config), {
-      input:
-        renderPrompt(config, issue, rules) +
-        (continuation
-          ? `\n\n## AFK recovery\n\nЭто продолжение незавершённой сессии Ralph. Не сбрасывай существующие изменения. Изучи текущий git diff, продолжи реализацию той же issue и исправь последний сбой оркестратора:\n\n${storedIssue.lastFailure ?? 'процесс завершился до фиксации результата'}`
-          : ''),
+      input: renderPrompt(config, issue, rules) + (continuation ? recoveryPrompt(storedIssue) : ''),
       maxTurns: config.maxTurns,
       timeoutMs: config.runtime.codexTimeoutMs,
       label: `Codex issue #${issue.number}`,
@@ -2541,7 +2694,7 @@ async function runCodex(config, repository, issue, rules) {
   } catch (error) {
     activeStateStore?.updateIssue({
       phase: 'working-tree',
-      lastFailure: error.message,
+      ...recordedFailure(error),
     });
     if (error.code === 'RALPH_CODEX_AUTH') {
       throw error;
@@ -2565,7 +2718,7 @@ async function runCodex(config, repository, issue, rules) {
         'хотя development-сессия запущена с danger-full-access.',
     );
     error.code = 'RALPH_AGENT_WRITE_ACCESS';
-    activeStateStore?.updateIssue({ phase: 'working-tree', lastFailure: error.message });
+    activeStateStore?.updateIssue({ phase: 'working-tree', ...recordedFailure(error) });
     throw error;
   }
 
@@ -3947,6 +4100,10 @@ export {
   runContinuousLoop,
   runPhasePlan,
   scopeMilestoneReviewToProduct,
+  formatFailureSummary,
+  recoveryPrompt,
+  summarizeCommandFailure,
+  uniqueFailedTests,
   sanitizedChildEnvironment,
   agentReportedWriteAccessFailure,
   validationContainerRunArgs,
