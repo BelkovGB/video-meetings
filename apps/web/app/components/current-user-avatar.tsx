@@ -2,19 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-type Avatar = {
-  mimeType: string;
-  sizeBytes: number;
-  updatedAt: string;
-};
+import { apiUrl } from '../../lib/api/config';
+import type { Avatar } from '../../lib/api/contracts';
 
 type CurrentUserAvatarProps = {
   avatar: Avatar | null;
   displayName: string | null;
   className?: string;
 };
-
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
 export function CurrentUserAvatar({ avatar, displayName, className = '' }: CurrentUserAvatarProps) {
   const [image, setImage] = useState<{ url: string; updatedAt: string } | null>(null);

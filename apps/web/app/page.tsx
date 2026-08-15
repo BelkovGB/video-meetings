@@ -15,30 +15,15 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { apiUrl } from '../lib/api/config';
+import type { ApiError, CurrentUserProfile, Meeting } from '../lib/api/contracts';
 import { CurrentUserAvatar } from './components/current-user-avatar';
-
-type Meeting = {
-  id: string;
-  title: string;
-  date: string;
-  accessRole: 'owner' | 'participant';
-};
-
-type ApiError = {
-  message?: string | string[];
-};
-
-type CurrentUserProfile = {
-  displayName: string | null;
-  avatar: { mimeType: string; sizeBytes: number; updatedAt: string } | null;
-};
 
 type FormErrors = {
   title?: string;
   date?: string;
 };
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 const meetingDateMin = '2000-01-01T00:00';
 const meetingDateMax = '2100-12-31T23:59';
 

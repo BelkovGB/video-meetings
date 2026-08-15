@@ -3,18 +3,13 @@
 import { useRouter } from 'next/navigation';
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
 
-export type UploadedMeetingFile = {
-  id: string;
-  name: string;
-  category: 'audio' | 'video' | 'transcript' | 'document';
-  mimeType: string;
-  sizeBytes: number;
-  uploadedAt: string;
-};
+import { apiUrl } from '../../../lib/api/config';
+import type { MeetingFile, UploadApiError } from '../../../lib/api/contracts';
+import { formatFileSize } from '../../../lib/format/file-size';
 
 type MeetingFileUploadProps = {
   meetingId: string;
-  onUploaded: (file: UploadedMeetingFile) => void;
+  onUploaded: (file: MeetingFile) => void;
   onError: (message: string) => void;
   onStart: () => void;
 };
@@ -28,12 +23,6 @@ type UploadState = {
   phase: UploadPhase;
 };
 
-type UploadApiError = {
-  code?: string;
-  message?: string | string[];
-};
-
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 const maxUploadBytes = 1_073_741_824;
 const minimumProcessingFeedbackMs = 600;
 const acceptedExtensions = [
@@ -122,19 +111,6 @@ function getServerErrorMessage(status: number, error: UploadApiError | null): st
   }
 
   return 'Не удалось загрузить файл. Попробуйте ещё раз.';
-}
-
-function formatFileSize(sizeBytes: number): string {
-  const units = ['Б', 'КБ', 'МБ', 'ГБ'];
-  let value = sizeBytes;
-  let unitIndex = 0;
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-
-  return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(value)} ${units[unitIndex]}`;
 }
 
 function getPhaseMessage(upload: UploadState): string {
@@ -258,7 +234,7 @@ export function MeetingFileUpload({
           return;
         }
 
-        const uploadedFile = request.response as UploadedMeetingFile | null;
+        const uploadedFile = request.response as MeetingFile | null;
         if (!uploadedFile?.id) {
           setUpload((currentUpload) =>
             currentUpload ? { ...currentUpload, phase: 'error' } : currentUpload,

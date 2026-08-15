@@ -5,26 +5,14 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
-import { MeetingFileUpload, type UploadedMeetingFile } from './meeting-file-upload';
-
-type Meeting = {
-  id: string;
-  title: string;
-  date: string;
-  accessRole: 'owner' | 'participant';
-};
-
-type MeetingFile = UploadedMeetingFile;
-
-type ApiError = {
-  message?: string | string[];
-};
+import { apiUrl } from '../../../lib/api/config';
+import type { ApiError, Meeting, MeetingFile } from '../../../lib/api/contracts';
+import { formatFileSize } from '../../../lib/format/file-size';
+import { MeetingFileUpload } from './meeting-file-upload';
 
 type MeetingFilesPageProps = {
   meetingId: string;
 };
-
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
 const categoryLabels: Record<Exclude<MeetingFile['category'], 'document'>, string> = {
   audio: 'Аудиозапись',
@@ -67,19 +55,6 @@ function formatMeetingDate(date: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(date));
-}
-
-function formatFileSize(sizeBytes: number): string {
-  const units = ['Б', 'КБ', 'МБ', 'ГБ'];
-  let value = sizeBytes;
-  let unitIndex = 0;
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-
-  return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(value)} ${units[unitIndex]}`;
 }
 
 function formatUploadDate(date: string): string {

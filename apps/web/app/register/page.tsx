@@ -5,11 +5,9 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useRef, useState } from 'react';
 
-type ApiError = {
-  message?: string | string[];
-};
+import { apiUrl } from '../../lib/api/config';
+import type { ApiError } from '../../lib/api/contracts';
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 const minimumPasswordLength = 9;
 const maximumPasswordBytes = 72;
 

@@ -2,11 +2,8 @@
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
 
-type Avatar = {
-  mimeType: string;
-  sizeBytes: number;
-  updatedAt: string;
-};
+import { apiUrl } from '../../lib/api/config';
+import type { Avatar } from '../../lib/api/contracts';
 
 type AvatarUploadFormProps = {
   avatar: Avatar | null;
@@ -15,7 +12,6 @@ type AvatarUploadFormProps = {
   onUnauthorized: () => void;
 };
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 const maxAvatarBytes = 5 * 1024 * 1024;
 const acceptedTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 

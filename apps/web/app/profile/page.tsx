@@ -3,20 +3,14 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { apiUrl } from '../../lib/api/config';
+import type { CurrentUserProfile } from '../../lib/api/contracts';
 import { CurrentUserAvatar } from '../components/current-user-avatar';
 import { AvatarUploadForm } from './avatar-upload-form';
 
-type Profile = {
-  email: string;
-  displayName: string | null;
-  avatar: { mimeType: string; sizeBytes: number; updatedAt: string } | null;
-};
-
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-
 export default function ProfilePage() {
   const router = useRouter();
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const [profile, setProfile] = useState<CurrentUserProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -55,7 +49,7 @@ export default function ProfilePage() {
           throw new Error('Unable to load profile');
         }
 
-        const currentProfile = (await response.json()) as Profile;
+        const currentProfile = (await response.json()) as CurrentUserProfile;
         if (isActive) {
           setProfile(currentProfile);
           setDisplayNameInput(currentProfile.displayName ?? '');
@@ -133,7 +127,7 @@ export default function ProfilePage() {
         return;
       }
 
-      const updatedProfile = (await response.json()) as Profile;
+      const updatedProfile = (await response.json()) as CurrentUserProfile;
       setProfile(updatedProfile);
       setDisplayNameInput(updatedProfile.displayName ?? '');
       sessionStorage.setItem('userDisplayName', updatedProfile.displayName ?? '');
