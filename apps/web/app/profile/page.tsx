@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { CurrentUserAvatar } from '../components/current-user-avatar';
+import { AvatarUploadForm } from './avatar-upload-form';
 
 type Profile = {
   email: string;
@@ -191,6 +192,12 @@ export default function ProfilePage() {
   }
 
   const displayName = profile.displayName?.trim() || 'Не указано';
+  const handleUnauthorized = () => {
+    sessionStorage.removeItem('accessToken');
+    sessionStorage.removeItem('userEmail');
+    sessionStorage.removeItem('userDisplayName');
+    router.replace('/login');
+  };
 
   return (
     <main className="min-h-dvh bg-slate-950 px-5 py-5 text-white sm:px-8 sm:py-8">
@@ -302,6 +309,11 @@ export default function ProfilePage() {
                 </button>
               </div>
             </form>
+            <AvatarUploadForm
+              avatar={profile.avatar}
+              onAvatarSaved={(updatedProfile) => setProfile(updatedProfile)}
+              onUnauthorized={handleUnauthorized}
+            />
             <div className="grid gap-2 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center">
               <p className="text-sm font-medium text-slate-600">Email</p>
               <div>

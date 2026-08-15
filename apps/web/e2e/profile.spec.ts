@@ -197,6 +197,100 @@ test('renders the current-user avatar with accessible image and fallback states'
   await expect(avatar).toHaveText('?');
 });
 
+test('uploads, previews, replaces, validates, and synchronizes the current-user avatar', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-avatar-upload');
+  const image = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL9HwAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const firstAvatar = {
+    mimeType: 'image/png',
+    sizeBytes: image.length,
+    updatedAt: '2026-08-15T10:00:00.000Z',
+  };
+  const replacementAvatar = { ...firstAvatar, updatedAt: '2026-08-15T10:01:00.000Z' };
+  let avatar = null as typeof firstAvatar | null;
+  let failUpload = false;
+
+  await page.route('**/users/me', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ email: session.email, displayName: 'Алексей', avatar }),
+    });
+  });
+  await page.route('**/users/me/avatar', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ status: 200, contentType: 'image/png', body: image });
+      return;
+    }
+    if (failUpload) {
+      await route.fulfill({
+        status: 422,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Сервер отклонил аватар.' }),
+      });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    avatar = avatar ? replacementAvatar : firstAvatar;
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({ email: session.email, displayName: 'Алексей', avatar }),
+    });
+  });
+  await authenticate(page, session);
+  await page.goto('/profile');
+
+  const avatarInput = page.getByLabel('Выбрать файл аватара');
+  await avatarInput.setInputFiles({ name: 'avatar.png', mimeType: 'image/png', buffer: image });
+  await expect(page.getByTestId('avatar-preview')).toHaveAttribute('src', /^blob:/);
+  await page.getByRole('button', { name: 'Загрузить аватар' }).click();
+  await expect(page.getByRole('button', { name: 'Загружаем аватар…' })).toBeDisabled();
+  await expect(avatarInput).toBeDisabled();
+  await expect(page.getByText('Аватар сохранён.', { exact: true })).toBeVisible();
+  await expect(page.getByTestId('current-user-avatar')).toHaveAttribute('src', /^blob:/);
+
+  await avatarInput.setInputFiles({ name: 'avatar-2.png', mimeType: 'image/png', buffer: image });
+  await page.getByRole('button', { name: 'Заменить аватар' }).click();
+  await expect(page.getByText('Аватар обновлён.', { exact: true })).toBeVisible();
+
+  await avatarInput.setInputFiles({ name: 'avatar.txt', mimeType: 'text/plain', buffer: image });
+  await expect(page.locator('#avatar-upload-error')).toContainText(
+    'Выберите изображение в формате JPEG, PNG или WebP.',
+  );
+  await expect(avatarInput).toBeFocused();
+  await expect(page.getByTestId('current-user-avatar')).toHaveAttribute('src', /^blob:/);
+
+  await avatarInput.setInputFiles({
+    name: 'large.png',
+    mimeType: 'image/png',
+    buffer: Buffer.alloc(5 * 1024 * 1024 + 1),
+  });
+  await expect(page.locator('#avatar-upload-error')).toContainText(
+    'Размер файла не должен превышать 5 МБ.',
+  );
+
+  failUpload = true;
+  await avatarInput.setInputFiles({ name: 'avatar-3.png', mimeType: 'image/png', buffer: image });
+  await page.getByRole('button', { name: 'Заменить аватар' }).click();
+  await expect(page.locator('#avatar-upload-error')).toContainText('Сервер отклонил аватар.');
+  await expect(page.getByTestId('current-user-avatar')).toHaveAttribute('src', /^blob:/);
+
+  await page.getByRole('link', { name: 'К встречам' }).click();
+  await expect(
+    page.locator('a[href="/profile"]').getByTestId('current-user-avatar'),
+  ).toHaveAttribute('src', /^blob:/);
+});
+
 test('manages the display name while preserving saved profile details', async ({
   page,
   request,
