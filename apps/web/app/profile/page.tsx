@@ -3,10 +3,12 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { CurrentUserAvatar } from '../components/current-user-avatar';
 
 type Profile = {
   email: string;
   displayName: string | null;
+  avatar: { mimeType: string; sizeBytes: number; updatedAt: string } | null;
 };
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
@@ -217,10 +219,19 @@ export default function ProfilePage() {
             </p>
           </div>
           <div className="rounded-3xl border border-cyan-200/15 bg-white/10 p-6 shadow-xl shadow-slate-950/20 backdrop-blur-sm">
-            <p className="text-sm font-medium text-slate-300">Текущее имя</p>
-            <p className="mt-3 break-words text-3xl font-semibold tracking-tight text-white">
-              {displayName}
-            </p>
+            <div className="flex items-center gap-4">
+              <CurrentUserAvatar
+                avatar={profile.avatar}
+                displayName={profile.displayName}
+                className="h-16 w-16 text-2xl"
+              />
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-slate-300">Текущее имя</p>
+                <p className="mt-1 break-words text-3xl font-semibold tracking-tight text-white">
+                  {displayName}
+                </p>
+              </div>
+            </div>
           </div>
         </section>
 

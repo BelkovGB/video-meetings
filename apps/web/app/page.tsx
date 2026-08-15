@@ -15,6 +15,7 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { CurrentUserAvatar } from './components/current-user-avatar';
 
 type Meeting = {
   id: string;
@@ -29,6 +30,7 @@ type ApiError = {
 
 type CurrentUserProfile = {
   displayName: string | null;
+  avatar: { mimeType: string; sizeBytes: number; updatedAt: string } | null;
 };
 
 type FormErrors = {
@@ -93,6 +95,8 @@ function getApiErrorMessage(error: ApiError) {
 export default function DashboardPage() {
   const router = useRouter();
   const [identity, setIdentity] = useState('');
+  const [displayName, setDisplayName] = useState<string | null>(null);
+  const [avatar, setAvatar] = useState<CurrentUserProfile['avatar']>(null);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadAttempts, setLoadAttempts] = useState(0);
@@ -115,8 +119,9 @@ export default function DashboardPage() {
     }
 
     const email = sessionStorage.getItem('userEmail') ?? getEmailFromToken(token);
-    const displayName = sessionStorage.getItem('userDisplayName')?.trim();
-    setIdentity(displayName || email);
+    const savedDisplayName = sessionStorage.getItem('userDisplayName')?.trim() || null;
+    setDisplayName(savedDisplayName);
+    setIdentity(savedDisplayName || email);
     let isDashboardActive = true;
     const currentUserRequest = new AbortController();
 
@@ -151,7 +156,7 @@ export default function DashboardPage() {
         if (!isDashboardActive) {
           return;
         }
-        const savedDisplayName = profile.displayName?.trim();
+        const savedDisplayName = profile.displayName?.trim() || null;
 
         if (savedDisplayName) {
           sessionStorage.setItem('userDisplayName', savedDisplayName);
@@ -159,6 +164,8 @@ export default function DashboardPage() {
           sessionStorage.removeItem('userDisplayName');
         }
 
+        setDisplayName(savedDisplayName);
+        setAvatar(profile.avatar);
         setIdentity(savedDisplayName || email);
       } catch {
         // Keep the locally available identity while the profile service is unavailable.
@@ -316,8 +323,13 @@ export default function DashboardPage() {
           <div className="flex flex-wrap items-center gap-2">
             <Link
               href="/profile"
-              className="inline-flex min-h-11 touch-manipulation items-center justify-center rounded-xl border border-white/15 px-4 text-sm font-semibold text-slate-200 transition duration-200 hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300 focus:ring-offset-2 focus:ring-offset-slate-950"
+              className="inline-flex min-h-11 touch-manipulation items-center justify-center gap-2 rounded-xl border border-white/15 px-3 text-sm font-semibold text-slate-200 transition duration-200 hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300 focus:ring-offset-2 focus:ring-offset-slate-950"
             >
+              <CurrentUserAvatar
+                avatar={avatar}
+                displayName={displayName}
+                className="h-7 w-7 text-xs"
+              />
               Открыть профиль
             </Link>
             <button

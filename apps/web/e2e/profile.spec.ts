@@ -78,6 +78,86 @@ test.afterAll(async () => {
   await prisma.$disconnect();
 });
 
+test('renders the current-user avatar with accessible image and fallback states', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-avatar');
+  const avatarImage = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL9HwAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  let profileResponse: { displayName: string | null; avatar: object | null } = {
+    displayName: 'Алексей',
+    avatar: {
+      mimeType: 'image/png',
+      sizeBytes: avatarImage.length,
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  let avatarResponse: 'image' | 'error' = 'image';
+
+  await page.route('**/users/me', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ email: session.email, ...profileResponse }),
+    });
+  });
+  await page.route('**/users/me/avatar', async (route) => {
+    if (avatarResponse === 'error') {
+      await route.fulfill({ status: 500 });
+      return;
+    }
+
+    await route.fulfill({ status: 200, contentType: 'image/png', body: avatarImage });
+  });
+  await authenticate(page, session);
+
+  await page.goto('/profile');
+  const avatar = page.getByTestId('current-user-avatar');
+  await expect(avatar).toHaveAccessibleName('Аватар пользователя Алексей');
+  await expect(avatar).toHaveAttribute('src', /^blob:/);
+
+  await page.goto('/');
+  const accountEntry = page.locator('a[href="/profile"]');
+  await expect(
+    accountEntry.getByRole('img', { name: 'Аватар пользователя Алексей' }),
+  ).toHaveAttribute('src', /^blob:/);
+  await accountEntry.focus();
+  await expect(accountEntry).toBeFocused();
+
+  profileResponse = { displayName: 'Нина', avatar: null };
+  await page.goto('/profile');
+  await expect(avatar).toHaveAccessibleName('Аватар пользователя Нина');
+  await expect(avatar).toHaveText('Н');
+  await expect(avatar).not.toHaveAttribute('src');
+
+  profileResponse = {
+    displayName: 'Мария',
+    avatar: {
+      mimeType: 'image/png',
+      sizeBytes: avatarImage.length,
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  avatarResponse = 'error';
+  await page.reload();
+  await expect(avatar).toHaveAccessibleName('Аватар пользователя Мария');
+  await expect(avatar).toHaveText('М');
+  await expect(avatar).not.toHaveAttribute('src');
+
+  profileResponse = { displayName: null, avatar: null };
+  await page.reload();
+  await expect(avatar).toHaveAccessibleName('Аватар пользователя, имя не указано');
+  await expect(avatar).toHaveText('?');
+});
+
 test('manages the display name while preserving saved profile details', async ({
   page,
   request,
