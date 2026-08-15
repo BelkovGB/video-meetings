@@ -603,6 +603,7 @@ function collectTrustedControlFileHashes(config) {
     path.join(scriptDirectory, 'ralph-process-runner.mjs'),
     path.join(scriptDirectory, 'ralph-runtime.mjs'),
     path.join(scriptDirectory, 'ralph-scope.mjs'),
+    path.join(scriptDirectory, 'ralph-state-store.mjs'),
     path.join(scriptDirectory, 'ralph-validation-docker-shim.sh'),
     path.join(scriptDirectory, 'ralph-validation-entrypoint.sh'),
     path.join(projectRoot, '.agents', 'RALPH.md'),
