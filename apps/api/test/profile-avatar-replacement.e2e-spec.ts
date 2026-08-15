@@ -61,11 +61,9 @@ describe('ProfileService avatar replacement', () => {
     await expect(service.uploadAvatar(userId, file)).rejects.toThrow(storageError);
 
     expect(prisma.user.update).not.toHaveBeenCalled();
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
     expect(avatars.discard).not.toHaveBeenCalledWith(existingStorageKey);
-    expect(prisma.avatarStorageReservation.delete).toHaveBeenCalledWith({
-      where: { storageKey: expect.any(String) },
-    });
+    expect(prisma.avatarStorageReservation.delete).not.toHaveBeenCalled();
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
   });
 
@@ -78,9 +76,7 @@ describe('ProfileService avatar replacement', () => {
     expect(prisma.user.update).toHaveBeenCalledTimes(1);
     expect(avatars.discard).toHaveBeenCalledWith(expect.any(String));
     expect(avatars.discard).not.toHaveBeenCalledWith(existingStorageKey);
-    expect(prisma.avatarStorageReservation.delete).toHaveBeenCalledWith({
-      where: { storageKey: expect.any(String) },
-    });
+    expect(prisma.avatarStorageReservation.delete).not.toHaveBeenCalled();
     expect(avatars.discardTemp).toHaveBeenCalledWith(file.path);
   });
 
@@ -180,6 +176,6 @@ describe('ProfileService avatar replacement', () => {
 
     expect(avatars.discard).toHaveBeenCalledWith(existingStorageKey);
     expect(avatars.discard).toHaveBeenCalledWith('first-avatar');
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(4);
   });
 });

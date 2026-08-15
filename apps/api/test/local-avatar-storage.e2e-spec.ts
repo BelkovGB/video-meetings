@@ -107,14 +107,17 @@ describe('LocalAvatarStorageService', () => {
   it('keeps a finalized replacement reserved while another storage instance reconciles', async () => {
     const reservedKey = `${storageKey}-reserved`;
     const reservedTempPath = join(avatarConfig.tempDirectory, `${reservedKey}.part`);
-    const prisma = {
+    const prisma: any = {};
+    Object.assign(prisma, {
+      $transaction: jest.fn(async (operation: (client: any) => unknown) => operation(prisma)),
+      $queryRaw: jest.fn().mockResolvedValue([{ locked: true }]),
       avatarStorageReservation: {
-        findMany: jest.fn().mockResolvedValue([{ storageKey: reservedKey }]),
+        findUnique: jest.fn().mockResolvedValue({ createdAt: new Date() }),
       },
       user: {
-        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
       },
-    };
+    });
 
     try {
       await writeFile(reservedTempPath, content);
@@ -131,19 +134,58 @@ describe('LocalAvatarStorageService', () => {
     }
   });
 
+  it('removes a stale finalized replacement left after an interrupted switch', async () => {
+    const staleKey = `${storageKey}-stale-reservation`;
+    const staleTempPath = join(avatarConfig.tempDirectory, `${staleKey}.part`);
+    const createdAt = new Date(Date.now() - avatarConfig.temporaryUploadGraceMs - 1_000);
+    const prisma: any = {};
+    Object.assign(prisma, {
+      $transaction: jest.fn(async (operation: (client: any) => unknown) => operation(prisma)),
+      $queryRaw: jest.fn().mockResolvedValue([{ locked: true }]),
+      avatarStorageReservation: {
+        findUnique: jest.fn().mockResolvedValue({ createdAt }),
+        delete: jest.fn().mockResolvedValue(undefined),
+      },
+      user: {
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+    });
+
+    try {
+      await writeFile(staleTempPath, content);
+      await storage.finalize(staleTempPath, staleKey);
+      await utimes(join(avatarConfig.directory, staleKey), createdAt, createdAt);
+
+      await new LocalAvatarStorageService(prisma as never).onModuleInit();
+
+      await expect(storage.open(staleKey)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(prisma.avatarStorageReservation.delete).toHaveBeenCalledWith({
+        where: { storageKey: staleKey },
+      });
+    } finally {
+      await storage.discardTemp(staleTempPath);
+      await storage.discard(staleKey);
+    }
+  });
+
   it('removes finalized avatars that are no longer referenced by a user', async () => {
     const retainedKey = `${storageKey}-retained`;
     const orphanedKey = `${storageKey}-orphaned`;
     const retainedTempPath = join(avatarConfig.tempDirectory, `${retainedKey}.part`);
     const orphanedTempPath = join(avatarConfig.tempDirectory, `${orphanedKey}.part`);
-    const prisma = {
+    const prisma: any = {};
+    Object.assign(prisma, {
+      $transaction: jest.fn(async (operation: (client: any) => unknown) => operation(prisma)),
+      $queryRaw: jest.fn().mockResolvedValue([{ locked: true }]),
       avatarStorageReservation: {
-        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
       },
       user: {
-        findMany: jest.fn().mockResolvedValue([{ avatarStorageKey: retainedKey }]),
+        findFirst: jest.fn(({ where }: { where: { avatarStorageKey: string } }) =>
+          Promise.resolve(where.avatarStorageKey === retainedKey ? { id: 'retained-user' } : null),
+        ),
       },
-    };
+    });
 
     try {
       await writeFile(retainedTempPath, content);

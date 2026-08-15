@@ -8,6 +8,7 @@ import {
 import { ReadStream } from 'node:fs';
 import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { Prisma } from '@prisma/client';
 
 import { avatarConfig } from './avatar.config';
 import { PrismaService } from '../prisma/prisma.service';
@@ -183,28 +184,65 @@ export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy 
       return;
     }
 
-    const reservations = await this.prisma.avatarStorageReservation.findMany({
-      select: { storageKey: true },
-    });
-    const users = await this.prisma.user.findMany({
-      where: { avatarStorageKey: { not: null } },
-      select: { avatarStorageKey: true },
-    });
-    const activeKeys = new Set([
-      ...reservations.map((reservation) => reservation.storageKey),
-      ...users.flatMap((user) => (user.avatarStorageKey ? [user.avatarStorageKey] : [])),
-    ]);
     const entries = await readdir(avatarConfig.directory, { withFileTypes: true });
     const staleBefore = Date.now() - avatarConfig.temporaryUploadGraceMs;
     await Promise.all(
       entries.map(async (entry) => {
-        if (entry.isDirectory() && !activeKeys.has(entry.name)) {
-          const path = resolve(avatarConfig.directory, entry.name);
-          const metadata = await stat(path);
-          if (metadata.mtimeMs < staleBefore) {
-            await rm(path, { recursive: true, force: true });
-          }
+        if (!entry.isDirectory()) {
+          return;
         }
+
+        await this.prisma!.$transaction(async (transaction) => {
+          const locks = await transaction.$queryRaw<{ locked: boolean }[]>(
+            Prisma.sql`SELECT pg_try_advisory_xact_lock(hashtextextended(${entry.name}, 0)) AS locked`,
+          );
+          if (!locks[0]?.locked) {
+            return;
+          }
+
+          const [reservation, user] = await Promise.all([
+            transaction.avatarStorageReservation.findUnique({
+              where: { storageKey: entry.name },
+              select: { createdAt: true },
+            }),
+            transaction.user.findFirst({
+              where: { avatarStorageKey: entry.name },
+              select: { id: true },
+            }),
+          ]);
+          if (user) {
+            if (reservation && reservation.createdAt.getTime() < staleBefore) {
+              await transaction.avatarStorageReservation.delete({
+                where: { storageKey: entry.name },
+              });
+            }
+            return;
+          }
+          if (reservation && reservation.createdAt.getTime() >= staleBefore) {
+            return;
+          }
+
+          const path = resolve(avatarConfig.directory, entry.name);
+          let metadata;
+          try {
+            metadata = await stat(path);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              return;
+            }
+            throw error;
+          }
+          if (metadata.mtimeMs >= staleBefore) {
+            return;
+          }
+
+          await rm(path, { recursive: true, force: true });
+          if (reservation) {
+            await transaction.avatarStorageReservation.delete({
+              where: { storageKey: entry.name },
+            });
+          }
+        });
       }),
     );
   }

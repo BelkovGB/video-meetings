@@ -76,10 +76,12 @@ export class ProfileService {
     const updatedAt = new Date();
     let switched = false;
     try {
-      await this.prisma.avatarStorageReservation.create({ data: { storageKey } });
       const existingStorageKey = await this.prisma.$transaction(async (transaction) => {
         await transaction.$executeRaw(
           Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))`,
+        );
+        await transaction.$executeRaw(
+          Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${storageKey}, 0))`,
         );
         const existing = await transaction.user.findUnique({
           where: { id: userId },
@@ -89,6 +91,7 @@ export class ProfileService {
           throw new NotFoundException('User not found');
         }
 
+        await transaction.avatarStorageReservation.create({ data: { storageKey } });
         await this.avatars.finalize(file!.path, storageKey);
         await transaction.user.update({
           where: { id: userId },
@@ -99,15 +102,14 @@ export class ProfileService {
             avatarUpdatedAt: updatedAt,
           },
         });
+        await transaction.avatarStorageReservation.delete({ where: { storageKey } });
         return existing.avatarStorageKey;
       });
       switched = true;
       await this.discardSafely(existingStorageKey);
-      await this.releaseReservationSafely(storageKey);
     } catch (error) {
       if (!switched) {
         await this.discardSafely(storageKey);
-        await this.releaseReservationSafely(storageKey);
       }
       throw error;
     }
@@ -116,14 +118,6 @@ export class ProfileService {
 
   private async discardSafely(storageKey: string | null): Promise<void> {
     await this.avatars.discardEventually(storageKey);
-  }
-
-  private async releaseReservationSafely(storageKey: string): Promise<void> {
-    try {
-      await this.prisma.avatarStorageReservation.delete({ where: { storageKey } });
-    } catch {
-      // The reservation only delays orphan cleanup; keeping it is safer than failing after a switch.
-    }
   }
 
   async openCurrentAvatar(

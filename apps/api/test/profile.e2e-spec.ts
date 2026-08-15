@@ -1,5 +1,5 @@
 import { INestApplication } from '@nestjs/common';
-import { readdir, rm, writeFile } from 'node:fs/promises';
+import { readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
@@ -7,6 +7,7 @@ import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { LocalAvatarStorageService } from '../src/profile/local-avatar-storage.service';
+import { avatarConfig } from '../src/profile/avatar.config';
 import { AvatarValidationService } from '../src/profile/avatar-validation.service';
 import { ProfileService } from '../src/profile/profile.service';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -428,6 +429,68 @@ describe('Current user profile (e2e)', () => {
     } finally {
       finalize.mockRestore();
       await Promise.all([firstPrisma.onModuleDestroy(), secondPrisma.onModuleDestroy()]);
+    }
+  });
+
+  it('does not let another storage instance remove a finalized replacement before its reference commits', async () => {
+    const user = await registerUser('avatar-reconciliation-race');
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
+
+    const storage = app.get(LocalAvatarStorageService);
+    const replacementTempPath = join(avatarUploadRoot, 'temp', `${user.id}-reconciliation.part`);
+    await writeFile(replacementTempPath, validJpeg);
+    const reconciliationPrisma = new PrismaService();
+    await reconciliationPrisma.onModuleInit();
+    const reconciliationStorage = new LocalAvatarStorageService(reconciliationPrisma);
+    await reconciliationStorage.onModuleInit();
+    const originalFinalize = storage.finalize.bind(storage);
+    let releaseFinalize: (() => void) | undefined;
+    const replacementFinalized = new Promise<void>((resolve) => {
+      releaseFinalize = resolve;
+    });
+    let allowCommit: (() => void) | undefined;
+    const commitAllowed = new Promise<void>((resolve) => {
+      allowCommit = resolve;
+    });
+    const finalize = jest.spyOn(storage, 'finalize').mockImplementation(async (path, key) => {
+      await originalFinalize(path, key);
+      const staleAt = new Date(Date.now() - avatarConfig.temporaryUploadGraceMs - 1_000);
+      await utimes(join(avatarUploadRoot, 'files', key), staleAt, staleAt);
+      releaseFinalize?.();
+      await commitAllowed;
+    });
+    const replacementPrisma = new PrismaService();
+    const service = new ProfileService(replacementPrisma, storage, {
+      validate: jest
+        .fn()
+        .mockResolvedValue({ mimeType: 'image/jpeg', sizeBytes: validJpeg.length }),
+    } as unknown as AvatarValidationService);
+
+    try {
+      await replacementPrisma.onModuleInit();
+      const replacement = service.uploadAvatar(user.id, {
+        path: replacementTempPath,
+      } as Express.Multer.File);
+      await replacementFinalized;
+
+      await reconciliationStorage.reconcile();
+      allowCommit?.();
+      await replacement;
+
+      const activeAvatar = await app.get(PrismaService).user.findUniqueOrThrow({
+        where: { id: user.id },
+        select: { avatarStorageKey: true },
+      });
+      await expect(storage.open(activeAvatar.avatarStorageKey!)).resolves.toBeDefined();
+    } finally {
+      finalize.mockRestore();
+      await replacementPrisma.onModuleDestroy();
+      await reconciliationStorage.onModuleDestroy();
+      await reconciliationPrisma.onModuleDestroy();
     }
   });
 
