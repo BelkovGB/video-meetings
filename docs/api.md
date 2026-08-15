@@ -272,6 +272,11 @@ on the same filesystem for an atomic move. The API creates these private
 directories at startup and does not expose either directory through the web
 application.
 
+At startup, the API removes only avatar `.part` files older than
+`AVATAR_TEMPORARY_UPLOAD_GRACE_MS`. This safety window prevents a newly started
+API instance from deleting an upload still being validated by another instance
+that shares the avatar volume.
+
 ## Meeting files
 
 The owner of a meeting and its recorded participants can upload one allowed file
@@ -361,22 +366,23 @@ reconciler retries the hidden deletion after one minute.
 
 ## Local upload configuration
 
-| Variable                         | Default               | Purpose                                          |
-| -------------------------------- | --------------------- | ------------------------------------------------ |
-| `UPLOAD_DIR`                     | `./var/uploads`       | Permanent local file storage.                    |
-| `UPLOAD_TEMP_DIR`                | `./var/uploads-temp`  | Temporary upload storage on the same filesystem. |
-| `UPLOAD_MAX_BYTES`               | `1073741824`          | Per-file byte limit.                             |
-| `UPLOAD_MAX_REQUEST_BYTES`       | `1074790400`          | Multipart request limit, including overhead.     |
-| `UPLOAD_MIN_FREE_BYTES`          | `2147483648`          | Reserved free capacity for the storage volume.   |
-| `UPLOAD_MAX_ACTIVE_UPLOADS`      | `4`                   | Maximum active uploads in one API process.       |
-| `UPLOAD_RECONCILIATION_GRACE_MS` | `86400000`            | Safety window for stale and orphan cleanup.      |
-| `AVATAR_DIR`                     | `./var/avatars/files` | Permanent private avatar storage.                |
-| `AVATAR_TEMP_DIR`                | `./var/avatars/temp`  | Temporary avatar storage on the same filesystem. |
-| `AVATAR_MAX_BYTES`               | `5242880`             | Maximum avatar size (5 MiB).                     |
+| Variable                           | Default               | Purpose                                              |
+| ---------------------------------- | --------------------- | ---------------------------------------------------- |
+| `UPLOAD_DIR`                       | `./var/uploads`       | Permanent local file storage.                        |
+| `UPLOAD_TEMP_DIR`                  | `./var/uploads-temp`  | Temporary upload storage on the same filesystem.     |
+| `UPLOAD_MAX_BYTES`                 | `1073741824`          | Per-file byte limit.                                 |
+| `UPLOAD_MAX_REQUEST_BYTES`         | `1074790400`          | Multipart request limit, including overhead.         |
+| `UPLOAD_MIN_FREE_BYTES`            | `2147483648`          | Reserved free capacity for the storage volume.       |
+| `UPLOAD_MAX_ACTIVE_UPLOADS`        | `4`                   | Maximum active uploads in one API process.           |
+| `UPLOAD_RECONCILIATION_GRACE_MS`   | `86400000`            | Safety window for stale and orphan cleanup.          |
+| `AVATAR_DIR`                       | `./var/avatars/files` | Permanent private avatar storage.                    |
+| `AVATAR_TEMP_DIR`                  | `./var/avatars/temp`  | Temporary avatar storage on the same filesystem.     |
+| `AVATAR_MAX_BYTES`                 | `5242880`             | Maximum avatar size (5 MiB).                         |
+| `AVATAR_TEMPORARY_UPLOAD_GRACE_MS` | `3600000`             | Safety window before stale avatar parts are removed. |
 
 The API creates the directories with private permissions at startup, removes
-leftover avatar `.part` files from interrupted uploads, and refuses to start if
-the temporary and permanent paths are on different filesystems.
+only stale avatar `.part` files from interrupted uploads, and refuses to start
+if the temporary and permanent paths are on different filesystems.
 
 ## Running checks
 

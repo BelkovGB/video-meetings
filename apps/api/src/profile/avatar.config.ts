@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
+const DEFAULT_TEMPORARY_UPLOAD_GRACE_MS = 60 * 60 * 1000;
 
 function readPositiveInteger(name: string, fallback: number): number {
   const value = process.env[name];
@@ -22,4 +23,8 @@ export const avatarConfig = {
   directory: resolve(process.env.AVATAR_DIR ?? resolve(avatarRoot, 'files')),
   tempDirectory: resolve(process.env.AVATAR_TEMP_DIR ?? resolve(avatarRoot, 'temp')),
   maxBytes: readPositiveInteger('AVATAR_MAX_BYTES', DEFAULT_MAX_BYTES),
+  temporaryUploadGraceMs: readPositiveInteger(
+    'AVATAR_TEMPORARY_UPLOAD_GRACE_MS',
+    DEFAULT_TEMPORARY_UPLOAD_GRACE_MS,
+  ),
 };

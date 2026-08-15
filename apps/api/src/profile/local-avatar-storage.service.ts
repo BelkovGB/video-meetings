@@ -83,15 +83,32 @@ export class LocalAvatarStorageService implements OnModuleInit {
 
   private async reconcileTemporaryUploads(): Promise<void> {
     const entries = await readdir(avatarConfig.tempDirectory, { withFileTypes: true });
+    const staleBefore = Date.now() - avatarConfig.temporaryUploadGraceMs;
     await Promise.all(
-      entries
-        .filter((entry) => entry.name.endsWith('.part'))
-        .map((entry) =>
-          rm(resolve(avatarConfig.tempDirectory, entry.name), {
-            recursive: entry.isDirectory(),
-            force: true,
-          }),
-        ),
+      entries.map(async (entry) => {
+        if (!entry.name.endsWith('.part')) {
+          return;
+        }
+
+        const path = resolve(avatarConfig.tempDirectory, entry.name);
+        let metadata;
+        try {
+          metadata = await stat(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            return;
+          }
+          throw error;
+        }
+        if (metadata.mtimeMs >= staleBefore) {
+          return;
+        }
+
+        await rm(path, {
+          recursive: entry.isDirectory(),
+          force: true,
+        });
+      }),
     );
   }
 

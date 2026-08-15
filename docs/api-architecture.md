@@ -78,8 +78,9 @@ WebP content can be decoded and matches the supplied extension and MIME type.
 Only then does `LocalAvatarStorageService` atomically move it to the separate
 private `AVATAR_DIR/<storageKey>/content` object store and the profile service
 writes its metadata to the user row. Failed validation and failed persistence
-discard the candidate or final object; startup removes leftover `.part` files
-from interrupted uploads. Retrieval has only `GET /users/me/avatar`, which
+discard the candidate or final object. Startup removes only `.part` files older
+than the configured safety window, so a second API instance cannot remove an
+active upload on a shared storage volume. Retrieval has only `GET /users/me/avatar`, which
 streams the requesting user's verified object with private, non-sniffable
 headers. Neither the profile response nor the HTTP API exposes storage keys.
 

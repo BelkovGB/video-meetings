@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { avatarConfig } from '../src/profile/avatar.config';
@@ -37,9 +37,19 @@ describe('LocalAvatarStorageService', () => {
 
   it('removes interrupted temporary avatar uploads when storage starts', async () => {
     await writeFile(tempPath, content);
+    const staleAt = new Date(Date.now() - avatarConfig.temporaryUploadGraceMs - 1_000);
+    await utimes(tempPath, staleAt, staleAt);
 
     await new LocalAvatarStorageService().onModuleInit();
 
     await expect(readFile(tempPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps an active temporary upload when another storage instance starts', async () => {
+    await writeFile(tempPath, content);
+
+    await new LocalAvatarStorageService().onModuleInit();
+
+    await expect(readFile(tempPath)).resolves.toEqual(content);
   });
 });
