@@ -1,140 +1,15 @@
 'use client';
 
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { FormEvent, useEffect, useRef, useState } from 'react';
-import { apiUrl } from '../../lib/api/config';
-import type { CurrentUserProfile } from '../../lib/api/contracts';
-import { clearSession, readAccessToken, writeDisplayName } from '../../lib/auth/session';
-import { CurrentUserAvatar } from '../components/current-user-avatar';
-import { AvatarUploadForm } from './avatar-upload-form';
+
+import { AvatarSection } from './avatar-section';
+import { DisplayNameForm } from './display-name-form';
+import { ProfileOverview } from './profile-overview';
+import { useCurrentProfile } from './use-current-profile';
 
 export default function ProfilePage() {
-  const router = useRouter();
-  const [profile, setProfile] = useState<CurrentUserProfile | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [loadAttempt, setLoadAttempt] = useState(0);
-  const [displayNameInput, setDisplayNameInput] = useState('');
-  const [displayNameError, setDisplayNameError] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
-  const displayNameInputRef = useRef<HTMLInputElement>(null);
-  const saveStatusRef = useRef<HTMLParagraphElement>(null);
-
-  useEffect(() => {
-    const token = readAccessToken();
-
-    if (!token) {
-      router.replace('/login');
-      return;
-    }
-
-    let isActive = true;
-
-    const loadProfile = async () => {
-      try {
-        const response = await fetch(`${apiUrl}/users/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        if (response.status === 401) {
-          clearSession();
-          router.replace('/login');
-          return;
-        }
-
-        if (!response.ok) {
-          throw new Error('Unable to load profile');
-        }
-
-        const currentProfile = (await response.json()) as CurrentUserProfile;
-        if (isActive) {
-          setProfile(currentProfile);
-          setDisplayNameInput(currentProfile.displayName ?? '');
-        }
-      } catch {
-        if (isActive) {
-          setLoadError('Не удалось загрузить профиль. Проверьте соединение и повторите попытку.');
-        }
-      } finally {
-        if (isActive) {
-          setIsLoading(false);
-        }
-      }
-    };
-
-    void loadProfile();
-
-    return () => {
-      isActive = false;
-    };
-  }, [loadAttempt, router]);
-
-  useEffect(() => {
-    if (displayNameError && !isSaving) {
-      requestAnimationFrame(() => displayNameInputRef.current?.focus());
-    }
-  }, [displayNameError, isSaving]);
-
-  useEffect(() => {
-    if (saveStatus) {
-      requestAnimationFrame(() => saveStatusRef.current?.focus());
-    }
-  }, [saveStatus]);
-
-  const submitDisplayName = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    const trimmedDisplayName = displayNameInput.trim();
-    if (Array.from(trimmedDisplayName).length < 1 || Array.from(trimmedDisplayName).length > 100) {
-      setDisplayNameError('Введите имя от 1 до 100 символов.');
-      setSaveStatus(null);
-      return;
-    }
-
-    const token = readAccessToken();
-    if (!token) {
-      router.replace('/login');
-      return;
-    }
-
-    setIsSaving(true);
-    setDisplayNameError(null);
-    setSaveStatus(null);
-
-    try {
-      const response = await fetch(`${apiUrl}/users/me`, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ displayName: trimmedDisplayName }),
-      });
-
-      if (response.status === 401) {
-        clearSession();
-        router.replace('/login');
-        return;
-      }
-
-      if (!response.ok) {
-        setDisplayNameError(await getProfileApiError(response));
-        return;
-      }
-
-      const updatedProfile = (await response.json()) as CurrentUserProfile;
-      setProfile(updatedProfile);
-      setDisplayNameInput(updatedProfile.displayName ?? '');
-      writeDisplayName(updatedProfile.displayName ?? '');
-      setSaveStatus(`Имя «${updatedProfile.displayName ?? ''}» сохранено.`);
-    } catch {
-      setDisplayNameError('Не удалось сохранить имя. Проверьте соединение и повторите попытку.');
-    } finally {
-      setIsSaving(false);
-    }
-  };
+  const { profile, setProfile, isLoading, loadError, handleUnauthorized, retryLoad } =
+    useCurrentProfile();
 
   if (isLoading) {
     return (
@@ -162,11 +37,7 @@ export default function ProfilePage() {
             <button
               type="button"
               className="min-h-11 touch-manipulation rounded-xl bg-white px-5 text-sm font-semibold text-slate-950 transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-cyan-300 focus:ring-offset-2 focus:ring-offset-slate-950"
-              onClick={() => {
-                setLoadError(null);
-                setIsLoading(true);
-                setLoadAttempt((attempt) => attempt + 1);
-              }}
+              onClick={retryLoad}
             >
               Повторить
             </button>
@@ -181,12 +52,6 @@ export default function ProfilePage() {
       </main>
     );
   }
-
-  const displayName = profile.displayName?.trim() || 'Не указано';
-  const handleUnauthorized = () => {
-    clearSession();
-    router.replace('/login');
-  };
 
   return (
     <main className="min-h-dvh bg-slate-950 px-5 py-5 text-white sm:px-8 sm:py-8">
@@ -206,30 +71,7 @@ export default function ProfilePage() {
           </Link>
         </header>
 
-        <section className="grid gap-6 py-10 lg:grid-cols-[1fr_0.9fr] lg:items-end lg:py-14">
-          <div>
-            <p className="text-sm font-semibold text-cyan-300">Учётная запись</p>
-            <h1 className="mt-3 text-4xl font-semibold tracking-tight sm:text-5xl">Профиль</h1>
-            <p className="mt-5 max-w-xl text-base leading-7 text-slate-300">
-              Проверьте данные, с которыми вы входите и участвуете во встречах.
-            </p>
-          </div>
-          <div className="rounded-3xl border border-cyan-200/15 bg-white/10 p-6 shadow-xl shadow-slate-950/20 backdrop-blur-sm">
-            <div className="flex items-center gap-4">
-              <CurrentUserAvatar
-                avatar={profile.avatar}
-                displayName={profile.displayName}
-                className="h-16 w-16 text-2xl"
-              />
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-slate-300">Текущее имя</p>
-                <p className="mt-1 break-words text-3xl font-semibold tracking-tight text-white">
-                  {displayName}
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
+        <ProfileOverview profile={profile} />
 
         <section
           aria-labelledby="profile-details-title"
@@ -240,74 +82,16 @@ export default function ProfilePage() {
             Ваши данные
           </h2>
           <div className="mt-7 divide-y divide-slate-200">
-            <form
-              className="grid gap-3 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-start"
-              onSubmit={submitDisplayName}
-              noValidate
-            >
-              <label htmlFor="display-name" className="pt-3 text-sm font-medium text-slate-600">
-                Отображаемое имя
-              </label>
-              <div>
-                <input
-                  ref={displayNameInputRef}
-                  id="display-name"
-                  name="displayName"
-                  type="text"
-                  value={displayNameInput}
-                  maxLength={200}
-                  disabled={isSaving}
-                  aria-invalid={displayNameError ? true : undefined}
-                  aria-describedby={displayNameError ? 'display-name-error' : 'display-name-help'}
-                  className="min-h-11 w-full rounded-xl border border-slate-300 bg-white px-4 py-2 text-base text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-cyan-700 focus:ring-2 focus:ring-cyan-700/25 disabled:cursor-wait disabled:bg-slate-100 disabled:text-slate-500"
-                  onChange={(event) => {
-                    setDisplayNameInput(event.target.value);
-                    setDisplayNameError(null);
-                    setSaveStatus(null);
-                  }}
-                />
-                <p id="display-name-help" className="mt-2 text-sm leading-6 text-slate-500">
-                  От 1 до 100 символов. Пробелы в начале и конце не сохраняются.
-                </p>
-                {displayNameError ? (
-                  <p
-                    id="display-name-error"
-                    role="alert"
-                    className="mt-2 text-sm font-medium text-red-700"
-                  >
-                    {displayNameError}
-                  </p>
-                ) : null}
-                {saveStatus ? (
-                  <p
-                    ref={saveStatusRef}
-                    id="display-name-status"
-                    role="status"
-                    tabIndex={-1}
-                    className="mt-2 text-sm font-medium text-emerald-700 outline-none focus:ring-2 focus:ring-cyan-700 focus:ring-offset-2"
-                  >
-                    {saveStatus}
-                  </p>
-                ) : null}
-                <button
-                  type="submit"
-                  disabled={isSaving}
-                  className="mt-4 inline-flex min-h-11 touch-manipulation items-center justify-center rounded-xl bg-slate-950 px-5 text-sm font-semibold text-white transition duration-200 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-cyan-700 focus:ring-offset-2 disabled:cursor-wait disabled:bg-slate-400"
-                >
-                  {isSaving ? 'Сохраняем имя…' : 'Сохранить имя'}
-                </button>
-              </div>
-            </form>
-            <AvatarUploadForm
+            <DisplayNameForm
+              initialDisplayName={profile.displayName}
+              onProfileSaved={setProfile}
+              onUnauthorized={handleUnauthorized}
+            />
+            <AvatarSection
               avatar={profile.avatar}
-              onAvatarSaved={(updatedAvatar) =>
+              onAvatarChanged={(avatar) =>
                 setProfile((currentProfile) =>
-                  currentProfile ? { ...currentProfile, avatar: updatedAvatar } : currentProfile,
-                )
-              }
-              onAvatarRemoved={() =>
-                setProfile((currentProfile) =>
-                  currentProfile ? { ...currentProfile, avatar: null } : currentProfile,
+                  currentProfile ? { ...currentProfile, avatar } : currentProfile,
                 )
               }
               onUnauthorized={handleUnauthorized}
@@ -331,22 +115,6 @@ export default function ProfilePage() {
       </div>
     </main>
   );
-}
-
-async function getProfileApiError(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { message?: string | string[] };
-    if (typeof body.message === 'string') {
-      return body.message;
-    }
-    if (Array.isArray(body.message) && body.message.length > 0) {
-      return body.message[0];
-    }
-  } catch {
-    // A malformed error response falls back to a recoverable field message.
-  }
-
-  return 'Не удалось сохранить имя. Исправьте значение и повторите попытку.';
 }
 
 function ProfileIcon({ className }: { className?: string }) {
