@@ -5,9 +5,10 @@ import {
   UnsupportedMediaTypeException,
 } from '@nestjs/common';
 import { MeetingFileCategory } from '@prisma/client';
-import { open, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 
+import { contentValidators } from './content-validators';
 import { uploadConfig } from '../upload.config';
 
 type AllowedFile = {
@@ -40,14 +41,6 @@ export function unsupportedFileType(): UnsupportedMediaTypeException {
     message: 'Unsupported file type',
     code: 'UNSUPPORTED_FILE_TYPE',
   });
-}
-
-function hasPrefix(content: Buffer, prefix: readonly number[]): boolean {
-  return prefix.every((value, index) => content[index] === value);
-}
-
-function readsAscii(content: Buffer, offset: number, value: string): boolean {
-  return content.subarray(offset, offset + value.length).toString('ascii') === value;
 }
 
 function isSafeOriginalName(name: string): boolean {
@@ -122,112 +115,9 @@ export class MeetingFileValidationService {
     content: Buffer,
     filePath: string,
   ): Promise<boolean> {
-    switch (allowedFile.extension) {
-      case '.mp3':
-        return (
-          readsAscii(content, 0, 'ID3') || (content[0] === 0xff && (content[1] & 0xe0) === 0xe0)
-        );
-      case '.m4a':
-        return (
-          readsAscii(content, 4, 'ftyp') &&
-          ['M4A ', 'M4B ', 'M4P '].includes(content.subarray(8, 12).toString('ascii'))
-        );
-      case '.wav':
-        return readsAscii(content, 0, 'RIFF') && readsAscii(content, 8, 'WAVE');
-      case '.ogg':
-        return readsAscii(content, 0, 'OggS');
-      case '.mp4':
-        return readsAscii(content, 4, 'ftyp') && !readsAscii(content, 8, 'qt  ');
-      case '.webm':
-        return hasPrefix(content, [0x1a, 0x45, 0xdf, 0xa3]) && content.includes('webm');
-      case '.mov':
-        return readsAscii(content, 4, 'ftyp') && readsAscii(content, 8, 'qt  ');
-      case '.txt':
-        return this.isPlainText(content);
-      case '.vtt':
-        return this.isPlainText(content) && content.toString('utf8').startsWith('WEBVTT');
-      case '.srt':
-        return (
-          this.isPlainText(content) &&
-          /^\s*\d+\s*\r?\n\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->/.test(content.toString('utf8'))
-        );
-      case '.pdf':
-        return readsAscii(content, 0, '%PDF-');
-      case '.docx':
-        return (
-          hasPrefix(content, [0x50, 0x4b, 0x03, 0x04]) && (await this.hasDocxEntries(filePath))
-        );
-      default:
-        return false;
-    }
-  }
-
-  private isPlainText(content: Buffer): boolean {
-    if (content.includes(0)) {
-      return false;
-    }
-
-    try {
-      new TextDecoder('utf-8', { fatal: true }).decode(content);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async hasDocxEntries(filePath: string): Promise<boolean> {
-    const fileStats = await stat(filePath);
-    const length = Math.min(fileStats.size, 65_557);
-    const handle = await open(filePath, 'r');
-    const tail = Buffer.alloc(length);
-
-    try {
-      await handle.read(tail, 0, length, fileStats.size - length);
-    } finally {
-      await handle.close();
-    }
-
-    const eocd = tail.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-    if (eocd < 0 || eocd + 22 > tail.length) {
-      return false;
-    }
-
-    const directorySize = tail.readUInt32LE(eocd + 12);
-    const directoryOffset = tail.readUInt32LE(eocd + 16);
-    if (directorySize > 1_048_576) {
-      return false;
-    }
-
-    const directory = Buffer.alloc(directorySize);
-    const directoryHandle = await open(filePath, 'r');
-    try {
-      const { bytesRead } = await directoryHandle.read(
-        directory,
-        0,
-        directorySize,
-        directoryOffset,
-      );
-      if (bytesRead !== directorySize) {
-        return false;
-      }
-    } finally {
-      await directoryHandle.close();
-    }
-
-    const entries = new Set<string>();
-    let offset = 0;
-    while (offset + 46 <= directory.length && directory.readUInt32LE(offset) === 0x02014b50) {
-      const nameLength = directory.readUInt16LE(offset + 28);
-      const extraLength = directory.readUInt16LE(offset + 30);
-      const commentLength = directory.readUInt16LE(offset + 32);
-      const nameEnd = offset + 46 + nameLength;
-      if (nameEnd > directory.length) {
-        return false;
-      }
-      entries.add(directory.subarray(offset + 46, nameEnd).toString('utf8'));
-      offset = nameEnd + extraLength + commentLength;
-    }
-
-    return entries.has('[Content_Types].xml') && entries.has('word/document.xml');
+    const validate = contentValidators[allowedFile.extension];
+    // An extension with no validator is refused: the registry, not this
+    // method, decides what is accepted.
+    return validate ? validate(content, filePath) : false;
   }
 }
