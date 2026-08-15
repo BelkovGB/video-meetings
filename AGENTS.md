@@ -2,8 +2,10 @@
 
 - Monorepo: `apps/web` is Next.js and `apps/api` is NestJS. Run npm workspace
   commands from the repository root.
-- Before changing any part of the meeting-file storage lifecycle, read
-  `docs/research-meetings-upload.md`.
+- The live contract for meeting-file storage is `docs/api.md`, sections
+  `## Meeting files` and `## Local upload configuration`. Read
+  `docs/research-meetings-upload.md` only when changing the storage architecture
+  itself: it records why the design was chosen, not what it does today.
 - Shared validation: `npm run format:check`, `npm run lint`, and `npm run build`.
   Tests: `npm run test:e2e:api`, `npm run test:e2e:web`, and `npm run test:ralph`.
 - Update relevant documentation when changing architecture or public contracts.

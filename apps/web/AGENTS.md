@@ -3,9 +3,8 @@
 - Use the Next.js App Router under `app/`. Prefer Server Components; add
   `'use client'` only for browser state, effects, or event handlers.
 - Never expose server secrets; only `NEXT_PUBLIC_` variables may reach the client.
-- For user-visible changes, read `.agents/skills/ui-ux-pro-max/SKILL.md` and verify
-  affected interactions, keyboard accessibility, and the configured desktop,
-  mobile, and mobile-landscape Playwright projects.
+- For user-visible changes, verify affected interactions, keyboard accessibility,
+  and the configured desktop, mobile, and mobile-landscape Playwright projects.
 - Use the Playwright tooling available in the execution environment. Interactive
   agents may use Playwright MCP; Ralph sessions treat orchestrator validation as
   authoritative.
