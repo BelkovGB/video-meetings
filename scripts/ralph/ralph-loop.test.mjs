@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   agentReportedWriteAccessFailure,
+  agentSkillFiles,
   approveConfiguredIssue,
   assertTrustedIssue,
   alreadyFixedCommitFromAgent,
@@ -36,6 +37,7 @@ import {
   milestonePassReviewIsClean,
   normalizePhases,
   normalizeReviewResult,
+  parseSkillFrontmatter,
   reviewFindingFingerprint,
   reviewFindingMarker,
   renderPrompt,
@@ -49,6 +51,7 @@ import {
   sanitizedChildEnvironment,
   validationContainerRunArgs,
   validationImageForSnapshot,
+  verifyAgentSkills,
   verifyCodexAuthentication,
 } from './ralph-loop.mjs';
 
@@ -2354,4 +2357,80 @@ test('milestone findings are deduplicated, prioritized, and bounded', () => {
   );
   assert.equal(limited.findings.filter((finding) => finding.title === 'Finding 11').length, 1);
   assert.match(limited.summary, /2 findings were deferred/);
+});
+
+test('skill frontmatter parser accepts valid YAML and reports tab-separated fields', () => {
+  const valid = parseSkillFrontmatter(
+    '---\r\nname: read\r\ndescription: Читай файл эффективно\r\n---\r\n# Read File\r\n',
+  );
+  assert.deepEqual(valid.errors, []);
+  assert.equal(valid.fields.get('name'), 'read');
+  assert.equal(valid.fields.get('description'), 'Читай файл эффективно');
+
+  const tabSeparated = parseSkillFrontmatter('---\nname\tread\ndescription\tЧитай\n---\n# Read\n');
+  assert.equal(tabSeparated.errors.length, 2);
+  assert.match(tabSeparated.errors[0], /строка 2: поле "name" отделено табуляцией/);
+  assert.match(tabSeparated.errors[1], /строка 3: поле "description" отделено табуляцией/);
+});
+
+test('skill frontmatter parser rejects missing, empty, and unterminated frontmatter', () => {
+  assert.deepEqual(parseSkillFrontmatter('# Read File\n').errors, [
+    'файл должен начинаться со строки `---`',
+  ]);
+  assert.deepEqual(parseSkillFrontmatter('---\nname: read\n').errors, [
+    'frontmatter не закрыт строкой `---`',
+  ]);
+  assert.deepEqual(parseSkillFrontmatter('---\nname: read\ndescription:\n---\n').errors, [
+    'поле "description" пустое',
+  ]);
+  assert.deepEqual(parseSkillFrontmatter('---\nname: read\n---\n').errors, [
+    'отсутствует обязательное поле "description"',
+  ]);
+});
+
+test('skill frontmatter parser keeps multi-line values and quoted descriptions valid', () => {
+  const folded = parseSkillFrontmatter(
+    '---\nname: ui-ux-pro-max\ndescription: >-\n  UI/UX design intelligence\n  for web and mobile.\n---\n',
+  );
+  assert.deepEqual(folded.errors, []);
+
+  const quoted = parseSkillFrontmatter(
+    '---\nname: prd\ndescription: "Создаю PRD: документ"\n---\n',
+  );
+  assert.deepEqual(quoted.errors, []);
+  assert.equal(quoted.fields.get('description'), '"Создаю PRD: документ"');
+});
+
+test('every project-local SKILL.md exposes loadable frontmatter', () => {
+  // .agents/skills is gitignored, so a clean checkout legitimately has none.
+  // The assertion is "whatever is present must load", not "skills must exist".
+  const files = agentSkillFiles();
+  for (const file of files) {
+    const { errors } = parseSkillFrontmatter(readFileSync(file, 'utf8'));
+    assert.deepEqual(errors, [], `${file}: ${errors.join('; ')}`);
+  }
+  assert.doesNotThrow(() => verifyAgentSkills());
+});
+
+test('skill preflight fails with every invalid skill listed at once', () => {
+  const contents = new Map([
+    [path.join('a', 'SKILL.md'), '---\nname\ta\ndescription\tbroken\n---\n'],
+    [path.join('b', 'SKILL.md'), '---\nname: b\ndescription: fine\n---\n'],
+    [path.join('c', 'SKILL.md'), '# no frontmatter\n'],
+  ]);
+  assert.throws(
+    () =>
+      verifyAgentSkills({
+        files: [...contents.keys()],
+        readFile: (file) => contents.get(file),
+      }),
+    (error) => {
+      assert.match(error.message, /Невалидный frontmatter project-local skills/);
+      assert.match(error.message, /отделено табуляцией/);
+      assert.match(error.message, /должен начинаться со строки/);
+      assert.equal(/SKILL\.md:/g.test(error.message), true);
+      assert.equal(error.message.includes(path.join('b', 'SKILL.md')), false);
+      return true;
+    },
+  );
 });

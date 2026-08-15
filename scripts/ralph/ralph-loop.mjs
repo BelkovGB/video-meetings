@@ -655,6 +655,96 @@ function agentInstructionFiles(directory = projectRoot) {
   return files.sort();
 }
 
+const skillsDirectory = path.join(projectRoot, '.agents', 'skills');
+
+// Codex загружает project-local skills по YAML frontmatter. Невалидный
+// frontmatter не останавливает сессию: агент просто теряет skill и пишет
+// `failed to load skill`, поэтому проблему нужно ловить до запуска.
+function parseSkillFrontmatter(content) {
+  const errors = [];
+  const fields = new Map();
+  const lines = String(content ?? '')
+    .replace(/^﻿/, '')
+    .split(/\r?\n/);
+
+  if (lines[0]?.trim() !== '---') {
+    return { fields, errors: ['файл должен начинаться со строки `---`'] };
+  }
+
+  const closingIndex = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+  if (closingIndex === -1) {
+    return { fields, errors: ['frontmatter не закрыт строкой `---`'] };
+  }
+
+  let lastKey = null;
+  for (let index = 1; index < closingIndex; index += 1) {
+    const line = lines[index];
+    if (line.trim() === '') continue;
+    // Продолжение многострочного значения YAML.
+    if (lastKey && /^\s/.test(line)) continue;
+
+    const tabSeparated = /^([A-Za-z0-9_-]+)\t/.exec(line);
+    if (tabSeparated) {
+      errors.push(
+        `строка ${index + 1}: поле "${tabSeparated[1]}" отделено табуляцией; ` +
+          'YAML требует `' +
+          tabSeparated[1] +
+          ': значение`',
+      );
+      lastKey = tabSeparated[1];
+      continue;
+    }
+
+    const pair = /^([A-Za-z0-9_-]+):(?:\s+(.*))?$/.exec(line);
+    if (!pair) {
+      errors.push(`строка ${index + 1}: ожидалась пара \`ключ: значение\``);
+      continue;
+    }
+    lastKey = pair[1];
+    fields.set(pair[1], (pair[2] ?? '').trim());
+  }
+
+  for (const required of ['name', 'description']) {
+    if (!fields.has(required)) {
+      if (!errors.some((message) => message.includes(`"${required}"`))) {
+        errors.push(`отсутствует обязательное поле "${required}"`);
+      }
+    } else if (fields.get(required) === '') {
+      errors.push(`поле "${required}" пустое`);
+    }
+  }
+
+  return { fields, errors };
+}
+
+function agentSkillFiles(directory = skillsDirectory) {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(directory, entry.name, 'SKILL.md'))
+    .filter((file) => existsSync(file))
+    .sort();
+}
+
+function verifyAgentSkills(dependencies = {}) {
+  const files = dependencies.files ?? agentSkillFiles(dependencies.directory);
+  const readFile = dependencies.readFile ?? ((file) => readFileSync(file, 'utf8'));
+  const problems = [];
+  for (const file of files) {
+    const { errors } = parseSkillFrontmatter(readFile(file));
+    if (errors.length > 0) {
+      problems.push(`${path.relative(projectRoot, file)}: ${errors.join('; ')}`);
+    }
+  }
+  if (problems.length > 0) {
+    fail(
+      'Невалидный frontmatter project-local skills; Codex не загрузит их:\n  ' +
+        problems.join('\n  '),
+    );
+  }
+  return files;
+}
+
 function freezeValidationDockerfile(dockerfilePath) {
   const snapshotDirectory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-dockerfile-'));
   const snapshotPath = path.join(snapshotDirectory, 'Dockerfile.validation');
@@ -3675,6 +3765,7 @@ async function main() {
       Object.assign(config.approvedIssueSnapshots, activeStateStore.approvedIssueSnapshots);
       const rules = loadRalphRules(config);
       verifyTools();
+      verifyAgentSkills();
       if (mode !== '--check') {
         verifyCodexAuthentication();
       }
@@ -3751,6 +3842,7 @@ if (isMainModule) {
 }
 
 export {
+  agentSkillFiles,
   approveConfiguredIssue,
   assertTrustedIssue,
   assertTrustedControlFilesUnchanged,
@@ -3780,6 +3872,7 @@ export {
   milestonePassReviewIsClean,
   normalizeReviewResult,
   normalizePhases,
+  parseSkillFrontmatter,
   reviewFindingMarker,
   renderPrompt,
   reviewFindingFingerprint,
@@ -3795,5 +3888,6 @@ export {
   agentReportedWriteAccessFailure,
   validationContainerRunArgs,
   validationImageForSnapshot,
+  verifyAgentSkills,
   verifyCodexAuthentication,
 };
