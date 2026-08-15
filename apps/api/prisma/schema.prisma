@@ -22,8 +22,20 @@ model User {
   meetingParticipations      MeetingParticipant[]
   uploadedMeetingFiles       MeetingFile[]               @relation("UploadedMeetingFiles")
   meetingFileDownloadTickets MeetingFileDownloadTicket[]
+  authSessions               AuthSession[]
 
   @@map("users")
+}
+
+model AuthSession {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("auth_sessions")
 }
 
 model AvatarStorageReservation {

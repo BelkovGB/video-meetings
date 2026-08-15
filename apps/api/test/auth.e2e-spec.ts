@@ -1,9 +1,11 @@
 import { INestApplication } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureHttpApplication } from '../src/http-application';
+import { PrismaService } from '../src/prisma/prisma.service';
 
 type AuthCredentials = {
   email?: string;
@@ -20,6 +22,14 @@ function expectAccessToken(response: request.Response) {
   expect(response.body).toHaveProperty('accessToken');
   expect(typeof response.body.accessToken).toBe('string');
   expect(response.body.accessToken.length).toBeGreaterThan(0);
+}
+
+function getSessionId(accessToken: string): string | undefined {
+  const payload = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64url').toString()) as {
+    sid?: string;
+  };
+
+  return payload.sid;
 }
 
 describe('Authentication (e2e)', () => {
@@ -89,6 +99,54 @@ describe('Authentication (e2e)', () => {
       .expect(200);
 
     expectAccessToken(response);
+  });
+
+  it('revokes only the selected session for a user', async () => {
+    const credentials = {
+      email: createEmail('distinct-sessions'),
+      password: validPassword,
+    };
+    const firstSession = await request(app.getHttpServer())
+      .post('/auth/register')
+      .send(credentials)
+      .expect(201);
+    const secondSession = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send(credentials)
+      .expect(200);
+    const firstSessionId = getSessionId(firstSession.body.accessToken as string);
+    const secondSessionId = getSessionId(secondSession.body.accessToken as string);
+
+    expect(firstSessionId).toEqual(expect.any(String));
+    expect(secondSessionId).toEqual(expect.any(String));
+    expect(firstSessionId).not.toBe(secondSessionId);
+
+    await app.get(PrismaService).authSession.update({
+      where: { id: firstSessionId },
+      data: { revokedAt: new Date() },
+    });
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${firstSession.body.accessToken}`)
+      .expect(401);
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${secondSession.body.accessToken}`)
+      .expect(200);
+  });
+
+  it.each([
+    ['is missing', { sub: 'user-without-session', email: 'user@example.com' }],
+    ['is malformed', { sub: 'user-with-invalid-session', email: 'user@example.com', sid: 42 }],
+  ])('rejects a token whose session identity %s', async (_description, payload) => {
+    const accessToken = await app.get(JwtService).signAsync(payload);
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(401);
   });
 
   it.each<[string, AuthCredentials]>([

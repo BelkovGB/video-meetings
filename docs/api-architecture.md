@@ -43,7 +43,8 @@ read model selection; it ensures every meeting response excludes `ownerId`.
 
 `AuthModule` owns authentication decisions: it validates a registration attempt,
 hashes and verifies passwords, handles duplicate and invalid-credential errors,
-and issues JWTs. It does not access Prisma or the `User` model directly.
+and issues JWTs. It also owns the minimal persisted authentication-session state
+used to revoke a single JWT without affecting a user's other sessions.
 
 Instead, it depends on the `UsersSecurityPort` token exported by `UsersModule`.
 The port offers only the credential-oriented operations authentication needs:
@@ -58,9 +59,10 @@ updates, and avatar operations are not credential operations. It imports
 `AuthModule` only for `JwtAuthGuard`, takes the caller ID exclusively from the
 verified JWT `sub`, and uses `PrismaModule` to select or update `id`, `email`,
 `displayName`, and private avatar metadata. It never selects password hashes,
-and it has no operation accepting a target user ID or an email update. Thus
-`AuthModule` has no direct Prisma or `User` model dependency, `UsersModule` does
-not expose general user CRUD, and the profile HTTP surface is limited to
+and it has no operation accepting a target user ID or an email update. Thus the
+credential flow in `AuthModule` has no direct `User` model dependency,
+`AuthSessionService` is its only Prisma-backed authentication state,
+`UsersModule` does not expose general user CRUD, and the profile HTTP surface is limited to
 `GET`/`PATCH /users/me` and `POST`/`GET`/`DELETE /users/me/avatar` documented
 in `docs/api.md`.
 
@@ -90,12 +92,21 @@ the object's internal path.
 
 ## Ownership and authorization
 
-The JWT payload contains the user ID in `sub`. `JwtAuthGuard` verifies the token
-and attaches that payload to the Nest request. The controller passes only `sub`
-to the command or query. Collection and detail queries accept either the owner
-or a `MeetingParticipant` and return a derived `accessRole` instead of exposing
-`ownerId`. Authorization remains enforced where data is accessed rather than
-relying on controller logic.
+The JWT payload contains the user ID in `sub` and a unique authentication-session
+ID in `sid`. When registration or login issues a JWT, `AuthSessionService` first
+creates an `auth_sessions` row for that user; `sid` identifies that row. The
+guard verifies the JWT, requires a non-empty string `sid`, and accepts it only
+when the matching row belongs to `sub` and has no `revoked_at` value. A missing,
+malformed, unknown, or revoked session identity is rejected as `401`. Revoking a
+row therefore invalidates only its bearer token; other session rows for the same
+user remain valid. There is intentionally no session-management or bulk-device
+termination API.
+
+After this verification, the guard attaches the payload to the Nest request.
+The controller passes only `sub` to the command or query. Collection and detail
+queries accept either the owner or a `MeetingParticipant` and return a derived
+`accessRole` instead of exposing `ownerId`. Authorization remains enforced where
+data is accessed rather than relying on controller logic.
 
 `GetMeetingHandler` deliberately returns the same `404` for an inaccessible and
 a missing ID. This prevents a caller from discovering another user's meetings.
