@@ -81,8 +81,21 @@ const runtimeStatePath = path.join(runtimeDirectory, 'state.json');
 const runtimeLockPath = path.join(runtimeDirectory, 'run.lock');
 const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
 const runtimeAttestationsPath = path.join(runtimeDirectory, 'validation-attestations.json');
-let activeStateStore = null;
 const preparedValidationImages = new Set();
+
+// Активный state store читается как значение параметра по умолчанию, то есть в
+// момент вызова. Функция сохраняет этот момент и после переноса хранилища в
+// отдельный модуль: импортированную переменную нельзя было бы присвоить.
+let currentStateStore = null;
+
+function setActiveStateStore(store) {
+  currentStateStore = store;
+  return store;
+}
+
+function activeStateStore() {
+  return currentStateStore;
+}
 
 // -----------------------------------------------------------------------------
 // Структурированная сводка упавшей проверки
@@ -516,7 +529,7 @@ function validateRecoveredCommit(issue, storedIssue, currentHead) {
   return currentHead;
 }
 
-function reconcileStateAfterCrash(config, stateStore = activeStateStore) {
+function reconcileStateAfterCrash(config, stateStore = activeStateStore()) {
   const storedIssue = stateStore?.issue;
   if (!storedIssue || storedIssue.phase !== 'staging') return;
 
@@ -575,7 +588,7 @@ function verifyRepository(config, requireClean) {
   let currentBranch = run('git', ['branch', '--show-current']).stdout;
   const changes = run('git', ['status', '--porcelain']).stdout;
   const currentHead = run('git', ['rev-parse', 'HEAD']).stdout;
-  const recoveryAllowed = activeStateStore?.allowsDirtyRecovery(currentBranch, currentHead);
+  const recoveryAllowed = activeStateStore()?.allowsDirtyRecovery(currentBranch, currentHead);
   if (requireClean && changes !== '' && !recoveryAllowed) {
     fail(
       'Рабочее дерево не чистое. Закоммитьте или уберите текущие изменения перед запуском Ralph Loop.',
@@ -583,7 +596,7 @@ function verifyRepository(config, requireClean) {
   }
   if (changes !== '' && recoveryAllowed) {
     console.log(
-      `Найдена незавершённая работа Ralph для issue #${activeStateStore.issue.number}; ` +
+      `Найдена незавершённая работа Ralph для issue #${activeStateStore().issue.number}; ` +
         'AFK продолжит существующий diff без сброса.',
     );
   }
@@ -779,7 +792,7 @@ function approveConfiguredIssue(
   config,
   issue,
   repository,
-  stateStore = activeStateStore,
+  stateStore = activeStateStore(),
   { replace = false } = {},
 ) {
   const key = String(issue.number);
@@ -1316,7 +1329,7 @@ async function runReviewWithRetries(config, operation, label) {
 
 async function reviewAndCloseCommittedIssue(config, repository, issue, commit, markPending = true) {
   const pushedHead = pushBranchAndVerify(config);
-  activeStateStore?.updateIssue({
+  activeStateStore()?.updateIssue({
     phase: 'pushed',
     commit,
     pushedHead,
@@ -1326,7 +1339,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
   if (!config.review.enabled) {
     verifyPushedHead(config, pushedHead);
     closeIssue(config, repository, issue, commit);
-    activeStateStore?.clearIssue();
+    activeStateStore()?.clearIssue();
     return {
       completed: true,
       commit,
@@ -1337,7 +1350,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
   if (markPending) {
     setIssueCompletionState(repository, issue, 'pending-review', commit);
   }
-  activeStateStore?.updateIssue({ phase: 'reviewing' });
+  activeStateStore()?.updateIssue({ phase: 'reviewing' });
   let review;
   try {
     review = await runReviewWithRetries(
@@ -1346,7 +1359,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
       `Review issue #${issue.number}`,
     );
   } catch (error) {
-    activeStateStore?.updateIssue({
+    activeStateStore()?.updateIssue({
       phase: 'pushed',
       ...recordedFailure(error),
     });
@@ -1366,7 +1379,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
   if (review.verdict !== 'pass' || review.findings.length > 0) {
     updateIssueReviewContext(repository, issue, review);
     reopenIssueWithComment(repository, issue, formatReviewComment(review));
-    activeStateStore?.clearIssue();
+    activeStateStore()?.clearIssue();
     return { completed: false, commit, review };
   }
 
@@ -1387,7 +1400,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
     }
     throw error;
   }
-  activeStateStore?.clearIssue();
+  activeStateStore()?.clearIssue();
   return { completed: true, commit, review };
 }
 
@@ -1437,12 +1450,12 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       fail(`Issue #${issue.number}: Codex не оставил изменений и не указал ALREADY_FIXED commit.`);
     }
     const commit = verifiedIssueCommit(alreadyFixedCommit, issue);
-    activeStateStore?.updateIssue({ phase: 'validating' });
+    activeStateStore()?.updateIssue({ phase: 'validating' });
     try {
       runConfiguredValidation(config);
     } catch (error) {
-      const attempts = (activeStateStore?.issue?.validationFixAttempts ?? 0) + 1;
-      activeStateStore?.updateIssue({
+      const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
+      activeStateStore()?.updateIssue({
         phase: 'working-tree',
         validationFixAttempts: attempts,
         ...recordedFailure(error),
@@ -1460,12 +1473,12 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     return reviewAndCloseCommittedIssue(config, repository, issue, commit);
   }
 
-  activeStateStore?.updateIssue({ phase: 'validating' });
+  activeStateStore()?.updateIssue({ phase: 'validating' });
   try {
     runConfiguredValidation(config);
   } catch (error) {
-    const attempts = (activeStateStore?.issue?.validationFixAttempts ?? 0) + 1;
-    activeStateStore?.updateIssue({
+    const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
+    activeStateStore()?.updateIssue({
       phase: 'working-tree',
       validationFixAttempts: attempts,
       ...recordedFailure(error),
@@ -1484,7 +1497,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
         'Проверьте generated-файлы перед повторным запуском.',
     );
   }
-  activeStateStore?.updateIssue({ phase: 'staging' });
+  activeStateStore()?.updateIssue({ phase: 'staging' });
   run('git', ['add', '--all']);
 
   const stagedDiff = run('git', ['diff', '--cached', '--quiet'], {
@@ -1499,7 +1512,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 
   const commitMessage = commitMessageFromAgent(lastAgentMessage, issue);
   const expectedTree = run('git', ['write-tree']).stdout;
-  activeStateStore?.updateIssue({
+  activeStateStore()?.updateIssue({
     phase: 'staging',
     expectedTree,
     commitMessage,
@@ -1520,7 +1533,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   if (committedTree !== expectedTree) {
     fail(`Issue #${issue.number}: tree созданного commit не совпал с проверенным staged tree.`);
   }
-  activeStateStore?.updateIssue({
+  activeStateStore()?.updateIssue({
     phase: 'committed',
     commit,
     pushedHead: null,
@@ -1536,7 +1549,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 async function runCodex(config, repository, issue, rules) {
   issue = assertTrustedIssue(config, issue, repository);
   const storedIssue =
-    activeStateStore?.issue?.number === issue.number ? activeStateStore.issue : null;
+    activeStateStore()?.issue?.number === issue.number ? activeStateStore().issue : null;
   if (storedIssue?.commit && ['committed', 'pushed', 'reviewing'].includes(storedIssue.phase)) {
     if (run('git', ['status', '--porcelain']).stdout !== '') {
       fail(`Issue #${issue.number}: committed recovery требует чистое рабочее дерево.`);
@@ -1550,7 +1563,7 @@ async function runCodex(config, repository, issue, rules) {
     try {
       runConfiguredValidation(config);
     } catch (error) {
-      activeStateStore.updateIssue({ phase: resumePhase, ...recordedFailure(error) });
+      activeStateStore().updateIssue({ phase: resumePhase, ...recordedFailure(error) });
       throw error;
     }
     return reviewAndCloseCommittedIssue(config, repository, issue, commit);
@@ -1574,7 +1587,7 @@ async function runCodex(config, repository, issue, rules) {
       `Issue #${issue.number}: recovery ожидал HEAD ${startingCommit}, но найден ${currentHead}.`,
     );
   }
-  activeStateStore?.beginIssue(issue, startingCommit, continuation);
+  activeStateStore()?.beginIssue(issue, startingCommit, continuation);
 
   const linkedCommit = issue.linkedCommit ?? linkedCommitForIssue(issue);
   if (!continuation && linkedCommit) {
@@ -1601,7 +1614,7 @@ async function runCodex(config, repository, issue, rules) {
       label: `Codex issue #${issue.number}`,
     });
   } catch (error) {
-    activeStateStore?.updateIssue({
+    activeStateStore()?.updateIssue({
       phase: 'working-tree',
       ...recordedFailure(error),
     });
@@ -1627,7 +1640,7 @@ async function runCodex(config, repository, issue, rules) {
         'хотя development-сессия запущена с danger-full-access.',
     );
     error.code = 'RALPH_AGENT_WRITE_ACCESS';
-    activeStateStore?.updateIssue({ phase: 'working-tree', ...recordedFailure(error) });
+    activeStateStore()?.updateIssue({ phase: 'working-tree', ...recordedFailure(error) });
     throw error;
   }
 
@@ -2657,7 +2670,7 @@ function printCheck(
 
 async function runContinuousLoop(context, actions) {
   const { config, repository, milestone, rules } = context;
-  const stateStore = context.stateStore ?? activeStateStore;
+  const stateStore = context.stateStore ?? activeStateStore();
   let iteration = stateStore?.iterationsUsed ?? 0;
   const pendingIssues = new Map();
   const completedIssueNumbers = new Set();
@@ -2992,8 +3005,8 @@ async function main() {
         projectRoot,
         branch: firstPhaseConfig.branch,
       });
-      activeStateStore = createStateStore(firstPhaseConfig, mode);
-      Object.assign(config.approvedIssueSnapshots, activeStateStore.approvedIssueSnapshots);
+      setActiveStateStore(createStateStore(firstPhaseConfig, mode));
+      Object.assign(config.approvedIssueSnapshots, activeStateStore().approvedIssueSnapshots);
       const rules = loadRalphRules(config);
       verifyTools();
       verifyAgentSkills();
@@ -3010,7 +3023,7 @@ async function main() {
       const runPhase = async (phaseConfig) => {
         const repositoryState = verifyRepository(phaseConfig, mode !== '--check');
         if (mode !== '--check') {
-          reconcileStateAfterCrash(phaseConfig, activeStateStore);
+          reconcileStateAfterCrash(phaseConfig, activeStateStore());
         }
         verifyBaseHistory(phaseConfig);
         const milestone = milestones[phaseConfig.phaseIndex];
@@ -3022,14 +3035,14 @@ async function main() {
             milestone,
             repositoryState,
             rules,
-            stateStore: activeStateStore,
+            stateStore: activeStateStore(),
           },
           actions,
         );
       };
 
       if (mode === '--run') {
-        return await runPhasePlan(config, activeStateStore, runPhase);
+        return await runPhasePlan(config, activeStateStore(), runPhase);
       }
       return await runPhase(firstPhaseConfig);
     } catch (error) {
