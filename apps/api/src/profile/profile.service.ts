@@ -1,9 +1,16 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
 import { ReadStream } from 'node:fs';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { AvatarMetadata, AvatarValidationService } from './avatar-validation.service';
 import { LocalAvatarStorageService } from './local-avatar-storage.service';
 
@@ -53,6 +60,45 @@ export class ProfileService {
       select: profileSelect,
     });
     return this.toProfile(profile);
+  }
+
+  async changePassword(
+    userId: string,
+    sessionId: string,
+    { currentPassword, newPassword, confirmation }: ChangePasswordDto,
+  ): Promise<void> {
+    if (newPassword !== confirmation) {
+      throw new BadRequestException('Password confirmation does not match');
+    }
+
+    await this.prisma.$transaction(async (transaction) => {
+      await transaction.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))`,
+      );
+      const user = await transaction.user.findUnique({
+        where: { id: userId },
+        select: { passwordHash: true },
+      });
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+      if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
+        throw new BadRequestException('Current password is incorrect');
+      }
+      if (await bcrypt.compare(newPassword, user.passwordHash)) {
+        throw new BadRequestException('New password must differ from the current password');
+      }
+
+      const passwordHash = await bcrypt.hash(newPassword, 12);
+      await transaction.user.update({ where: { id: userId }, data: { passwordHash } });
+      const revokedSession = await transaction.authSession.updateMany({
+        where: { id: sessionId, userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      if (revokedSession.count !== 1) {
+        throw new UnauthorizedException();
+      }
+    });
   }
 
   async uploadAvatar(userId: string, file: Express.Multer.File | undefined) {

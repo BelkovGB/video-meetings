@@ -11,6 +11,7 @@ JSON except for the multipart file-upload endpoint.
 | POST   | `/auth/login`                                        | None               |
 | GET    | `/users/me`                                          | Bearer JWT         |
 | PATCH  | `/users/me`                                          | Bearer JWT         |
+| POST   | `/users/me/password`                                 | Bearer JWT         |
 | POST   | `/users/me/avatar`                                   | Bearer JWT         |
 | GET    | `/users/me/avatar`                                   | Bearer JWT         |
 | DELETE | `/users/me/avatar`                                   | Bearer JWT         |
@@ -152,6 +153,31 @@ Validation rules:
 
 Invalid input returns `400 Bad Request` and leaves the existing display name
 unchanged. There is no `/users/:id` profile endpoint.
+
+### `POST /users/me/password`
+
+Changes the authenticated user's password and returns `204 No Content`.
+
+Request:
+
+```json
+{
+  "currentPassword": "secure-password-123",
+  "newPassword": "new-secure-password-456",
+  "confirmation": "new-secure-password-456"
+}
+```
+
+`currentPassword` must match the account's current password. `newPassword` must
+differ from it, contain at least 9 Unicode characters, and use no more than 72
+UTF-8 bytes. `confirmation` must exactly match `newPassword`. Invalid input or
+an incorrect current password returns `400 Bad Request`; the password and the
+caller session remain valid.
+
+On success, the password replacement and revocation of the calling JWT session
+are atomic. That JWT can no longer access protected routes, while the user's
+other existing sessions remain valid. Passwords and password hashes are never
+included in responses or application logs.
 
 ## Meetings
 

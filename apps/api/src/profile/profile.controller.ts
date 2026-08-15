@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  HttpCode,
   Get,
   HttpStatus,
   Patch,
@@ -20,6 +21,7 @@ import { diskStorage } from 'multer';
 import { randomUUID } from 'node:crypto';
 
 import { AuthenticatedRequest, JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { avatarConfig } from './avatar.config';
 import { AvatarUploadExceptionFilter } from './avatar-upload-exception.filter';
@@ -80,5 +82,14 @@ export class ProfileController {
     @Req() request: AuthenticatedRequest,
   ) {
     return this.profileService.updateCurrentProfile(request.user.sub, updateProfileDto.displayName);
+  }
+
+  @Post('password')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async changePassword(
+    @Body() changePasswordDto: ChangePasswordDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    await this.profileService.changePassword(request.user.sub, request.user.sid, changePasswordDto);
   }
 }

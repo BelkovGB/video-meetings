@@ -6,6 +6,7 @@ import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { configureHttpApplication } from '../src/http-application';
 import { LocalAvatarStorageService } from '../src/profile/local-avatar-storage.service';
 import { avatarConfig } from '../src/profile/avatar.config';
 import { AvatarValidationService } from '../src/profile/avatar-validation.service';
@@ -66,26 +67,43 @@ function getUserId(accessToken: string): string {
 
 describe('Current user profile (e2e)', () => {
   let app: INestApplication;
+  let authenticationRequestCount = 0;
+  const originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
 
   beforeAll(async () => {
     await rm(avatarUploadRoot, { recursive: true, force: true });
+    process.env.TRUSTED_PROXY_IPS = 'loopback';
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
 
     app = moduleRef.createNestApplication();
+    configureHttpApplication(app);
     await app.init();
   });
 
   afterAll(async () => {
     await app.close();
     await rm(avatarUploadRoot, { recursive: true, force: true });
+
+    if (originalTrustedProxyIps === undefined) {
+      delete process.env.TRUSTED_PROXY_IPS;
+    } else {
+      process.env.TRUSTED_PROXY_IPS = originalTrustedProxyIps;
+    }
   });
+
+  function authenticationRequest(path: '/auth/register' | '/auth/login') {
+    authenticationRequestCount += 1;
+
+    return request(app.getHttpServer())
+      .post(path)
+      .set('X-Forwarded-For', `198.51.100.${authenticationRequestCount}`);
+  }
 
   async function registerUser(prefix: string): Promise<UserSession> {
     const email = createEmail(prefix);
-    const response = await request(app.getHttpServer())
-      .post('/auth/register')
+    const response = await authenticationRequest('/auth/register')
       .send({ email, password: validPassword })
       .expect(201);
 
@@ -94,6 +112,14 @@ describe('Current user profile (e2e)', () => {
       id: getUserId(response.body.accessToken as string),
       email,
     };
+  }
+
+  async function loginUser(email: string, password: string): Promise<string> {
+    const response = await authenticationRequest('/auth/login')
+      .send({ email, password })
+      .expect(200);
+
+    return response.body.accessToken as string;
   }
 
   function expectProfile(response: request.Response, expected: Profile) {
@@ -185,6 +211,78 @@ describe('Current user profile (e2e)', () => {
       .patch('/users/me')
       .send({ displayName: 'Unauthenticated' })
       .expect(401);
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .send({
+        currentPassword: validPassword,
+        newPassword: 'new-password-123',
+        confirmation: 'new-password-123',
+      })
+      .expect(401);
+  });
+
+  it('rejects invalid password changes without changing the password or session', async () => {
+    const user = await registerUser('password-change-invalid');
+    const invalidRequests = [
+      {
+        currentPassword: 'not-the-current-password',
+        newPassword: 'new-password-123',
+        confirmation: 'new-password-123',
+      },
+      { currentPassword: validPassword, newPassword: validPassword, confirmation: validPassword },
+      { currentPassword: validPassword, newPassword: 'password', confirmation: 'password' },
+      {
+        currentPassword: validPassword,
+        newPassword: '😀'.repeat(19),
+        confirmation: '😀'.repeat(19),
+      },
+      {
+        currentPassword: validPassword,
+        newPassword: 'new-password-123',
+        confirmation: 'different-password-123',
+      },
+    ];
+
+    for (const body of invalidRequests) {
+      await request(app.getHttpServer())
+        .post('/users/me/password')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .send(body)
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .get('/users/me')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .expect(200);
+    }
+
+    await loginUser(user.email, validPassword);
+  });
+
+  it('changes the password, revokes only the caller session, and permits login with the new password', async () => {
+    const user = await registerUser('password-change-success');
+    const secondSessionToken = await loginUser(user.email, validPassword);
+    const newPassword = '😀'.repeat(18);
+
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ currentPassword: validPassword, newPassword, confirmation: newPassword })
+      .expect(204);
+
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(401);
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${secondSessionToken}`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email: user.email, password: validPassword })
+      .expect(401);
+    await loginUser(user.email, newPassword);
   });
 
   it('does not allow a client to target another user or change email', async () => {
