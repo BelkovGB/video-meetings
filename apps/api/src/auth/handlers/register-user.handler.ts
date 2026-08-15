@@ -22,12 +22,15 @@ export class RegisterUserHandler implements ICommandHandler<RegisterUserCommand>
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
-    const user = await this.usersSecurity.create({ email, passwordHash });
+    const result = await this.usersSecurity.createWithTransaction(
+      { email, passwordHash },
+      (user, transaction) => this.authTokenService.issue(user.id, user.email, transaction),
+    );
 
-    if (!user) {
+    if (!result) {
       throw new ConflictException('A user with this email already exists');
     }
 
-    return this.authTokenService.issue(user.id, user.email);
+    return result;
   }
 }

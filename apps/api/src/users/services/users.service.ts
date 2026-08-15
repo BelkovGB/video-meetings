@@ -70,4 +70,30 @@ export class UsersService implements UsersSecurityPort {
       throw error;
     }
   }
+
+  async createWithTransaction<T>(
+    { email, passwordHash }: CreateSecurityUserInput,
+    callback: (user: SecurityUser, transaction: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T | null> {
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        const user = await transaction.user.create({
+          data: { email, passwordHash },
+          select: {
+            id: true,
+            email: true,
+            passwordHash: true,
+          },
+        });
+
+        return callback(user, transaction);
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return null;
+      }
+
+      throw error;
+    }
+  }
 }

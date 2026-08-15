@@ -1,3 +1,5 @@
+import { Prisma } from '@prisma/client';
+
 export type SecurityUser = {
   id: string;
   email: string;
@@ -18,6 +20,10 @@ export type CreateSecurityUserInput = {
 export interface UsersSecurityPort {
   findByEmail(email: string): Promise<SecurityUser | null>;
   create(input: CreateSecurityUserInput): Promise<SecurityUser | null>;
+  createWithTransaction<T>(
+    input: CreateSecurityUserInput,
+    callback: (user: SecurityUser, transaction: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T | null>;
   withLockedCredentialsByEmail<T>(
     email: string,
     callback: (user: SecurityUser, transaction: Prisma.TransactionClient) => Promise<T>,
@@ -25,4 +31,3 @@ export interface UsersSecurityPort {
 }
 
 export const USERS_SECURITY_PORT = Symbol('USERS_SECURITY_PORT');
-import { Prisma } from '@prisma/client';

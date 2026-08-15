@@ -6,6 +6,7 @@ import * as request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureHttpApplication } from '../src/http-application';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { AuthSessionService } from '../src/auth/services/auth-session.service';
 
 type AuthCredentials = {
   email?: string;
@@ -64,6 +65,27 @@ describe('Authentication (e2e)', () => {
     await request(app.getHttpServer()).post('/auth/register').send(credentials).expect(201);
 
     await request(app.getHttpServer()).post('/auth/register').send(credentials).expect(409);
+  });
+
+  it('rolls back registration when initial session creation fails', async () => {
+    const email = createEmail('session-creation-failure');
+    const credentials = { email, password: validPassword };
+    const authSessionService = app.get(AuthSessionService);
+
+    jest
+      .spyOn(authSessionService, 'create')
+      .mockRejectedValueOnce(new Error('Session storage failed'));
+
+    await request(app.getHttpServer()).post('/auth/register').send(credentials).expect(500);
+
+    await expect(app.get(PrismaService).user.findUnique({ where: { email } })).resolves.toBeNull();
+
+    const retry = await request(app.getHttpServer())
+      .post('/auth/register')
+      .send(credentials)
+      .expect(201);
+
+    expectAccessToken(retry);
   });
 
   it.each<[string, AuthCredentials]>([
