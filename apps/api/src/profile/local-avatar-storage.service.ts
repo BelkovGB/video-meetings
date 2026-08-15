@@ -7,16 +7,12 @@ import {
 } from '@nestjs/common';
 import { ReadStream } from 'node:fs';
 import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { Prisma } from '@prisma/client';
 
+import { isInsideDirectory } from '../storage/storage-path-policy';
 import { avatarConfig } from './avatar.config';
 import { PrismaService } from '../prisma/prisma.service';
-
-function isInside(root: string, target: string): boolean {
-  const path = relative(root, target);
-  return path !== '' && !path.startsWith('..') && !path.includes('..\\') && !isAbsolute(path);
-}
 
 @Injectable()
 export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy {
@@ -70,7 +66,7 @@ export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy 
     const source = resolve(tempPath);
     const destinationDirectory = this.resolveDirectory(storageKey);
     const destination = resolve(destinationDirectory, 'content');
-    if (!isInside(avatarConfig.tempDirectory, source)) {
+    if (!isInsideDirectory(avatarConfig.tempDirectory, source)) {
       throw new Error('Avatar temporary path is outside the configured directory');
     }
     let destinationDirectoryCreated = false;
@@ -92,7 +88,7 @@ export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy 
 
   async discardTemp(tempPath: string): Promise<void> {
     const source = resolve(tempPath);
-    if (isInside(avatarConfig.tempDirectory, source)) {
+    if (isInsideDirectory(avatarConfig.tempDirectory, source)) {
       await rm(source, { force: true });
     }
   }
@@ -249,7 +245,7 @@ export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy 
 
   private resolveDirectory(storageKey: string): string {
     const destinationDirectory = resolve(avatarConfig.directory, storageKey);
-    if (!isInside(avatarConfig.directory, destinationDirectory)) {
+    if (!isInsideDirectory(avatarConfig.directory, destinationDirectory)) {
       throw new Error('Avatar storage path is outside the configured directory');
     }
     return destinationDirectory;

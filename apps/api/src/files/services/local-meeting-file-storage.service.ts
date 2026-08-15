@@ -7,9 +7,10 @@ import {
 } from '@nestjs/common';
 import { Dir, ReadStream } from 'node:fs';
 import { mkdir, open, opendir, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+import { isInsideDirectory } from '../../storage/storage-path-policy';
 import { uploadConfig } from '../upload.config';
 
 type CapacityReservation = (() => void) | 'busy' | undefined;
@@ -20,17 +21,6 @@ export type StoredUploadEntry = {
 };
 
 const storageReconciliationBatchSize = 100;
-
-function isInside(root: string, target: string): boolean {
-  const path = relative(root, target);
-  return (
-    path !== '' &&
-    !path.startsWith('..') &&
-    !path.includes('..\\') &&
-    !path.startsWith('/') &&
-    !isAbsolute(path)
-  );
-}
 
 @Injectable()
 export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDestroy {
@@ -78,14 +68,14 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
   async finalize(tempPath: string, storageKey: string): Promise<void> {
     const resolvedTempPath = resolve(tempPath);
 
-    if (!isInside(uploadConfig.tempDirectory, resolvedTempPath)) {
+    if (!isInsideDirectory(uploadConfig.tempDirectory, resolvedTempPath)) {
       throw new Error('Temporary upload path is outside the configured directory');
     }
 
     const destinationDirectory = resolve(uploadConfig.directory, storageKey);
     const destinationPath = resolve(destinationDirectory, 'content');
 
-    if (!isInside(uploadConfig.directory, destinationDirectory)) {
+    if (!isInsideDirectory(uploadConfig.directory, destinationDirectory)) {
       throw new Error('Storage destination is outside the configured directory');
     }
 
@@ -108,7 +98,7 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
 
   static trackTemp(tempPath: string): void {
     const resolvedTempPath = resolve(tempPath);
-    if (!isInside(uploadConfig.tempDirectory, resolvedTempPath)) {
+    if (!isInsideDirectory(uploadConfig.tempDirectory, resolvedTempPath)) {
       throw new Error('Temporary upload path is outside the configured directory');
     }
 
@@ -141,7 +131,7 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
 
       const entryPath = resolve(uploadConfig.tempDirectory, entry.name);
       if (
-        !isInside(uploadConfig.tempDirectory, entryPath) ||
+        !isInsideDirectory(uploadConfig.tempDirectory, entryPath) ||
         LocalMeetingFileStorageService.activeTempPaths.has(entryPath)
       ) {
         continue;
@@ -158,7 +148,7 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
 
   async deleteTempFile(name: string): Promise<void> {
     const entryPath = resolve(uploadConfig.tempDirectory, name);
-    if (!isInside(uploadConfig.tempDirectory, entryPath) || !name.endsWith('.part')) {
+    if (!isInsideDirectory(uploadConfig.tempDirectory, entryPath) || !name.endsWith('.part')) {
       throw new Error('Temporary upload path is outside the configured directory');
     }
 
@@ -190,9 +180,9 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
       const entryPath = resolve(uploadConfig.directory, entry.name);
       const resolvedTempDirectory = resolve(uploadConfig.tempDirectory);
       if (
-        !isInside(uploadConfig.directory, entryPath) ||
+        !isInsideDirectory(uploadConfig.directory, entryPath) ||
         entryPath === resolvedTempDirectory ||
-        isInside(entryPath, resolvedTempDirectory)
+        isInsideDirectory(entryPath, resolvedTempDirectory)
       ) {
         continue;
       }
@@ -222,7 +212,7 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
   async discardTemp(tempPath: string): Promise<void> {
     const resolvedTempPath = resolve(tempPath);
 
-    if (isInside(uploadConfig.tempDirectory, resolvedTempPath)) {
+    if (isInsideDirectory(uploadConfig.tempDirectory, resolvedTempPath)) {
       await rm(resolvedTempPath, { force: true });
     }
   }
@@ -230,7 +220,7 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
   async discardFinal(storageKey: string): Promise<void> {
     const destinationDirectory = resolve(uploadConfig.directory, storageKey);
 
-    if (isInside(uploadConfig.directory, destinationDirectory)) {
+    if (isInsideDirectory(uploadConfig.directory, destinationDirectory)) {
       await rm(destinationDirectory, { recursive: true, force: true });
     }
   }
@@ -256,7 +246,7 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
   async delete(storageKey: string): Promise<void> {
     const destinationDirectory = resolve(uploadConfig.directory, storageKey);
 
-    if (!isInside(uploadConfig.directory, destinationDirectory)) {
+    if (!isInsideDirectory(uploadConfig.directory, destinationDirectory)) {
       throw new Error('Storage destination is outside the configured directory');
     }
 
@@ -314,7 +304,7 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
   private async probeWriteAccess(): Promise<void> {
     const probePath = resolve(uploadConfig.tempDirectory, `.startup-${randomUUID()}.probe`);
 
-    if (!isInside(uploadConfig.tempDirectory, probePath)) {
+    if (!isInsideDirectory(uploadConfig.tempDirectory, probePath)) {
       throw new Error('Storage probe path is outside the configured directory');
     }
 
@@ -327,8 +317,8 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
     const contentPath = resolve(destinationDirectory, 'content');
 
     if (
-      !isInside(uploadConfig.directory, destinationDirectory) ||
-      !isInside(destinationDirectory, contentPath)
+      !isInsideDirectory(uploadConfig.directory, destinationDirectory) ||
+      !isInsideDirectory(destinationDirectory, contentPath)
     ) {
       throw new Error('Storage content path is outside the configured directory');
     }
