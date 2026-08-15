@@ -3394,14 +3394,31 @@ function createOrReopenReviewIssues(
 // Диагностика конфигурации для безопасного режима --check
 // -----------------------------------------------------------------------------
 
-function printCheck(config, repository, milestone, repositoryState, issues) {
+// Бюджет итераций живёт в state и переживает перезапуск, поэтому конфигурация
+// может быть корректной, а `--run` при этом останавливаться сразу.
+function iterationBudget(config, stateStore) {
+  const limit = config.maxIterations;
+  const used = stateStore?.iterationsUsed ?? 0;
+  return { used, limit, remaining: Math.max(0, limit - used) };
+}
+
+function printCheck(
+  config,
+  repository,
+  milestone,
+  repositoryState,
+  issues,
+  budget = iterationBudget(config, null),
+) {
   console.log('Ralph Loop настроен корректно.');
   console.log(`Фаза: ${(config.phaseIndex ?? 0) + 1}/${config.phaseCount ?? 1}`);
   console.log(`Репозиторий: ${repository}`);
   console.log(`Milestone: ${milestone.title} (${issues.length} открытых issues)`);
   console.log(`Ветка: ${repositoryState.currentBranch}`);
   console.log(`Рабочее дерево: ${repositoryState.clean ? 'чистое' : 'есть изменения'}`);
-  console.log(`Лимит итераций: ${config.maxIterations}`);
+  console.log(
+    `Итерации: использовано ${budget.used}/${budget.limit}, осталось ${budget.remaining}`,
+  );
   console.log(`Лимит шагов на сессию: ${config.maxTurns}`);
   console.log(`Лимит исправлений тестов: ${config.maxTestFixAttempts}`);
   console.log(`Модель разработки: ${config.developmentModel}`);
@@ -3419,6 +3436,19 @@ function printCheck(config, repository, milestone, repositoryState, issues) {
   } else {
     console.log('Открытых issues нет; режим --run попытается создать PR.');
   }
+  if (budget.remaining === 0) {
+    console.log(
+      `ВНИМАНИЕ: сохранённый бюджет итераций исчерпан (${budget.used}/${budget.limit}). ` +
+        'Режим --run остановится на первой issue, которой нужна новая итерация.',
+    );
+    console.log(
+      `Продолжение без ручного редактирования state: увеличьте "maxIterations" в ${path.relative(
+        projectRoot,
+        configPath,
+      )} и закоммитьте конфигурацию; осталось будет пересчитано автоматически.`,
+    );
+  }
+  return budget;
 }
 
 // -----------------------------------------------------------------------------
@@ -3612,8 +3642,9 @@ async function executeMode(context, actions) {
 
   if (selectedMode === '--check') {
     const issues = actions.openIssues(repository, milestone);
-    actions.printCheck(config, repository, milestone, repositoryState, issues);
-    return { mode: 'check', issues: issues.length };
+    const budget = iterationBudget(config, context.stateStore);
+    actions.printCheck(config, repository, milestone, repositoryState, issues, budget);
+    return { mode: 'check', issues: issues.length, iterationBudget: budget };
   }
 
   actions.runPreflight(config);
@@ -3861,7 +3892,9 @@ export {
   ensureValidationImage,
   issueBodyWithCompletionState,
   issueContentHash,
+  iterationBudget,
   githubPagedArray,
+  printCheck,
   issueBodyWithReviewContext,
   issueCompletionState,
   isRalphInfrastructureIssue,

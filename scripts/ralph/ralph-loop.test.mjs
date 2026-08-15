@@ -29,6 +29,8 @@ import {
   issueBodyWithReviewContext,
   issueContentHash,
   issueCompletionState,
+  iterationBudget,
+  printCheck,
   isRalphInfrastructureIssue,
   isRalphInfrastructurePath,
   limitMilestoneReviewFindings,
@@ -1634,8 +1636,104 @@ test('--check reports state without running an issue or creating a PR', async ()
     }),
   );
 
-  assert.deepEqual(result, { mode: 'check', issues: 1 });
+  assert.deepEqual(result, {
+    mode: 'check',
+    issues: 1,
+    iterationBudget: { used: 0, limit: 5, remaining: 5 },
+  });
   assert.deepEqual(calls, ['check']);
+});
+
+test('--check reports the stored iteration budget, not only the configured limit', async () => {
+  let reported = null;
+  const result = await executeMode(
+    context({ mode: '--check', stateStore: { iterationsUsed: 3 } }),
+    actions({
+      openIssues: () => [{ number: 1 }],
+      printCheck: (...args) => {
+        reported = args[5];
+      },
+    }),
+  );
+
+  assert.deepEqual(result.iterationBudget, { used: 3, limit: 5, remaining: 2 });
+  assert.deepEqual(reported, { used: 3, limit: 5, remaining: 2 });
+});
+
+test('iterationBudget clamps an over-spent state to zero remaining', () => {
+  assert.deepEqual(iterationBudget({ maxIterations: 5 }, { iterationsUsed: 9 }), {
+    used: 9,
+    limit: 5,
+    remaining: 0,
+  });
+  assert.deepEqual(iterationBudget({ maxIterations: 5 }, null), {
+    used: 0,
+    limit: 5,
+    remaining: 5,
+  });
+});
+
+test('printCheck warns and suggests a config change when the budget is exhausted', () => {
+  const lines = [];
+  const originalLog = console.log;
+  console.log = (message) => lines.push(String(message));
+  try {
+    printCheck(
+      {
+        maxIterations: 40,
+        maxTurns: 120,
+        maxTestFixAttempts: 3,
+        developmentModel: 'gpt-5.6',
+        rulesFile: '.agents/ralph-rules.md',
+        review: { enabled: true, model: 'gpt-5.6' },
+        milestoneReview: { enabled: false },
+      },
+      'owner/repository',
+      { title: 'Test milestone' },
+      { currentBranch: 'feature/test', clean: true },
+      [],
+      { used: 40, limit: 40, remaining: 0 },
+    );
+  } finally {
+    console.log = originalLog;
+  }
+
+  const output = lines.join('\n');
+  assert.match(output, /Итерации: использовано 40\/40, осталось 0/);
+  assert.match(output, /ВНИМАНИЕ: сохранённый бюджет итераций исчерпан \(40\/40\)/);
+  assert.match(output, /увеличьте "maxIterations"/);
+  assert.match(output, /ralph\.config\.json/);
+  assert.equal(/Лимит итераций/.test(output), false);
+});
+
+test('printCheck stays quiet about the budget while iterations remain', () => {
+  const lines = [];
+  const originalLog = console.log;
+  console.log = (message) => lines.push(String(message));
+  try {
+    printCheck(
+      {
+        maxIterations: 40,
+        maxTurns: 120,
+        maxTestFixAttempts: 3,
+        developmentModel: 'gpt-5.6',
+        rulesFile: '.agents/ralph-rules.md',
+        review: { enabled: false },
+        milestoneReview: { enabled: false },
+      },
+      'owner/repository',
+      { title: 'Test milestone' },
+      { currentBranch: 'feature/test', clean: true },
+      [{ number: 12, title: 'Next issue' }],
+      { used: 39, limit: 40, remaining: 1 },
+    );
+  } finally {
+    console.log = originalLog;
+  }
+
+  const output = lines.join('\n');
+  assert.match(output, /Итерации: использовано 39\/40, осталось 1/);
+  assert.equal(/ВНИМАНИЕ/.test(output), false);
 });
 
 test('--once runs preflight before reading and implementing an issue', async () => {
