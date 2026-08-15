@@ -329,9 +329,7 @@ unauthenticated request returns `401`.
 The API clears avatar metadata atomically before discarding the private object.
 If private-storage cleanup is temporarily unavailable, it still returns the
 avatar-absent profile and queues cleanup for storage reconciliation. It never
-includes a storage key or filesystem path in the response or error. See
-[`profile-avatar-api.md`](profile-avatar-api.md) for the complete removal
-contract.
+includes a storage key or filesystem path in the response or error.
 
 Avatar files use a storage root separate from meeting files. `AVATAR_DIR` holds
 final files and `AVATAR_TEMP_DIR` holds short-lived upload parts; both must be
