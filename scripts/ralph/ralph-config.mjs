@@ -599,6 +599,7 @@ function collectTrustedControlFileHashes(config) {
     path.join(scriptDirectory, 'ralph-codex-session.mjs'),
     path.join(scriptDirectory, 'ralph-command-runner.mjs'),
     path.join(scriptDirectory, 'ralph-config.mjs'),
+    path.join(scriptDirectory, 'ralph-failure-summary.mjs'),
     path.join(scriptDirectory, 'ralph-loop.mjs'),
     path.join(scriptDirectory, 'ralph-process-runner.mjs'),
     path.join(scriptDirectory, 'ralph-runtime.mjs'),
