@@ -33,7 +33,11 @@ trap 'pg_ctl --pgdata="$PGDATA" --wait stop >/dev/null 2>&1 || true' EXIT
 psql --dbname=postgres --command 'CREATE ROLE video_meetings LOGIN;' >/dev/null
 psql --dbname=postgres --command 'CREATE DATABASE video_meetings OWNER video_meetings;' >/dev/null
 
+# One container now runs the whole set. The marker lets the orchestrator name the
+# script that failed without parsing npm output; `set -e` stops at the first
+# failure, so the last marker printed is the failing script.
 for script in "$@"; do
+  echo "RALPH_VALIDATION_SCRIPT=$script"
   if [ "$script" = "test:e2e:web" ]; then
     CI=1 npm run "$script"
   else

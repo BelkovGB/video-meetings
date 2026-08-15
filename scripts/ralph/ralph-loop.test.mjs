@@ -25,6 +25,7 @@ import {
   createOrReopenReviewIssues,
   executeMode,
   ensureValidationImage,
+  failedValidationScript,
   formatFailureSummary,
   githubPagedArray,
   inheritableEnvironmentVariables,
@@ -2823,4 +2824,169 @@ test('the recovery prompt carries the summary and tells the agent to rerun only 
   const withoutFailure = recoveryPrompt({});
   assert.match(withoutFailure, /процесс завершился до фиксации результата/);
   assert.equal(/Сначала повтори только упавшие проверки/.test(withoutFailure), false);
+});
+
+function validationConfig(overrides = {}) {
+  const loaded = loadConfig();
+  rmSync(loaded.validationContainer.frozenDockerfileDirectory, { recursive: true, force: true });
+  return {
+    preflightScripts: ['db:ready', 'db:migrate'],
+    validationScripts: ['format:check', 'lint', 'build', 'test:ralph'],
+    runtime: { validationTimeoutMs: 5_000, validationRunTimeoutMs: 9_000 },
+    trustedControlFileHashes: loaded.trustedControlFileHashes,
+    validationContainer: {
+      image: 'ralph-validation:single',
+      dockerfilePath: fileURLToPath(new URL('./Dockerfile.validation', import.meta.url)),
+    },
+    ...overrides,
+  };
+}
+
+test('a validation set runs in one container instead of one per script', () => {
+  const calls = [];
+  runConfiguredScripts(
+    validationConfig(),
+    ['format:check', 'lint', 'build', 'test:ralph'],
+    'Validation',
+    {
+      run: (command, args, options) => {
+        calls.push({ command, args, options });
+        return { status: 0, stdout: '' };
+      },
+    },
+  );
+
+  const runs = calls.filter((call) => call.args[0] === 'run');
+  assert.equal(runs.length, 1, 'exactly one docker run for the whole set');
+  assert.deepEqual(
+    runs[0].args.slice(-6),
+    ['db:ready', 'db:migrate', 'format:check', 'lint', 'build', 'test:ralph'],
+    'preflight precedes the validation scripts inside the same container',
+  );
+  assert.equal(runs[0].options.timeoutMs, 9_000, 'the run budget, not the per-command budget');
+  assert.equal(
+    calls.filter((call) => call.args[0] === 'image' || call.args[0] === 'build').length,
+    1,
+    'the image is resolved once per run',
+  );
+});
+
+test('preflight also collapses into a single container without the validation scripts', () => {
+  const calls = [];
+  runConfiguredScripts(validationConfig(), ['db:ready', 'db:migrate'], 'Preflight', {
+    includePreflight: false,
+    run: (command, args) => {
+      calls.push(args);
+      return { status: 0, stdout: '' };
+    },
+  });
+
+  const runs = calls.filter((args) => args[0] === 'run');
+  assert.equal(runs.length, 1);
+  assert.deepEqual(runs[0].slice(-2), ['db:ready', 'db:migrate']);
+});
+
+test('an empty script list still starts no container', () => {
+  let started = false;
+  runConfiguredScripts(validationConfig(), [], 'Validation', {
+    run: () => {
+      started = true;
+      return { status: 0, stdout: '' };
+    },
+  });
+  assert.equal(started, false);
+});
+
+test('the failing script is recovered from the entrypoint marker', () => {
+  const output = [
+    'RALPH_VALIDATION_SCRIPT=db:ready',
+    'RALPH_VALIDATION_SCRIPT=db:migrate',
+    'RALPH_VALIDATION_SCRIPT=format:check',
+    'RALPH_VALIDATION_SCRIPT=lint',
+    '',
+    '/workspace/apps/web/app/page.tsx',
+    "  12:3  error  'x' is not defined  no-undef",
+  ].join(String.fromCharCode(10));
+
+  assert.equal(failedValidationScript({ stdout: output, stderr: '' }), 'lint');
+  assert.equal(failedValidationScript({ stdout: '', stderr: '' }), null);
+});
+
+test('a failed validation set reports the failing script, not the whole list', () => {
+  const output = [
+    'RALPH_VALIDATION_SCRIPT=db:ready',
+    'RALPH_VALIDATION_SCRIPT=format:check',
+    'RALPH_VALIDATION_SCRIPT=test:e2e:web',
+    '  1) [chromium] > e2e/profile.spec.ts:42:5 > shows avatar',
+  ].join(String.fromCharCode(10));
+
+  assert.throws(
+    () =>
+      runConfiguredScripts(validationConfig(), ['format:check', 'test:e2e:web'], 'Validation', {
+        run: (command, args) => {
+          if (args[0] !== 'run') return { status: 0, stdout: '' };
+          throw Object.assign(new Error('Команда docker run завершилась с кодом 1.'), {
+            code: 'RALPH_COMMAND_FAILED',
+            status: 1,
+            stdout: output,
+            stderr: '',
+          });
+        },
+      }),
+    (error) => {
+      assert.equal(error.code, 'RALPH_VALIDATION_FAILED');
+      assert.equal(error.script, 'test:e2e:web');
+      assert.equal(summarizeCommandFailure(error).command, 'npm run test:e2e:web');
+      return true;
+    },
+  );
+});
+
+test('a validation timeout keeps its own error code and names the whole set', () => {
+  assert.throws(
+    () =>
+      runConfiguredScripts(validationConfig(), ['format:check', 'lint'], 'Validation', {
+        run: (command, args) => {
+          if (args[0] !== 'run') return { status: 0, stdout: '' };
+          throw Object.assign(new Error('timeout'), { code: 'RALPH_COMMAND_TIMEOUT' });
+        },
+      }),
+    (error) => {
+      assert.equal(error.code, 'RALPH_COMMAND_TIMEOUT');
+      assert.equal(error.script, 'db:ready, db:migrate, format:check, lint');
+      return true;
+    },
+  );
+});
+
+test('the validation entrypoint prints a script marker and prepares the database once', () => {
+  const entrypoint = readFileSync(
+    fileURLToPath(new URL('./ralph-validation-entrypoint.sh', import.meta.url)),
+    'utf8',
+  );
+  assert.match(entrypoint, /set -eu/);
+  assert.match(entrypoint, /echo "RALPH_VALIDATION_SCRIPT=\$script"/);
+  assert.ok(entrypoint.indexOf('initdb') < entrypoint.indexOf('for script in'));
+  assert.equal((entrypoint.match(/initdb/g) ?? []).length, 1);
+});
+
+test('the per-run validation budget is validated and defaults when omitted', () => {
+  const original = JSON.parse(readFileSync(ralphConfigPath, 'utf8'));
+  assert.equal(original.runtime.validationRunTimeoutMs, 3_600_000);
+
+  const { validationRunTimeoutMs, ...runtimeWithoutBudget } = original.runtime;
+  withPatchedRalphConfig({ runtime: runtimeWithoutBudget }, (config) => {
+    assert.equal(config.runtime.validationRunTimeoutMs, 3_600_000);
+  });
+
+  assert.throws(
+    () =>
+      withPatchedRalphConfig(
+        { runtime: { ...original.runtime, validationRunTimeoutMs: 0 } },
+        () => {
+          throw new Error('loadConfig should have failed');
+        },
+      ),
+    /Поле "runtime\.validationRunTimeoutMs" должно быть целым числом больше 0\./,
+  );
 });

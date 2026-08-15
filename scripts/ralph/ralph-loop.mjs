@@ -52,6 +52,7 @@ const ralphInfrastructureLabel = 'ralph-infrastructure';
 let runtimeSettings = {
   commandTimeoutMs: 300_000,
   validationTimeoutMs: 1_800_000,
+  validationRunTimeoutMs: 3_600_000,
   codexTimeoutMs: 5_400_000,
   networkRetryAttempts: 3,
   networkRetryBaseDelayMs: 2_000,
@@ -1054,6 +1055,9 @@ function loadConfig() {
   config.runtime ??= {};
   config.runtime.commandTimeoutMs ??= 300_000;
   config.runtime.validationTimeoutMs ??= 1_800_000;
+  // Один контейнер выполняет весь набор, поэтому бюджет задаётся на прогон,
+  // а не на команду. validationTimeoutMs остаётся бюджетом docker build.
+  config.runtime.validationRunTimeoutMs ??= 3_600_000;
   config.runtime.codexTimeoutMs ??= 5_400_000;
   config.runtime.networkRetryAttempts ??= 3;
   config.runtime.networkRetryBaseDelayMs ??= 2_000;
@@ -1217,6 +1221,7 @@ function loadConfig() {
   for (const field of [
     'commandTimeoutMs',
     'validationTimeoutMs',
+    'validationRunTimeoutMs',
     'codexTimeoutMs',
     'networkRetryBaseDelayMs',
   ]) {
@@ -2964,39 +2969,53 @@ function ensureValidationImage(config, snapshotPath, dependencies = {}) {
   return image;
 }
 
+// Entrypoint печатает этот маркер перед каждым script. `set -eu` останавливает
+// цикл на первой ошибке, поэтому последний маркер и есть упавший script.
+const validationScriptMarkerPattern = /RALPH_VALIDATION_SCRIPT=(\S+)/g;
+
+function failedValidationScript(error) {
+  const output = stripAnsi([error?.stdout, error?.stderr].filter(Boolean).join('\n'));
+  const markers = [...output.matchAll(validationScriptMarkerPattern)];
+  return markers.at(-1)?.[1] ?? null;
+}
+
 function runConfiguredScripts(config, scripts, label, options = {}) {
   const includePreflight = options.includePreflight ?? true;
   const execute = options.run ?? run;
   if (scripts.length === 0) return;
   assertTrustedControlFilesUnchanged(config);
-  for (const script of scripts) {
-    const snapshotPath = createValidationWorkspaceSnapshot();
-    const dependencySnapshotPath = createTrustedValidationDependencySnapshot();
-    console.log(`\n=== ${label}: isolated npm run ${script} ===\n`);
-    try {
-      const isolatedScripts = includePreflight ? [...config.preflightScripts, script] : [script];
-      const image = ensureValidationImage(config, dependencySnapshotPath, { run: execute });
-      execute(
-        'docker',
-        validationContainerRunArgs(
-          { ...config, validationContainer: { ...config.validationContainer, image } },
-          isolatedScripts,
-          snapshotPath,
-        ),
-        {
-          echoOutput: true,
-          timeoutMs: config.runtime.validationTimeoutMs,
-          env: credentialFreeEnvironment(),
-        },
-      );
-    } catch (error) {
-      error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
-      error.script = script;
-      throw error;
-    } finally {
-      rmSync(snapshotPath, { recursive: true, force: true });
-      rmSync(dependencySnapshotPath, { recursive: true, force: true });
-    }
+  // Один контейнер на весь набор. Изоляция от хоста сохраняется, а workspace,
+  // node_modules, PostgreSQL и migrations готовятся один раз вместо одного раза
+  // на каждый script. Entrypoint выполняет scripts последовательно и
+  // останавливается на первой ошибке.
+  const isolatedScripts = includePreflight
+    ? [...config.preflightScripts, ...scripts]
+    : [...scripts];
+  const snapshotPath = createValidationWorkspaceSnapshot();
+  const dependencySnapshotPath = createTrustedValidationDependencySnapshot();
+  console.log(`\n=== ${label}: isolated npm run ${isolatedScripts.join(', ')} ===\n`);
+  try {
+    const image = ensureValidationImage(config, dependencySnapshotPath, { run: execute });
+    execute(
+      'docker',
+      validationContainerRunArgs(
+        { ...config, validationContainer: { ...config.validationContainer, image } },
+        isolatedScripts,
+        snapshotPath,
+      ),
+      {
+        echoOutput: true,
+        timeoutMs: config.runtime.validationRunTimeoutMs,
+        env: credentialFreeEnvironment(),
+      },
+    );
+  } catch (error) {
+    error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
+    error.script = failedValidationScript(error) ?? isolatedScripts.join(', ');
+    throw error;
+  } finally {
+    rmSync(snapshotPath, { recursive: true, force: true });
+    rmSync(dependencySnapshotPath, { recursive: true, force: true });
   }
 }
 
@@ -3005,8 +3024,9 @@ function runPreflight(config) {
 }
 
 function runConfiguredValidation(config) {
-  // Каждый validation-запуск получает новую изолированную БД и повторяет preflight,
-  // чтобы migration текущей issue была применена внутри того же контейнера.
+  // Каждый validation-запуск получает новый контейнер с новой изолированной БД и
+  // выполняет preflight первым, чтобы migration текущей issue была применена
+  // внутри того же контейнера, что и остальные scripts.
   runConfiguredScripts(config, config.validationScripts, 'Validation');
 }
 
@@ -4102,6 +4122,7 @@ export {
   scopeMilestoneReviewToProduct,
   credentialFreeEnvironmentVariables,
   inheritableEnvironmentVariables,
+  failedValidationScript,
   formatFailureSummary,
   recoveryPrompt,
   summarizeCommandFailure,
