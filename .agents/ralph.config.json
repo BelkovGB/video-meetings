@@ -31,7 +31,7 @@
   }
 ],
 
-  "maxIterations": 15,
+  "maxIterations": 20,
   "maxTurns": 100,
   "maxTestFixAttempts": 5,
 
