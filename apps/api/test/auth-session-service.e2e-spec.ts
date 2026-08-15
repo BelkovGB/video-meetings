@@ -1,4 +1,5 @@
 import { AuthSessionService } from '../src/auth/services/auth-session.service';
+import { PrismaService } from '../src/prisma/prisma.service';
 
 describe('AuthSessionService', () => {
   it('stores the expiry selected for a newly issued token', async () => {
@@ -18,30 +19,55 @@ describe('AuthSessionService', () => {
     });
   });
 
-  it('removes expired and revoked sessions in bounded batches without deleting active sessions', async () => {
+  it('removes every expired and revoked session while retaining active sessions', async () => {
     const now = new Date('2026-08-15T12:00:00.000Z');
-    const prisma = {
-      authSession: {
-        findMany: jest
-          .fn()
-          .mockResolvedValue([{ id: 'expired-session' }, { id: 'revoked-session' }]),
-        deleteMany: jest.fn().mockResolvedValue({ count: 2 }),
+    const prisma = new PrismaService();
+    await prisma.$connect();
+    const user = await prisma.user.create({
+      data: {
+        email: `session-cleanup-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`,
+        passwordHash: 'not-used-by-this-test',
       },
-    };
-    const service = new AuthSessionService(prisma as never);
-
-    await service.pruneExpiredAndRevoked(now);
-
-    expect(prisma.authSession.findMany).toHaveBeenCalledWith({
-      where: {
-        OR: [{ expiresAt: { lte: now } }, { revokedAt: { not: null } }],
-      },
-      select: { id: true },
-      take: 100,
     });
-    expect(prisma.authSession.deleteMany).toHaveBeenCalledWith({
-      where: { id: { in: ['expired-session', 'revoked-session'] } },
-    });
+    const activeSessionId = 'active-session';
+    const expiredSessionCount = 125;
+    const revokedSessionCount = 125;
+
+    try {
+      await prisma.authSession.createMany({
+        data: [
+          ...Array.from({ length: expiredSessionCount }, (_, index) => ({
+            id: `expired-session-${index}`,
+            userId: user.id,
+            expiresAt: new Date(now.getTime() - 1),
+          })),
+          ...Array.from({ length: revokedSessionCount }, (_, index) => ({
+            id: `revoked-session-${index}`,
+            userId: user.id,
+            expiresAt: new Date(now.getTime() + 60_000),
+            revokedAt: new Date(now.getTime() - 1),
+          })),
+          {
+            id: activeSessionId,
+            userId: user.id,
+            expiresAt: new Date(now.getTime() + 60_000),
+          },
+        ],
+      });
+
+      const service = new AuthSessionService(prisma);
+      await service.pruneExpiredAndRevoked(now);
+
+      await expect(
+        prisma.authSession.findMany({
+          where: { userId: user.id },
+          select: { id: true },
+        }),
+      ).resolves.toEqual([{ id: activeSessionId }]);
+    } finally {
+      await prisma.user.delete({ where: { id: user.id } });
+      await prisma.$disconnect();
+    }
   });
 
   it('only treats an unrevoked, unexpired session as active', async () => {

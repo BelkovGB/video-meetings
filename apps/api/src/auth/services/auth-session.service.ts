@@ -62,15 +62,19 @@ export class AuthSessionService implements OnApplicationBootstrap, OnModuleDestr
 
     this.cleanupRunning = true;
     try {
-      const sessions = await this.prisma.authSession.findMany({
-        where: {
-          OR: [{ expiresAt: { lte: now } }, { revokedAt: { not: null } }],
-        },
-        select: { id: true },
-        take: cleanupBatchSize,
-      });
+      while (true) {
+        const sessions = await this.prisma.authSession.findMany({
+          where: {
+            OR: [{ expiresAt: { lte: now } }, { revokedAt: { not: null } }],
+          },
+          select: { id: true },
+          take: cleanupBatchSize,
+        });
 
-      if (sessions.length > 0) {
+        if (sessions.length === 0) {
+          break;
+        }
+
         await this.prisma.authSession.deleteMany({
           where: { id: { in: sessions.map((session) => session.id) } },
         });

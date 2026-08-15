@@ -1,5 +1,8 @@
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { config } from 'dotenv';
+
+config({ path: join(__dirname, '../../../.env') });
 
 const uploadRoot = join(tmpdir(), 'video-meetings-api-e2e-uploads');
 const avatarRoot = join(tmpdir(), 'video-meetings-api-e2e-avatars');
