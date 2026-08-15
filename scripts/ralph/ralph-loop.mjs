@@ -27,7 +27,6 @@ import {
   inheritableEnvironmentVariables,
   run,
   runNetwork,
-  runtimeSettings,
 } from './ralph-process-runner.mjs';
 
 import {
@@ -98,6 +97,21 @@ import {
   verifyRepository,
 } from './ralph-git.mjs';
 
+import {
+  githubPagedArray,
+  issueDetails,
+  issueState,
+  milestoneIssues,
+  openIssues,
+  patchIssue,
+  postIssueCommentOnce,
+  postPullRequestReview,
+  refreshIssue,
+  reopenIssueWithComment,
+  repositoryName,
+  verifyMilestone,
+} from './ralph-github-client.mjs';
+
 // -----------------------------------------------------------------------------
 // Пути проекта и режим запуска
 // -----------------------------------------------------------------------------
@@ -121,98 +135,9 @@ function verifyTools() {
   runNetwork('gh', ['auth', 'status']);
 }
 
-function repositoryName() {
-  const repository = parseJson(
-    runNetwork('gh', ['repo', 'view', '--json', 'nameWithOwner']).stdout,
-    'gh repo view',
-  );
-  return repository.nameWithOwner;
-}
-
-function githubPagedArray(repository, resource, fields, source, dependencies = {}) {
-  const execute = dependencies.runNetwork ?? runNetwork;
-  const maxPages = dependencies.maxPages ?? runtimeSettings().maxPages;
-  const items = [];
-  for (let page = 1; page <= maxPages; page += 1) {
-    const args = [
-      'api',
-      '--method',
-      'GET',
-      `repos/${repository}/${resource}`,
-      ...fields.flatMap(([name, value]) => ['-f', `${name}=${value}`]),
-      '-F',
-      'per_page=100',
-      '-F',
-      `page=${page}`,
-    ];
-    const currentPage = parseJson(execute('gh', args).stdout, `${source}, page ${page}`);
-    if (!Array.isArray(currentPage)) {
-      fail(`${source} вернул не массив на странице ${page}.`);
-    }
-    items.push(...currentPage);
-    if (currentPage.length < 100) return items;
-  }
-  fail(
-    `${source} достиг лимита ${maxPages * 100} объектов. ` +
-      'Увеличьте runtime.maxPages после проверки объёма.',
-  );
-}
-
 // -----------------------------------------------------------------------------
 // Получение milestone и очереди открытых GitHub issues
 // -----------------------------------------------------------------------------
-
-function verifyMilestone(repository, title) {
-  const milestones = githubPagedArray(
-    repository,
-    'milestones',
-    [['state', 'all']],
-    'GitHub milestones API',
-  );
-  const matches = milestones.filter((milestone) => milestone.title === title);
-
-  if (matches.length === 0) {
-    fail(`Milestone с точным названием \"${title}\" не найден в ${repository}.`);
-  }
-  if (matches.length > 1) {
-    fail(`В ${repository} найдено несколько milestones с названием \"${title}\".`);
-  }
-
-  return matches[0];
-}
-
-function openIssues(repository, milestone) {
-  const issues = githubPagedArray(
-    repository,
-    'issues',
-    [
-      ['state', 'open'],
-      ['milestone', milestone.number],
-    ],
-    'GitHub milestone issues API',
-  );
-
-  return issues
-    .filter((issue) => !issue.pull_request)
-    .map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body,
-      url: issue.html_url,
-      updatedAt: issue.updated_at,
-      authorLogin: issue.user?.login ?? null,
-      authorAssociation: issue.author_association ?? null,
-      labels: issue.labels ?? [],
-    }))
-    .filter((issue) => {
-      if (!isRalphInfrastructureIssue(issue)) return true;
-      console.log(
-        `Issue #${issue.number} относится к Ralph-инфраструктуре и исключена из очереди.`,
-      );
-      return false;
-    })
-    .sort((left, right) => left.number - right.number);
-}
 
 function issueContentHash(issue) {
   const canonicalBody = String(issue.body ?? '')
@@ -373,85 +298,6 @@ Only report findings caused by the claimed implementation, regressions at curren
 // -----------------------------------------------------------------------------
 // Проверка состояния issue и повторное открытие при ошибке
 // -----------------------------------------------------------------------------
-
-function issueDetails(repository, issueNumber) {
-  return parseJson(
-    runNetwork('gh', ['api', `repos/${repository}/issues/${issueNumber}`]).stdout,
-    `GitHub issue ${issueNumber}`,
-  );
-}
-
-function issueState(repository, issueNumber) {
-  const issue = issueDetails(repository, issueNumber);
-  return issue.state?.toUpperCase();
-}
-
-function refreshIssue(repository, issueNumber) {
-  const issue = issueDetails(repository, issueNumber);
-  return {
-    number: issue.number,
-    title: issue.title,
-    body: issue.body ?? '',
-    url: issue.html_url,
-    state: issue.state?.toUpperCase(),
-    updatedAt: issue.updated_at,
-    authorLogin: issue.user?.login ?? null,
-    authorAssociation: issue.author_association ?? null,
-    labels: issue.labels ?? [],
-  };
-}
-
-function patchIssue(repository, issueNumber, values) {
-  return parseJson(
-    runNetwork(
-      'gh',
-      ['api', '--method', 'PATCH', `repos/${repository}/issues/${issueNumber}`, '--input', '-'],
-      { input: JSON.stringify(values) },
-    ).stdout,
-    `GitHub update issue ${issueNumber}`,
-  );
-}
-
-function postIssueCommentOnce(repository, issueNumber, body, marker) {
-  const comments = githubPagedArray(
-    repository,
-    `issues/${issueNumber}/comments`,
-    [],
-    `GitHub comments for issue #${issueNumber}`,
-  );
-  if (
-    comments.some((comment) => typeof comment.body === 'string' && comment.body.includes(marker))
-  ) {
-    console.log(`Комментарий ${marker} уже опубликован в issue #${issueNumber}.`);
-    return;
-  }
-  run(
-    'gh',
-    [
-      'api',
-      '--method',
-      'POST',
-      `repos/${repository}/issues/${issueNumber}/comments`,
-      '--input',
-      '-',
-    ],
-    { input: JSON.stringify({ body: `${marker}\n${body}`.slice(0, 60_000) }) },
-  );
-}
-
-function reopenIssueWithComment(repository, issue, comment) {
-  if (issueState(repository, issue.number) === 'CLOSED') {
-    patchIssue(repository, issue.number, { state: 'open' });
-  }
-
-  const fingerprint = createHash('sha256').update(comment).digest('hex').slice(0, 20);
-  postIssueCommentOnce(
-    repository,
-    issue.number,
-    comment,
-    `<!-- ralph-issue-comment id:${fingerprint} -->`,
-  );
-}
 
 function formatReviewComment(review) {
   const findings = review.findings
@@ -1267,36 +1113,6 @@ ${findings}
 ${nextStep}`;
 }
 
-function postPullRequestReview(repository, pullRequest, body) {
-  const marker = body.match(/<!-- ralph-[^\r\n>]+ -->/)?.[0];
-  if (marker) {
-    const reviews = githubPagedArray(
-      repository,
-      `pulls/${pullRequest.number}/reviews`,
-      [],
-      `GitHub reviews for PR #${pullRequest.number}`,
-    );
-    if (reviews.some((review) => typeof review.body === 'string' && review.body.includes(marker))) {
-      console.log(`Review с marker ${marker} уже опубликован в PR #${pullRequest.number}.`);
-      return;
-    }
-  }
-  run(
-    'gh',
-    [
-      'pr',
-      'review',
-      String(pullRequest.number),
-      '--repo',
-      repository,
-      '--comment',
-      '--body-file',
-      '-',
-    ],
-    { input: body.slice(0, 60_000) },
-  );
-}
-
 function postMilestoneReviewFailure(config, repository, milestone, pullRequest, message) {
   const marker = milestoneReviewMarker(config, milestone, pullRequest).replace(
     'ralph-milestone-review ',
@@ -1463,28 +1279,6 @@ function reviewFindingFingerprint(pullRequest, finding) {
 
 function reviewFindingMarker(pullRequest, finding) {
   return `<!-- ralph-milestone-finding pr:${pullRequest.number} id:${reviewFindingFingerprint(pullRequest, finding)} -->`;
-}
-
-function milestoneIssues(repository, milestone) {
-  const issues = githubPagedArray(
-    repository,
-    'issues',
-    [
-      ['state', 'all'],
-      ['milestone', milestone.number],
-    ],
-    `GitHub issues for milestone ${milestone.title}`,
-  );
-
-  return issues
-    .filter((issue) => !issue.pull_request)
-    .map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body,
-      state: issue.state?.toUpperCase(),
-      url: issue.html_url,
-    }));
 }
 
 function findingIssueTitle(finding) {
