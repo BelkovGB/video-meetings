@@ -23,21 +23,26 @@ type Profile = {
 const validPassword = 'secure-password-123';
 const avatarUploadRoot = join(tmpdir(), 'video-meetings-api-e2e-avatars');
 const validPng = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAF/gL+qCRh5wAAAABJRU5ErkJggg==',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4z8AAAAMBAQCc479ZAAAAAElFTkSuQmCC',
   'base64',
 );
 const validJpeg = Buffer.from(
-  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/AF//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AF//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AF//2Q==',
+  '/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABgj/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABykX//Z',
   'base64',
 );
 const validWebp = Buffer.from(
-  'UklGRiIAAABXRUJQVlA4IBYAAADQAQCdASoBAAEAAUAmJaQAA3AA/vuUAAA=',
+  'UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=',
   'base64',
-).subarray(0, 42);
+);
 const fakePng = Buffer.concat([
   Buffer.from('89504e470d0a1a0a0000000049484452', 'hex'),
   Buffer.alloc(5),
   Buffer.from('0000000049454e44ae426082', 'hex'),
+]);
+const undecodablePng = Buffer.concat([
+  Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'),
+  Buffer.alloc(13),
+  Buffer.from('0000000149444154000000000000000049454e44ae426082', 'hex'),
 ]);
 const fakeJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 const fakeWebp = Buffer.from('524946460400000057454250', 'hex');
@@ -284,6 +289,14 @@ describe('Current user profile (e2e)', () => {
       'portrait.png',
       'image/png',
       fakePng,
+      415,
+      'UNSUPPORTED_AVATAR_TYPE',
+    ],
+    [
+      'a structurally plausible but undecodable PNG',
+      'portrait.png',
+      'image/png',
+      undecodablePng,
       415,
       'UNSUPPORTED_AVATAR_TYPE',
     ],

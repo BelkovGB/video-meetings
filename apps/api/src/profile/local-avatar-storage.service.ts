@@ -1,6 +1,6 @@
 import { Injectable, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { ReadStream } from 'node:fs';
-import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 
 import { avatarConfig } from './avatar.config';
@@ -23,6 +23,7 @@ export class LocalAvatarStorageService implements OnModuleInit {
       if (directory.dev !== tempDirectory.dev) {
         throw new Error('Avatar directories must be on the same filesystem');
       }
+      await this.reconcileTemporaryUploads();
     } catch (error) {
       throw new ServiceUnavailableException({
         message: 'Avatar storage is unavailable',
@@ -78,6 +79,20 @@ export class LocalAvatarStorageService implements OnModuleInit {
         code: 'AVATAR_STORAGE_UNAVAILABLE',
       });
     }
+  }
+
+  private async reconcileTemporaryUploads(): Promise<void> {
+    const entries = await readdir(avatarConfig.tempDirectory, { withFileTypes: true });
+    await Promise.all(
+      entries
+        .filter((entry) => entry.name.endsWith('.part'))
+        .map((entry) =>
+          rm(resolve(avatarConfig.tempDirectory, entry.name), {
+            recursive: entry.isDirectory(),
+            force: true,
+          }),
+        ),
+    );
   }
 
   private resolveDirectory(storageKey: string): string {

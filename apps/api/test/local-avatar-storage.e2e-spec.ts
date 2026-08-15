@@ -34,4 +34,12 @@ describe('LocalAvatarStorageService', () => {
     await storage.discard(storageKey);
     await expect(storage.open(storageKey)).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('removes interrupted temporary avatar uploads when storage starts', async () => {
+    await writeFile(tempPath, content);
+
+    await new LocalAvatarStorageService().onModuleInit();
+
+    await expect(readFile(tempPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });

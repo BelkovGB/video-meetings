@@ -7,8 +7,9 @@
 - `UsersModule` owns credential-oriented user persistence. It exposes
   `UsersSecurityPort` as its security boundary for creating users and finding a
   user by email.
-- `ProfileModule` owns the protected current-user profile HTTP API. It reads and
-  updates only safe profile fields for the authenticated user.
+- `ProfileModule` owns the protected current-user profile and avatar HTTP APIs.
+  It reads and updates only safe profile fields for the authenticated user and
+  owns private avatar storage separately from meeting files.
 - `MeetingsModule` owns the meetings HTTP API and uses CQRS for all operations.
 - `FilesModule` owns local meeting-file storage and its protected HTTP API.
 - `PrismaModule` owns the shared Prisma database client.
@@ -52,19 +53,35 @@ including password hashes. This security pattern keeps hashes inside the
 module-to-module boundary while preventing authentication from depending on the
 users persistence implementation.
 
-`ProfileModule` is deliberately outside `UsersSecurityPort`: profile reads and
-updates are not credential operations. It imports `AuthModule` only for
-`JwtAuthGuard`, takes the caller ID exclusively from the verified JWT `sub`, and
-uses `PrismaModule` to select or update `id`, `email`, and `displayName`. It
-never selects password hashes, and it has no operation accepting a target user
-ID or an email update. Thus `AuthModule` has no direct Prisma or `User` model
-dependency, `UsersModule` does not expose general user CRUD, and the profile
-HTTP surface is limited to `GET` and `PATCH /users/me` documented in `docs/api.md`.
+`ProfileModule` is deliberately outside `UsersSecurityPort`: profile reads,
+updates, and avatar operations are not credential operations. It imports
+`AuthModule` only for `JwtAuthGuard`, takes the caller ID exclusively from the
+verified JWT `sub`, and uses `PrismaModule` to select or update `id`, `email`,
+`displayName`, and private avatar metadata. It never selects password hashes,
+and it has no operation accepting a target user ID or an email update. Thus
+`AuthModule` has no direct Prisma or `User` model dependency, `UsersModule` does
+not expose general user CRUD, and the profile HTTP surface is limited to
+`GET`/`PATCH /users/me` and `POST`/`GET /users/me/avatar` documented in
+`docs/api.md`.
 
 There is no general users controller: user creation and credential lookup are
 available only through the security port, while the profile controller exposes
 only the authenticated caller's safe profile. The former unconsumed root health
 route is intentionally not part of the application.
+
+## Avatar storage
+
+`ProfileController` accepts one authenticated multipart `avatar` upload only
+for the JWT subject. It writes the candidate to `AVATAR_TEMP_DIR`, then
+`AvatarValidationService` uses the image decoder to verify that JPEG, PNG, or
+WebP content can be decoded and matches the supplied extension and MIME type.
+Only then does `LocalAvatarStorageService` atomically move it to the separate
+private `AVATAR_DIR/<storageKey>/content` object store and the profile service
+writes its metadata to the user row. Failed validation and failed persistence
+discard the candidate or final object; startup removes leftover `.part` files
+from interrupted uploads. Retrieval has only `GET /users/me/avatar`, which
+streams the requesting user's verified object with private, non-sniffable
+headers. Neither the profile response nor the HTTP API exposes storage keys.
 
 ## Ownership and authorization
 

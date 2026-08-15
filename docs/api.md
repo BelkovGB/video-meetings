@@ -252,12 +252,12 @@ and never an internal storage key.
 
 Accepts `multipart/form-data` with exactly one file field named `avatar` and
 returns `201 Created` with its safe metadata. JPEG (`image/jpeg`), PNG
-(`image/png`), and WebP (`image/webp`) are accepted only when the supplied MIME,
-filename extension, and binary container structure agree. The maximum file size is
-`AVATAR_MAX_BYTES` (5 MiB by default). Empty, malformed, unsupported, and
-oversized uploads are rejected with `400`, `415 UNSUPPORTED_AVATAR_TYPE`, or
-`413 AVATAR_TOO_LARGE` and are removed before a user record or final object is
-created.
+(`image/png`), and WebP (`image/webp`) are accepted only when the supplied MIME
+and filename extension agree and the complete payload decodes as that image
+format. The maximum file size is `AVATAR_MAX_BYTES` (5 MiB by default). Empty,
+malformed, unsupported, and oversized uploads are rejected with `400`,
+`415 UNSUPPORTED_AVATAR_TYPE`, or `413 AVATAR_TOO_LARGE` and are removed before
+a user record or final object is created.
 
 ### `GET /users/me/avatar`
 
@@ -374,8 +374,9 @@ reconciler retries the hidden deletion after one minute.
 | `AVATAR_TEMP_DIR`                | `./var/avatars/temp`  | Temporary avatar storage on the same filesystem. |
 | `AVATAR_MAX_BYTES`               | `5242880`             | Maximum avatar size (5 MiB).                     |
 
-The API creates the directories with private permissions at startup and refuses
-to start if the temporary and permanent paths are on different filesystems.
+The API creates the directories with private permissions at startup, removes
+leftover avatar `.part` files from interrupted uploads, and refuses to start if
+the temporary and permanent paths are on different filesystems.
 
 ## Running checks
 
