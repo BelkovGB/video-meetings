@@ -1278,6 +1278,28 @@ function commitTrailerForIssue(issue) {
   return `Ralph-Issue: #${issue.number}`;
 }
 
+function commitStagedChanges(commitMessage, issue, timeoutMs, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const emptyHooksDirectory = mkdtempSync(path.join(tmpdir(), 'ralph-empty-hooks-'));
+  try {
+    return execute(
+      'git',
+      [
+        '-c',
+        `core.hooksPath=${emptyHooksDirectory}`,
+        'commit',
+        '-m',
+        commitMessage,
+        '-m',
+        commitTrailerForIssue(issue),
+      ],
+      { echoOutput: true, timeoutMs },
+    );
+  } finally {
+    rmSync(emptyHooksDirectory, { recursive: true, force: true });
+  }
+}
+
 function validateRecoveredCommit(issue, storedIssue, currentHead) {
   const commitCount = Number(
     run('git', ['rev-list', '--count', `${storedIssue.startingCommit}..${currentHead}`]).stdout,
@@ -1332,11 +1354,7 @@ function reconcileStateAfterCrash(config, stateStore = activeStateStore) {
     return;
   }
 
-  run(
-    'git',
-    ['commit', '-m', storedIssue.commitMessage, '-m', commitTrailerForIssue(storedIssue)],
-    { echoOutput: true, timeoutMs: config.runtime.validationTimeoutMs },
-  );
+  commitStagedChanges(storedIssue.commitMessage, storedIssue, config.runtime.validationTimeoutMs);
   const commit = validateRecoveredCommit(
     storedIssue,
     storedIssue,
@@ -2305,10 +2323,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     expectedTree,
     commitMessage,
   });
-  run('git', ['commit', '-m', commitMessage, '-m', commitTrailerForIssue(issue)], {
-    echoOutput: true,
-    timeoutMs: config.runtime.validationTimeoutMs,
-  });
+  commitStagedChanges(commitMessage, issue, config.runtime.validationTimeoutMs);
 
   const commitCount = Number(run('git', ['rev-list', '--count', `${startingCommit}..HEAD`]).stdout);
   const remainingChanges = run('git', ['status', '--porcelain']).stdout;
@@ -3740,6 +3755,7 @@ export {
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
   buildMilestoneReviewPrompt,
+  commitStagedChanges,
   configForPhase,
   createTrustedValidationDependencySnapshot,
   createStateStore,

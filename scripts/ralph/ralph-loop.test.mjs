@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -12,6 +13,7 @@ import {
   alreadyFixedCommitFromAgent,
   buildIndependentReviewPrompt,
   buildMilestoneReviewPrompt,
+  commitStagedChanges,
   configForPhase,
   createSandboxedCodexEnvironment,
   createTrustedValidationDependencySnapshot,
@@ -51,6 +53,82 @@ import {
 } from './ralph-loop.mjs';
 
 const executableTempDirectory = fileURLToPath(new URL('../../node_modules/', import.meta.url));
+
+test('orchestrated commits bypass host hooks after canonical validation', () => {
+  let hooksDirectory;
+  const result = commitStagedChanges('fix: preserve staged work', { number: 32 }, 1234, {
+    run(name, args, options) {
+      assert.equal(name, 'git');
+      assert.equal(args[0], '-c');
+      assert.match(args[1], /^core\.hooksPath=/);
+      hooksDirectory = args[1].slice('core.hooksPath='.length);
+      assert.equal(existsSync(hooksDirectory), true);
+      assert.deepEqual(args.slice(2), [
+        'commit',
+        '-m',
+        'fix: preserve staged work',
+        '-m',
+        'Ralph-Issue: #32',
+      ]);
+      assert.deepEqual(options, { echoOutput: true, timeoutMs: 1234 });
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(existsSync(hooksDirectory), false);
+});
+
+test('orchestrated commit hook isolation is cleaned after a git failure', () => {
+  let hooksDirectory;
+  assert.throws(
+    () =>
+      commitStagedChanges('fix: fail safely', { number: 32 }, 1234, {
+        run(_name, args) {
+          hooksDirectory = args[1].slice('core.hooksPath='.length);
+          assert.equal(existsSync(hooksDirectory), true);
+          throw new Error('commit failed');
+        },
+      }),
+    /commit failed/,
+  );
+  assert.equal(existsSync(hooksDirectory), false);
+});
+
+test('orchestrated commit succeeds when the repository pre-commit hook fails', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-hooked-repository-'));
+  const hookMarker = path.join(directory, 'hook-ran');
+  const executeGit = (args) => {
+    const result = spawnSync('git', args, { cwd: directory, encoding: 'utf8' });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || result.stdout || `git exited with ${result.status}`);
+    }
+    return result;
+  };
+
+  try {
+    executeGit(['init', '--quiet']);
+    executeGit(['config', 'user.name', 'Ralph Test']);
+    executeGit(['config', 'user.email', 'ralph@example.test']);
+    writeFileSync(path.join(directory, 'work.txt'), 'verified staged work\n');
+    executeGit(['add', 'work.txt']);
+    const hookPath = path.join(directory, '.git', 'hooks', 'pre-commit');
+    writeFileSync(hookPath, '#!/bin/sh\necho ran > hook-ran\nexit 1\n');
+    chmodSync(hookPath, 0o755);
+
+    commitStagedChanges('fix: bypass host hook', { number: 32 }, 10_000, {
+      run(name, args) {
+        assert.equal(name, 'git');
+        return executeGit(args);
+      },
+    });
+
+    assert.equal(existsSync(hookMarker), false);
+    assert.match(executeGit(['log', '-1', '--format=%B']).stdout, /Ralph-Issue: #32/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('only an approved immutable issue snapshot can supply an AFK implementation prompt', () => {
   const approvedIssue = {
