@@ -1,4 +1,7 @@
 import { INestApplication } from '@nestjs/common';
+import { readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
@@ -14,9 +17,30 @@ type Profile = {
   id: string;
   email: string;
   displayName: string | null;
+  avatar: { mimeType: string; sizeBytes: number; updatedAt: string } | null;
 };
 
 const validPassword = 'secure-password-123';
+const avatarUploadRoot = join(tmpdir(), 'video-meetings-api-e2e-avatars');
+const validPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAF/gL+qCRh5wAAAABJRU5ErkJggg==',
+  'base64',
+);
+const validJpeg = Buffer.from(
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/AF//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AF//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AF//2Q==',
+  'base64',
+);
+const validWebp = Buffer.from(
+  'UklGRiIAAABXRUJQVlA4IBYAAADQAQCdASoBAAEAAUAmJaQAA3AA/vuUAAA=',
+  'base64',
+).subarray(0, 42);
+const fakePng = Buffer.concat([
+  Buffer.from('89504e470d0a1a0a0000000049484452', 'hex'),
+  Buffer.alloc(5),
+  Buffer.from('0000000049454e44ae426082', 'hex'),
+]);
+const fakeJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+const fakeWebp = Buffer.from('524946460400000057454250', 'hex');
 
 function createEmail(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
@@ -34,6 +58,7 @@ describe('Current user profile (e2e)', () => {
   let app: INestApplication;
 
   beforeAll(async () => {
+    await rm(avatarUploadRoot, { recursive: true, force: true });
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -44,6 +69,7 @@ describe('Current user profile (e2e)', () => {
 
   afterAll(async () => {
     await app.close();
+    await rm(avatarUploadRoot, { recursive: true, force: true });
   });
 
   async function registerUser(prefix: string): Promise<UserSession> {
@@ -80,6 +106,7 @@ describe('Current user profile (e2e)', () => {
       id: currentUser.id,
       email: currentUser.email,
       displayName: null,
+      avatar: null,
     });
     expect(response.body).not.toHaveProperty('email', anotherUser.email);
   });
@@ -94,14 +121,14 @@ describe('Current user profile (e2e)', () => {
       .send({ displayName: `  ${displayName}  ` })
       .expect(200);
 
-    expectProfile(response, { id: user.id, email: user.email, displayName });
+    expectProfile(response, { id: user.id, email: user.email, displayName, avatar: null });
 
     const readResponse = await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .expect(200);
 
-    expectProfile(readResponse, { id: user.id, email: user.email, displayName });
+    expectProfile(readResponse, { id: user.id, email: user.email, displayName, avatar: null });
   });
 
   it.each<[string, unknown]>([
@@ -133,7 +160,12 @@ describe('Current user profile (e2e)', () => {
         .set('Authorization', `Bearer ${user.accessToken}`)
         .expect(200);
 
-      expectProfile(response, { id: user.id, email: user.email, displayName: savedDisplayName });
+      expectProfile(response, {
+        id: user.id,
+        email: user.email,
+        displayName: savedDisplayName,
+        avatar: null,
+      });
     },
   );
 
@@ -175,6 +207,7 @@ describe('Current user profile (e2e)', () => {
       id: currentUser.id,
       email: currentUser.email,
       displayName: null,
+      avatar: null,
     });
 
     const response = await request(app.getHttpServer())
@@ -182,6 +215,179 @@ describe('Current user profile (e2e)', () => {
       .set('Authorization', `Bearer ${anotherUser.accessToken}`)
       .expect(200);
 
-    expectProfile(response, { id: anotherUser.id, email: anotherUser.email, displayName: null });
+    expectProfile(response, {
+      id: anotherUser.id,
+      email: anotherUser.email,
+      displayName: null,
+      avatar: null,
+    });
+  });
+
+  it('uploads a verified avatar, exposes safe metadata, and retrieves only its content', async () => {
+    const user = await registerUser('avatar-valid');
+
+    const uploaded = await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
+
+    expect(uploaded.body).toEqual({
+      mimeType: 'image/png',
+      sizeBytes: validPng.length,
+      updatedAt: expect.any(String),
+    });
+
+    const profile = await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(200);
+    expect(profile.body.avatar).toEqual(uploaded.body);
+    expect(profile.body.avatar).not.toHaveProperty('storageKey');
+
+    const retrieved = await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect('Content-Type', /image\/png/)
+      .expect('Cache-Control', 'private, no-store')
+      .expect('X-Content-Type-Options', 'nosniff')
+      .expect(200);
+    expect(Buffer.from(retrieved.body as Buffer)).toEqual(validPng);
+  });
+
+  it.each([
+    ['portrait.jpg', 'image/jpeg', validJpeg],
+    ['portrait.webp', 'image/webp', validWebp],
+  ])('accepts a verified %s avatar', async (filename, contentType, content) => {
+    const user = await registerUser('avatar-format');
+
+    const response = await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', content, { filename, contentType })
+      .expect(201);
+
+    expect(response.body).toMatchObject({ mimeType: contentType, sizeBytes: content.length });
+  });
+
+  it.each([
+    [
+      'malformed content',
+      'portrait.png',
+      'image/png',
+      Buffer.from('not a png'),
+      415,
+      'UNSUPPORTED_AVATAR_TYPE',
+    ],
+    [
+      'a PNG signature without valid chunks',
+      'portrait.png',
+      'image/png',
+      fakePng,
+      415,
+      'UNSUPPORTED_AVATAR_TYPE',
+    ],
+    [
+      'a JPEG signature without image data',
+      'portrait.jpg',
+      'image/jpeg',
+      fakeJpeg,
+      415,
+      'UNSUPPORTED_AVATAR_TYPE',
+    ],
+    [
+      'a WebP container without an image chunk',
+      'portrait.webp',
+      'image/webp',
+      fakeWebp,
+      415,
+      'UNSUPPORTED_AVATAR_TYPE',
+    ],
+    [
+      'unsupported content type',
+      'portrait.gif',
+      'image/gif',
+      Buffer.from('GIF89a'),
+      415,
+      'UNSUPPORTED_AVATAR_TYPE',
+    ],
+    [
+      'oversized content',
+      'portrait.png',
+      'image/png',
+      Buffer.concat([validPng, Buffer.alloc(1024)]),
+      413,
+      'AVATAR_TOO_LARGE',
+    ],
+  ])(
+    'rejects %s without retaining an avatar',
+    async (_case, filename, contentType, content, status, code) => {
+      const user = await registerUser('avatar-invalid');
+
+      const response = await request(app.getHttpServer())
+        .post('/users/me/avatar')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .attach('avatar', content, { filename, contentType })
+        .expect(status);
+
+      expect(response.body).toMatchObject({ code });
+      await request(app.getHttpServer())
+        .get('/users/me/avatar')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .expect(404);
+      await expect(readdir(join(avatarUploadRoot, 'temp'))).resolves.toEqual([]);
+    },
+  );
+
+  it('keeps avatar operations self-only', async () => {
+    const owner = await registerUser('avatar-owner');
+    const anotherUser = await registerUser('avatar-another');
+
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${anotherUser.accessToken}`)
+      .expect(404);
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${anotherUser.accessToken}`)
+      .field('userId', owner.id)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(400);
+    await request(app.getHttpServer())
+      .get(`/users/${owner.id}/avatar`)
+      .set('Authorization', `Bearer ${anotherUser.accessToken}`)
+      .expect(404);
+  });
+
+  it('rejects requests containing more than one avatar file', async () => {
+    const user = await registerUser('avatar-multiple');
+
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validPng, { filename: 'first.png', contentType: 'image/png' })
+      .attach('avatar', validPng, { filename: 'second.png', contentType: 'image/png' })
+      .expect(400);
+
+    await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(404);
+    await expect(readdir(join(avatarUploadRoot, 'temp'))).resolves.toEqual([]);
+  });
+
+  it('rejects unauthenticated avatar uploads and retrieval', async () => {
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(401);
+    await expect(readdir(join(avatarUploadRoot, 'temp'))).resolves.toEqual([]);
+    await request(app.getHttpServer()).get('/users/me/avatar').expect(401);
   });
 });

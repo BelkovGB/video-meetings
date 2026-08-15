@@ -12,6 +12,10 @@ model User {
   email                      String                      @unique
   passwordHash               String                      @map("password_hash")
   displayName                String?                     @map("display_name")
+  avatarStorageKey           String?                     @unique @map("avatar_storage_key")
+  avatarMimeType             String?                     @map("avatar_mime_type") @db.VarChar(32)
+  avatarSizeBytes            Int?                        @map("avatar_size_bytes")
+  avatarUpdatedAt            DateTime?                   @map("avatar_updated_at")
   createdAt                  DateTime                    @default(now()) @map("created_at")
   updatedAt                  DateTime                    @updatedAt @map("updated_at")
   meetings                   Meeting[]

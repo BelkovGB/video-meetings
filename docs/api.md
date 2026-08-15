@@ -11,6 +11,8 @@ JSON except for the multipart file-upload endpoint.
 | POST   | `/auth/login`                                        | None               |
 | GET    | `/users/me`                                          | Bearer JWT         |
 | PATCH  | `/users/me`                                          | Bearer JWT         |
+| POST   | `/users/me/avatar`                                   | Bearer JWT         |
+| GET    | `/users/me/avatar`                                   | Bearer JWT         |
 | POST   | `/meetings`                                          | Bearer JWT         |
 | GET    | `/meetings`                                          | Bearer JWT         |
 | GET    | `/meetings/:id`                                      | Bearer JWT         |
@@ -107,13 +109,19 @@ change profile data.
 {
   "id": "cm...",
   "email": "user@example.com",
-  "displayName": "Ada Lovelace"
+  "displayName": "Ada Lovelace",
+  "avatar": {
+    "mimeType": "image/png",
+    "sizeBytes": 24576,
+    "updatedAt": "2026-08-15T12:00:00.000Z"
+  }
 }
 ```
 
 `displayName` is `null` until it is first saved. The representation deliberately
 contains only the caller's safe account fields: it never includes password
-hashes or account timestamps. Email is read-only.
+hashes, account timestamps, or avatar storage keys. `avatar` is `null` until an
+avatar is uploaded. Email is read-only.
 
 ### `GET /users/me`
 
@@ -232,6 +240,38 @@ If the meeting does not exist or the user has no access, the endpoint returns
 Using the same response for absent and foreign meetings prevents identifier
 enumeration and ownership disclosure.
 
+## Current-user avatars
+
+Avatars are private user assets. Every avatar route uses the JWT subject from
+the bearer token; neither a target user ID nor another user's avatar route is
+accepted. The profile's `avatar` field is `null` until an avatar exists, then
+contains only verified media metadata (`mimeType`, `sizeBytes`, and `updatedAt`)
+and never an internal storage key.
+
+### `POST /users/me/avatar`
+
+Accepts `multipart/form-data` with exactly one file field named `avatar` and
+returns `201 Created` with its safe metadata. JPEG (`image/jpeg`), PNG
+(`image/png`), and WebP (`image/webp`) are accepted only when the supplied MIME,
+filename extension, and binary container structure agree. The maximum file size is
+`AVATAR_MAX_BYTES` (5 MiB by default). Empty, malformed, unsupported, and
+oversized uploads are rejected with `400`, `415 UNSUPPORTED_AVATAR_TYPE`, or
+`413 AVATAR_TOO_LARGE` and are removed before a user record or final object is
+created.
+
+### `GET /users/me/avatar`
+
+Streams the authenticated user's avatar with the verified content type,
+`Content-Length`, `Cache-Control: private, no-store`, and
+`X-Content-Type-Options: nosniff`. A user without an avatar receives `404`; one
+authenticated user cannot retrieve another user's avatar.
+
+Avatar files use a storage root separate from meeting files. `AVATAR_DIR` holds
+final files and `AVATAR_TEMP_DIR` holds short-lived upload parts; both must be
+on the same filesystem for an atomic move. The API creates these private
+directories at startup and does not expose either directory through the web
+application.
+
 ## Meeting files
 
 The owner of a meeting and its recorded participants can upload one allowed file
@@ -321,15 +361,18 @@ reconciler retries the hidden deletion after one minute.
 
 ## Local upload configuration
 
-| Variable                         | Default              | Purpose                                          |
-| -------------------------------- | -------------------- | ------------------------------------------------ |
-| `UPLOAD_DIR`                     | `./var/uploads`      | Permanent local file storage.                    |
-| `UPLOAD_TEMP_DIR`                | `./var/uploads-temp` | Temporary upload storage on the same filesystem. |
-| `UPLOAD_MAX_BYTES`               | `1073741824`         | Per-file byte limit.                             |
-| `UPLOAD_MAX_REQUEST_BYTES`       | `1074790400`         | Multipart request limit, including overhead.     |
-| `UPLOAD_MIN_FREE_BYTES`          | `2147483648`         | Reserved free capacity for the storage volume.   |
-| `UPLOAD_MAX_ACTIVE_UPLOADS`      | `4`                  | Maximum active uploads in one API process.       |
-| `UPLOAD_RECONCILIATION_GRACE_MS` | `86400000`           | Safety window for stale and orphan cleanup.      |
+| Variable                         | Default               | Purpose                                          |
+| -------------------------------- | --------------------- | ------------------------------------------------ |
+| `UPLOAD_DIR`                     | `./var/uploads`       | Permanent local file storage.                    |
+| `UPLOAD_TEMP_DIR`                | `./var/uploads-temp`  | Temporary upload storage on the same filesystem. |
+| `UPLOAD_MAX_BYTES`               | `1073741824`          | Per-file byte limit.                             |
+| `UPLOAD_MAX_REQUEST_BYTES`       | `1074790400`          | Multipart request limit, including overhead.     |
+| `UPLOAD_MIN_FREE_BYTES`          | `2147483648`          | Reserved free capacity for the storage volume.   |
+| `UPLOAD_MAX_ACTIVE_UPLOADS`      | `4`                   | Maximum active uploads in one API process.       |
+| `UPLOAD_RECONCILIATION_GRACE_MS` | `86400000`            | Safety window for stale and orphan cleanup.      |
+| `AVATAR_DIR`                     | `./var/avatars/files` | Permanent private avatar storage.                |
+| `AVATAR_TEMP_DIR`                | `./var/avatars/temp`  | Temporary avatar storage on the same filesystem. |
+| `AVATAR_MAX_BYTES`               | `5242880`             | Maximum avatar size (5 MiB).                     |
 
 The API creates the directories with private permissions at startup and refuses
 to start if the temporary and permanent paths are on different filesystems.
