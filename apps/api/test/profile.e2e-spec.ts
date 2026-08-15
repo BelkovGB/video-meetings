@@ -13,6 +13,7 @@ import { avatarConfig } from '../src/profile/avatar.config';
 import { AvatarValidationService } from '../src/profile/avatar-validation.service';
 import { ProfileService } from '../src/profile/profile.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { UsersService } from '../src/users/services/users.service';
 
 type UserSession = {
   accessToken: string;
@@ -353,6 +354,47 @@ describe('Current user profile (e2e)', () => {
       .post('/auth/login')
       .send({ email: user.email, password: validPassword })
       .expect(401);
+    await loginUser(user.email, newPassword);
+  });
+
+  it('rejects an old-password login that resumes after a password change commits', async () => {
+    const user = await registerUser('password-change-concurrent-login');
+    const newPassword = 'new-password-123';
+    const users = app.get(UsersService);
+    const originalFindByEmail = users.findByEmail.bind(users);
+    let releaseLoginLookup: (() => void) | undefined;
+    const loginLookupReleased = new Promise<void>((resolve) => {
+      releaseLoginLookup = resolve;
+    });
+    let signalLoginLookup: (() => void) | undefined;
+    const loginLookupStarted = new Promise<void>((resolve) => {
+      signalLoginLookup = resolve;
+    });
+    const findByEmail = jest.spyOn(users, 'findByEmail').mockImplementationOnce(async (email) => {
+      const existingUser = await originalFindByEmail(email);
+      signalLoginLookup?.();
+      await loginLookupReleased;
+      return existingUser;
+    });
+
+    try {
+      const staleLogin = authenticationRequest('/auth/login')
+        .send({ email: user.email, password: validPassword })
+        .then((response) => response);
+      await loginLookupStarted;
+
+      await request(app.getHttpServer())
+        .post('/users/me/password')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .send({ currentPassword: validPassword, newPassword, confirmation: newPassword })
+        .expect(204);
+
+      releaseLoginLookup?.();
+      expect((await staleLogin).status).toBe(401);
+    } finally {
+      findByEmail.mockRestore();
+    }
+
     await loginUser(user.email, newPassword);
   });
 

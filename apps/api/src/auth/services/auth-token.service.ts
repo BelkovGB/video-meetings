@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { Prisma } from '@prisma/client';
 
 import { AuthSessionService } from './auth-session.service';
 
@@ -13,9 +14,9 @@ export class AuthTokenService {
     private readonly authSessionService: AuthSessionService,
   ) {}
 
-  async issue(userId: string, email: string) {
+  async issue(userId: string, email: string, transaction?: Prisma.TransactionClient) {
     const expiresAt = new Date(Date.now() + accessTokenLifetimeMs + 1_000);
-    const session = await this.authSessionService.create(userId, expiresAt);
+    const session = await this.authSessionService.create(userId, expiresAt, transaction);
     const accessToken = await this.jwtService.signAsync({ sub: userId, email, sid: session.id });
 
     return { accessToken };

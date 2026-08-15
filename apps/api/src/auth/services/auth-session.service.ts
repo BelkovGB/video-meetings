@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 
@@ -32,8 +33,8 @@ export class AuthSessionService implements OnApplicationBootstrap, OnModuleDestr
     }
   }
 
-  async create(userId: string, expiresAt: Date) {
-    return this.prisma.authSession.create({
+  async create(userId: string, expiresAt: Date, transaction?: Prisma.TransactionClient) {
+    return (transaction ?? this.prisma).authSession.create({
       data: { userId, expiresAt },
       select: { id: true },
     });
