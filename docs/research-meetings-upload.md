@@ -1,8 +1,8 @@
 # Исследование: загрузка и хранение файлов встреч
 
-**Исходный план:**
-[`plan-meeting-file-upload-and-management.md`](plan-meeting-file-upload-and-management.md)
 **Дата:** 2026-08-06
+**Статус:** архитектурное решение. Реализовано; действующий контракт —
+[`api.md`](api.md), разделы «Meeting files» и «Local upload configuration».
 
 ## Краткий вывод
 
