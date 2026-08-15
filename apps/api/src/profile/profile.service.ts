@@ -67,6 +67,36 @@ export class ProfileService {
     }
   }
 
+  async removeCurrentAvatar(userId: string): Promise<Profile> {
+    const { profile, storageKey } = await this.prisma.$transaction(async (transaction) => {
+      await transaction.$executeRaw(
+        Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))`,
+      );
+      const user = await transaction.user.findUnique({
+        where: { id: userId },
+        select: { avatarStorageKey: true },
+      });
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+
+      const profile = await transaction.user.update({
+        where: { id: userId },
+        data: {
+          avatarStorageKey: null,
+          avatarMimeType: null,
+          avatarSizeBytes: null,
+          avatarUpdatedAt: null,
+        },
+        select: profileSelect,
+      });
+      return { profile: this.toProfile(profile), storageKey: user.avatarStorageKey };
+    });
+
+    await this.discardSafely(storageKey);
+    return profile;
+  }
+
   private async retainAvatar(
     userId: string,
     file: Express.Multer.File | undefined,

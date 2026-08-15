@@ -86,6 +86,23 @@ describe('LocalAvatarStorageService', () => {
     }
   });
 
+  it('removes private avatar content through the non-blocking cleanup path', async () => {
+    const removalKey = `${storageKey}-removal`;
+    const removalTempPath = join(avatarConfig.tempDirectory, `${removalKey}.part`);
+
+    try {
+      await writeFile(removalTempPath, content);
+      await storage.finalize(removalTempPath, removalKey);
+
+      await storage.discardEventually(removalKey);
+
+      await expect(storage.open(removalKey)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await storage.discardTemp(removalTempPath);
+      await storage.discard(removalKey);
+    }
+  });
+
   it('removes interrupted temporary avatar uploads when storage starts', async () => {
     await writeFile(tempPath, content);
     const staleAt = new Date(Date.now() - avatarConfig.temporaryUploadGraceMs - 1_000);

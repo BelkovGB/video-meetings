@@ -268,6 +268,13 @@ describe('Current user profile (e2e)', () => {
   it('replaces an avatar only after the new image is retained', async () => {
     const user = await registerUser('avatar-replacement');
     const storedBefore = await readdir(join(avatarUploadRoot, 'files'));
+    const displayName = 'Avatar owner';
+
+    await request(app.getHttpServer())
+      .patch('/users/me')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ displayName })
+      .expect(200);
 
     await request(app.getHttpServer())
       .post('/users/me/avatar')
@@ -295,6 +302,34 @@ describe('Current user profile (e2e)', () => {
       .expect('Content-Type', /image\/jpeg/)
       .expect(200);
     expect(Buffer.from(retrieved.body as Buffer)).toEqual(validJpeg);
+
+    const storage = app.get(LocalAvatarStorageService);
+    const discard = jest
+      .spyOn(storage, 'discard')
+      .mockRejectedValueOnce(new Error('storage temporarily unavailable'));
+    const removed = await request(app.getHttpServer())
+      .delete('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(200);
+
+    expectProfile(removed, { id: user.id, email: user.email, displayName, avatar: null });
+    expect(removed.body).not.toHaveProperty('storageKey');
+    expect(removed.body).not.toHaveProperty('path');
+    discard.mockRestore();
+    await storage.reconcile();
+    expect(await readdir(join(avatarUploadRoot, 'files'))).toHaveLength(storedBefore.length);
+    await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(404);
+    const repeatedRemoval = await request(app.getHttpServer())
+      .delete('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .expect(200);
+    expectProfile(repeatedRemoval, removed.body as Profile);
+    await expect(
+      app.get(PrismaService).user.findUnique({ where: { id: user.id }, select: { id: true } }),
+    ).resolves.toEqual({ id: user.id });
   });
 
   it('keeps the prior avatar retrievable when storage rejects a replacement', async () => {
@@ -640,6 +675,10 @@ describe('Current user profile (e2e)', () => {
       .get(`/users/${owner.id}/avatar`)
       .set('Authorization', `Bearer ${anotherUser.accessToken}`)
       .expect(404);
+    await request(app.getHttpServer())
+      .delete(`/users/${owner.id}/avatar`)
+      .set('Authorization', `Bearer ${anotherUser.accessToken}`)
+      .expect(404);
   });
 
   it('rejects requests containing more than one avatar file', async () => {
@@ -666,5 +705,6 @@ describe('Current user profile (e2e)', () => {
       .expect(401);
     await expect(readdir(join(avatarUploadRoot, 'temp'))).resolves.toEqual([]);
     await request(app.getHttpServer()).get('/users/me/avatar').expect(401);
+    await request(app.getHttpServer()).delete('/users/me/avatar').expect(401);
   });
 });

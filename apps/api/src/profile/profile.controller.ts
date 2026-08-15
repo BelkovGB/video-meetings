@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpStatus,
   Patch,
@@ -45,6 +46,11 @@ export class ProfileController {
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
     return this.profileService.uploadAvatar(request.user.sub, file);
+  }
+
+  @Delete('avatar')
+  removeCurrentAvatar(@Req() request: AuthenticatedRequest) {
+    return this.profileService.removeCurrentAvatar(request.user.sub);
   }
 
   @Get('avatar')
