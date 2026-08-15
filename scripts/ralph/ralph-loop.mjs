@@ -2000,6 +2000,8 @@ Audit all of these areas:
 - public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant;
 - whether tests assert the real externally observable behavior rather than only an implementation detail.
 
+Read efficiently on this Windows/PowerShell host: locate code with \`rg -n\` before opening a file, read bounded ranges rather than whole files, and pass every discovered path to file cmdlets with \`-LiteralPath\` so Next.js route segments such as \`apps/web/app/meetings/[id]\` are not treated as wildcard patterns. Do not dump full logs, lockfiles, or generated files.
+
 Discover documentation paths before reading them: use \`rg --files docs\` and repository file listings, then read only paths confirmed to exist. Never guess conventional paths such as \`docs/README.md\`. For public API work in this repository, treat \`README.md\`, \`docs/api.md\`, and \`docs/api-architecture.md\` as canonical entry points when those files exist, while still inspecting issue-specific documents returned by discovery.
 
 Only report findings caused by the claimed implementation, regressions at current HEAD, or work required by the issue. Ignore unrelated pre-existing debt. Use verdict \"fail\" when at least one actionable finding exists; otherwise use \"pass\" with an empty findings array. Do not edit files.`;
@@ -3385,6 +3387,8 @@ ${milestoneDescription}
 The branch and pull request may be cumulative and contain work from other milestones. Scope the review exclusively to the requirements in the milestone title and description, plus integrations strictly required for those requirements. Use the branch diff against ${config.baseBranch} as evidence, not as the definition of scope. Do not report defects in unrelated features, infrastructure, or files merely because they are present or changed in the pull request.
 
 Ralph's control plane is maintained manually outside the product loop. Never report findings for .agents/**, scripts/ralph/**, AGENTS.md, or nested **/AGENTS.md files. Those paths must never become milestone issues and must never be modified by an AFK implementation session.
+
+Read efficiently on this Windows/PowerShell host: locate code with \`rg -n\` before opening a file, read bounded ranges rather than whole files, and pass every discovered path to file cmdlets with \`-LiteralPath\` so Next.js route segments such as \`apps/web/app/meetings/[id]\` are not treated as wildcard patterns. Do not dump full logs, lockfiles, or generated files.
 
 Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. Discover documentation paths first with \`rg --files docs\` and repository file listings, then read only paths confirmed to exist; never guess conventional paths such as \`docs/README.md\`. For public API work in this repository, treat \`README.md\`, \`docs/api.md\`, and \`docs/api-architecture.md\` as canonical entry points when those files exist, while still inspecting relevant milestone-specific documents returned by discovery. Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
 

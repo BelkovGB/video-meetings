@@ -51,7 +51,7 @@
   "autoApproveConfiguredIssues": true,
   "trustedIssueAuthors": ["codex-ai-Goo"],
   "rulesFile": ".agents/ralph-rules.md",
-  "prompt": "Прочитай .agents/RALPH.md и следуй правилам оттуда. Возьми issue #{issue_number} «{issue_title}» из milestone «{milestone}» и реализуй её. Соблюдай AGENTS.md и переданные ниже правила Ralph Loop.",
+  "prompt": "Возьми issue #{issue_number} «{issue_title}» из milestone «{milestone}» и реализуй её. Твой полный контракт — правила Ralph Loop, переданные ниже в этом же prompt, и AGENTS.md. Не читай .agents/RALPH.md: это операторская документация, она не нужна для реализации.",
 
   "preflightScripts": ["db:ready", "db:migrate"],
   "validationScripts": [

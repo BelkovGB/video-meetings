@@ -3248,3 +3248,114 @@ test('the attestation key covers every declared input', () => {
   }
   assert.equal(validationAttestationKey({ ...inputs }), base);
 });
+
+const ralphRulesPath = fileURLToPath(new URL('../../.agents/ralph-rules.md', import.meta.url));
+const ralphOperatorDocPath = fileURLToPath(new URL('../../.agents/RALPH.md', import.meta.url));
+
+test('the implementation prompt carries the full contract without the operator manual', () => {
+  const config = loadConfig();
+  try {
+    const rules = readFileSync(ralphRulesPath, 'utf8');
+    const prompt = renderPrompt(
+      { ...config, milestone: 'Phase 8', branch: 'features/profile-phase-8' },
+      {
+        number: 71,
+        title: 'Deliver the password change screen',
+        url: 'https://example/71',
+        body: 'Body.',
+      },
+      rules,
+    );
+
+    // The contract is inlined, so reading the 268-line operator document would be
+    // hundreds of lines of input tokens per issue for no requirement.
+    assert.match(prompt, /Не читай \.agents\/RALPH\.md/);
+    assert.equal(/Прочитай \.agents\/RALPH\.md/.test(prompt), false);
+    assert.match(prompt, /правила Ralph Loop, переданные ниже/);
+    assert.match(prompt, /# Ralph Loop — правила автономной сессии/);
+    assert.match(prompt, /Не изменяй `\.agents\/\*\*`/);
+    assert.match(prompt, /COMMIT_MESSAGE/);
+    assert.match(prompt, /ALREADY_FIXED/);
+    // Placeholders are still substituted.
+    assert.match(prompt, /Работай только над issue #71\./);
+    assert.equal(prompt.includes('{issue_number}'), false);
+  } finally {
+    rmSync(config.validationContainer.frozenDockerfileDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
+test('the operator manual states that it is not the agent contract', () => {
+  const operatorDoc = readFileSync(ralphOperatorDocPath, 'utf8');
+  assert.match(operatorDoc, /Это операторская документация/);
+  assert.match(operatorDoc, /\.agents\/ralph-rules\.md/);
+});
+
+test('every generated prompt teaches -LiteralPath for Next.js route segments', () => {
+  const rules = readFileSync(ralphRulesPath, 'utf8');
+  const reviewPrompt = buildIndependentReviewPrompt(
+    { number: 71, title: 'Issue', body: 'Body.' },
+    'a'.repeat(40),
+  );
+  const milestonePrompt = buildMilestoneReviewPrompt(
+    { baseBranch: 'master', branch: 'features/profile-phase-8' },
+    { title: 'Phase 8', description: 'Description.' },
+    { number: 61, url: 'https://example/61', headRefOid: 'b'.repeat(40) },
+  );
+
+  // The rule used to reach the implementation session only; both reviewers run
+  // the same PowerShell cmdlets against the same repository.
+  for (const [label, text] of [
+    ['rules', rules],
+    ['issue review', reviewPrompt],
+    ['milestone review', milestonePrompt],
+  ]) {
+    assert.match(text, /-LiteralPath/, `${label} must require -LiteralPath`);
+    assert.match(text, /\[id\]/, `${label} must name the wildcard-prone segment`);
+  }
+
+  assert.match(rules, /Get-ChildItem/);
+  assert.match(rules, /Test-Path/);
+  assert.match(rules, /FullName/);
+});
+
+test('a Next.js route segment is only readable through -LiteralPath on Windows', function (t) {
+  if (process.platform !== 'win32') {
+    t.skip('PowerShell wildcard behaviour is Windows-specific');
+    return;
+  }
+
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-literal-path-'));
+  try {
+    const segment = path.join(directory, '[id]');
+    mkdirSync(segment, { recursive: true });
+    const file = path.join(segment, 'page.tsx');
+    writeFileSync(file, 'export default function Page() {}\n', 'utf8');
+
+    const readWithPath = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', `Get-Content -Path '${file}'`],
+      { encoding: 'utf8' },
+    );
+    const readWithLiteralPath = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', `Get-Content -LiteralPath '${file}'`],
+      { encoding: 'utf8' },
+    );
+
+    assert.match(
+      readWithLiteralPath.stdout,
+      /export default function Page/,
+      '-LiteralPath must read the file',
+    );
+    assert.equal(
+      /export default function Page/.test(readWithPath.stdout),
+      false,
+      '-Path treats [id] as a wildcard and finds nothing — this is the failure the rule prevents',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
