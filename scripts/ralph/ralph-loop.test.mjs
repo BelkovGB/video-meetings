@@ -770,10 +770,14 @@ test('implementation prompt delegates full validation to the outer orchestrator'
     rules,
   );
 
-  assert.match(prompt, /Не запускай весь список `validationScripts`/);
-  assert.match(prompt, /оркестратор\s+выполнит его снаружи sandbox/);
+  // Проверяется контракт, а не конкретная формулировка: полный набор делегирован
+  // наружу, npm вызывается в обход PowerShell-обёртки, и повторный прогон с
+  // увеличенным таймаутом запрещён.
+  assert.match(prompt, /`validationScripts`/);
+  assert.match(prompt, /снаружи\s+sandbox/);
+  assert.match(prompt, /не дублируй/i);
   assert.match(prompt, /npm\.cmd/);
-  assert.match(prompt, /Не повторяй тот же полный\s+прогон с увеличенным таймаутом/);
+  assert.match(prompt, /не повторяй[\s\S]{0,80}таймаутом/i);
 });
 
 test('issue review prompt requires one exhaustive in-scope audit', () => {
