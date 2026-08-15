@@ -23,3 +23,19 @@
   use `Select-Object -Last 5` in PowerShell and `tail -5` with `pipefail` in POSIX.
 - Prefer `rg` and targeted file ranges. Do not dump complete logs, generated
   files, lockfiles, or large JSON documents when a focused query is sufficient.
+
+## Writing instructions and documentation
+
+- Prioritise by size times read frequency. A line in every issue prompt costs
+  more than a page read once a month.
+- Duplicate a short fact; link to a long one. A link costs a step plus the whole
+  target file.
+- Write what to do. Write why only where a rule looks redundant and would be
+  optimised away: security boundaries, deliberate duplication, arbitrary-looking
+  limits. A prohibition without a reason gets removed.
+- Documentation describing code behaviour needs a test or it starts lying. A
+  wrong instruction costs more than a missing one.
+- Name the exact path, or the command that finds it. Guessing costs steps.
+- Put module instructions in an `AGENTS.md` beside the module, not in a shared
+  file, and do not repeat the parent. A new one changes Ralph's trusted set, so
+  add it between runs.
