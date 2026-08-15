@@ -89,11 +89,13 @@ import {
   alreadyFixedCommitFromAgent,
   commitMessageFromAgent,
   commitStagedChanges,
+  commitTrailerForIssue,
   linkedCommitForIssue,
   pushBranchAndVerify,
   reconcileStateAfterCrash,
   verifiedIssueCommit,
   verifyBaseHistory,
+  verifyPushedHead,
   verifyRepository,
 } from './ralph-git.mjs';
 
@@ -111,6 +113,21 @@ import {
   repositoryName,
   verifyMilestone,
 } from './ralph-github-client.mjs';
+
+import {
+  approveConfiguredIssue,
+  assertTrustedIssue,
+  clearIssueCompletionState,
+  formatReviewComment,
+  issueBodyWithCompletionState,
+  issueBodyWithReviewContext,
+  issueBodyWithoutCompletionState,
+  issueCompletionState,
+  issueContentHash,
+  normalizeReviewResult,
+  setIssueCompletionState,
+  updateIssueReviewContext,
+} from './ralph-issue-contract.mjs';
 
 // -----------------------------------------------------------------------------
 // Пути проекта и режим запуска
@@ -138,98 +155,6 @@ function verifyTools() {
 // -----------------------------------------------------------------------------
 // Получение milestone и очереди открытых GitHub issues
 // -----------------------------------------------------------------------------
-
-function issueContentHash(issue) {
-  const canonicalBody = String(issue.body ?? '')
-    .replaceAll('\r\n', '\n')
-    .replace(/\n+$/, '');
-  return createHash('sha256')
-    .update(JSON.stringify({ title: issue.title ?? '', body: canonicalBody }))
-    .digest('hex');
-}
-
-function assertTrustedIssueAuthor(config, issue, repository) {
-  if (isRalphInfrastructureIssue(issue)) {
-    rejectUntrustedIssue(
-      `Issue #${issue.number} относится к Ralph-инфраструктуре. ` +
-        'Ralph выполняет только продуктовые задачи video-meetings; настройка цикла выполняется вручную.',
-    );
-  }
-  const author = typeof issue.authorLogin === 'string' ? issue.authorLogin : '';
-  const repositoryOwner = repository?.split('/')[0]?.toLowerCase();
-  const trustedAuthors = new Set(
-    [...(config.trustedIssueAuthors ?? []), repositoryOwner]
-      .filter(Boolean)
-      .map((trustedAuthor) => trustedAuthor.toLowerCase()),
-  );
-  if (!trustedAuthors.has(author.toLowerCase())) {
-    rejectUntrustedIssue(
-      `Issue #${issue.number} authored by "${author || 'unknown'}" is not trusted. ` +
-        'Only the repository owner or authors configured in trustedIssueAuthors may provide AFK instructions.',
-    );
-  }
-}
-
-function approveConfiguredIssue(
-  config,
-  issue,
-  repository,
-  stateStore = activeStateStore(),
-  { replace = false } = {},
-) {
-  const key = String(issue.number);
-  if ((config.approvedIssueSnapshots?.[key] && !replace) || !config.autoApproveConfiguredIssues) {
-    return issue;
-  }
-
-  assertTrustedIssueAuthor(config, issue, repository);
-  const snapshot = {
-    title: issue.title,
-    body: issueBodyWithoutRalphMetadata(issue),
-  };
-  const approvedSnapshot =
-    stateStore?.approveIssueSnapshot(issue.number, snapshot, replace) ?? snapshot;
-  config.approvedIssueSnapshots[key] = approvedSnapshot;
-  console.log(
-    `Issue #${issue.number}: immutable snapshot автоматически зафиксирован ` +
-      'закоммиченным планом phases.',
-  );
-  return issue;
-}
-
-function rejectUntrustedIssue(message) {
-  const error = new Error(message);
-  error.code = 'RALPH_UNTRUSTED_ISSUE';
-  throw error;
-}
-
-function assertTrustedIssue(config, issue, repository) {
-  assertTrustedIssueAuthor(config, issue, repository);
-  const snapshot = config.approvedIssueSnapshots?.[String(issue.number)];
-  if (!snapshot) {
-    rejectUntrustedIssue(
-      `Issue #${issue.number} has no approved immutable snapshot. ` +
-        'Add its exact title and body to approvedIssueSnapshots before AFK execution.',
-    );
-  }
-  const issueAuthoredContent = {
-    title: issue.title,
-    body: issueBodyWithoutRalphMetadata(issue),
-  };
-  if (issueContentHash(issueAuthoredContent) !== issueContentHash(snapshot)) {
-    rejectUntrustedIssue(
-      `Issue #${issue.number} does not match the approved immutable snapshot. ` +
-        'Its mutable GitHub title or body changed after approval; review and explicitly update the snapshot.',
-    );
-  }
-  return {
-    ...issue,
-    title: snapshot.title,
-    // Completion markers are only recovery pointers. Review context is retained
-    // so the next implementation session receives the latest reviewer findings.
-    body: issueBodyWithoutCompletionState(issue),
-  };
-}
 
 // -----------------------------------------------------------------------------
 // Формирование prompt для реализации одной issue
@@ -298,99 +223,6 @@ Only report findings caused by the claimed implementation, regressions at curren
 // -----------------------------------------------------------------------------
 // Проверка состояния issue и повторное открытие при ошибке
 // -----------------------------------------------------------------------------
-
-function formatReviewComment(review) {
-  const findings = review.findings
-    .map((finding) => {
-      const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
-      return `- **${finding.severity} — ${finding.title}** (${location})\n  ${finding.body}`;
-    })
-    .join('\n');
-
-  return `## Ralph Loop: independent review found problems\n\n${review.summary}\n\n${findings}\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.`;
-}
-
-function normalizeReviewResult(review) {
-  if (review.verdict === 'fail' && review.findings.length === 0) {
-    fail('Review returned FAIL without actionable findings.');
-  }
-
-  if (review.verdict === 'pass' && review.findings.length > 0) {
-    return {
-      ...review,
-      verdict: 'fail',
-      summary:
-        `Codex returned PASS together with ${review.findings.length} actionable findings. ` +
-        `Ralph treated the result as FAIL. ${review.summary}`,
-    };
-  }
-
-  return review;
-}
-
-const reviewContextPattern =
-  /\n*<!-- ralph-issue-review-context:start -->[\s\S]*?<!-- ralph-issue-review-context:end -->\n*/g;
-
-function issueBodyWithoutRalphMetadata(issue) {
-  return issueBodyWithoutCompletionState(issue).replace(reviewContextPattern, '').trim();
-}
-
-function issueBodyWithReviewContext(issue, review) {
-  const startMarker = '<!-- ralph-issue-review-context:start -->';
-  const endMarker = '<!-- ralph-issue-review-context:end -->';
-  const originalBody = issueBodyWithoutCompletionState(issue)
-    .replace(reviewContextPattern, '')
-    .trimEnd();
-  const reviewContext = formatReviewComment(review).replace(
-    '\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.',
-    '',
-  );
-  return `${originalBody}\n\n${startMarker}\n${reviewContext}\n${endMarker}`.trim();
-}
-
-function updateIssueReviewContext(repository, issue, review) {
-  const latest = issueDetails(repository, issue.number);
-  const updatedBody = issueBodyWithReviewContext({ ...issue, body: latest.body }, review);
-  issue.body = patchIssue(repository, issue.number, { body: updatedBody }).body;
-}
-
-function issueBodyWithoutCompletionState(issue) {
-  return (issue.body ?? '')
-    .replace(
-      /\n*<!-- ralph-issue-completion status:(?:pending-review|review-passed) commit:[0-9a-f]{40} -->\n*/gi,
-      '\n',
-    )
-    .trim();
-}
-
-function issueCompletionState(issue) {
-  const match = (issue.body ?? '').match(
-    /<!-- ralph-issue-completion status:(pending-review|review-passed) commit:([0-9a-f]{40}) -->/i,
-  );
-  return match ? { status: match[1].toLowerCase(), commit: match[2].toLowerCase() } : null;
-}
-
-function issueBodyWithCompletionState(issue, status, commit) {
-  const body = issueBodyWithoutCompletionState(issue);
-  return `${body}\n\n<!-- ralph-issue-completion status:${status} commit:${commit} -->`.trim();
-}
-
-function setIssueCompletionState(repository, issue, status, commit) {
-  const latest = issueDetails(repository, issue.number);
-  const updatedBody = issueBodyWithCompletionState({ ...issue, body: latest.body }, status, commit);
-  issue.body = patchIssue(repository, issue.number, { body: updatedBody }).body;
-}
-
-function clearIssueCompletionState(repository, issue) {
-  const latest = issueDetails(repository, issue.number);
-  const updatedBody = issueBodyWithoutCompletionState({ ...issue, body: latest.body });
-  if (updatedBody === (latest.body ?? '').trim()) {
-    issue.body = latest.body ?? '';
-    return;
-  }
-
-  issue.body = patchIssue(repository, issue.number, { body: updatedBody }).body;
-}
 
 // -----------------------------------------------------------------------------
 // Локальное ревью commit одной issue на модели Terra

@@ -15,7 +15,7 @@ import { clearedFailure } from './ralph-failure-summary.mjs';
 // Пути выводятся здесь заново, как в `ralph-process-runner.mjs`.
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-function commitTrailerForIssue(issue) {
+export function commitTrailerForIssue(issue) {
   return `Ralph-Issue: #${issue.number}`;
 }
 
@@ -265,7 +265,7 @@ export function verifiedIssueCommit(commit, issue) {
   return resolved.stdout;
 }
 
-function verifyPushedHead(config, expectedHead) {
+export function verifyPushedHead(config, expectedHead) {
   const currentBranch = run('git', ['branch', '--show-current']).stdout;
   const localHead = run('git', ['rev-parse', 'HEAD']).stdout;
   const changes = run('git', ['status', '--porcelain']).stdout;
