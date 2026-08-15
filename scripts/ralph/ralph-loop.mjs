@@ -304,7 +304,11 @@ function recoveryPrompt(storedIssue) {
   );
 }
 
-const sanitizedChildEnvironmentVariables = [
+// Полный allowlist переменных, которые дочерний процесс может унаследовать.
+// Сам по себе он не является политикой: home/config-переменные указывают на
+// каталоги с учётными данными, поэтому единственная применяемая политика ниже
+// вычитает их. Список остаётся отдельно, чтобы вычитание было видимым.
+const inheritableEnvironmentVariables = [
   'PATH',
   'Path',
   'PATHEXT',
@@ -324,7 +328,7 @@ const sanitizedChildEnvironmentVariables = [
   'CODEX_HOME',
 ];
 
-const credentialFreeEnvironmentVariables = sanitizedChildEnvironmentVariables.filter(
+const credentialFreeEnvironmentVariables = inheritableEnvironmentVariables.filter(
   (name) =>
     ![
       'HOME',
@@ -341,10 +345,6 @@ function createEnvironment(variableNames, source = process.env) {
   return Object.fromEntries(
     variableNames.flatMap((name) => (source[name] === undefined ? [] : [[name, source[name]]])),
   );
-}
-
-function sanitizedChildEnvironment(source = process.env) {
-  return createEnvironment(credentialFreeEnvironmentVariables, source);
 }
 
 function credentialFreeEnvironment(source = process.env) {
@@ -4100,11 +4100,12 @@ export {
   runContinuousLoop,
   runPhasePlan,
   scopeMilestoneReviewToProduct,
+  credentialFreeEnvironmentVariables,
+  inheritableEnvironmentVariables,
   formatFailureSummary,
   recoveryPrompt,
   summarizeCommandFailure,
   uniqueFailedTests,
-  sanitizedChildEnvironment,
   agentReportedWriteAccessFailure,
   validationContainerRunArgs,
   validationImageForSnapshot,

@@ -20,12 +20,14 @@ import {
   createTrustedValidationDependencySnapshot,
   createStateStore,
   credentialFreeEnvironment,
+  credentialFreeEnvironmentVariables,
   developmentCodexArguments,
   createOrReopenReviewIssues,
   executeMode,
   ensureValidationImage,
   formatFailureSummary,
   githubPagedArray,
+  inheritableEnvironmentVariables,
   issueBodyWithCompletionState,
   issueBodyWithReviewContext,
   issueContentHash,
@@ -53,7 +55,6 @@ import {
   runContinuousLoop,
   runPhasePlan,
   scopeMilestoneReviewToProduct,
-  sanitizedChildEnvironment,
   summarizeCommandFailure,
   uniqueFailedTests,
   validationContainerRunArgs,
@@ -1322,7 +1323,20 @@ test('child environments remove inherited credentials before untrusted work runs
   };
 
   assert.deepEqual(credentialFreeEnvironment(source), { PATH: source.PATH });
-  assert.deepEqual(sanitizedChildEnvironment(source), { PATH: source.PATH });
+  // One policy, not two: the credential-free set is the inheritable allowlist
+  // minus every variable that points at a directory holding credentials.
+  for (const name of [
+    'HOME',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'XDG_CONFIG_HOME',
+    'XDG_CACHE_HOME',
+    'CODEX_HOME',
+  ]) {
+    assert.equal(inheritableEnvironmentVariables.includes(name), true);
+    assert.equal(credentialFreeEnvironmentVariables.includes(name), false);
+  }
 
   const originalGhToken = process.env.GH_TOKEN;
   const originalJwtSecret = process.env.JWT_SECRET;
