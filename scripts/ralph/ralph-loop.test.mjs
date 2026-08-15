@@ -374,6 +374,56 @@ test('Ralph configuration pins approved AFK inputs before starting an agent sess
   }
 });
 
+// Разбиение оркестратора трижды оставляло вызов функции, уехавшей в другой
+// модуль, без импорта. Тесты этого не ловили: такие ветки ходят в сеть. ESLint
+// тоже не ловит - он запускается только по workspace apps/api и apps/web.
+test('every Ralph module imports the cross-module functions it calls', () => {
+  const directory = path.join(process.cwd(), 'scripts', 'ralph');
+  const modules = readdirSync(directory).filter(
+    (name) => name.endsWith('.mjs') && !name.endsWith('.test.mjs'),
+  );
+
+  // Экспорты собираются из текста, а не через import: ralph-command-runner.mjs
+  // при загрузке читает stdin и повесил бы прогон.
+  const sources = new Map(
+    modules.map((name) => [name, readFileSync(path.join(directory, name), 'utf8')]),
+  );
+  const exportedElsewhere = new Map();
+  for (const [name, code] of sources) {
+    for (const match of code.matchAll(/^export\s+(?:async\s+)?function\s+(\w+)/gm)) {
+      exportedElsewhere.set(match[1], name);
+    }
+  }
+
+  const problems = [];
+  for (const [name, code] of sources) {
+    const bound = new Set();
+    for (const match of code.matchAll(/^import\s*\{([^}]*)\}/gm)) {
+      for (const entry of match[1].split(','))
+        bound.add(
+          entry
+            .trim()
+            .split(/\s+as\s+/)
+            .pop(),
+        );
+    }
+    for (const match of code.matchAll(/(?:const|let|var|function)\s+(\w+)/g)) bound.add(match[1]);
+    for (const match of code.matchAll(/\(([^()]*)\)\s*(?:=>|\{)/g)) {
+      for (const parameter of match[1].split(',')) bound.add(parameter.trim().split(/[\s=:]/)[0]);
+    }
+
+    for (const [exportedName, owner] of exportedElsewhere) {
+      if (owner === name || bound.has(exportedName)) continue;
+      // Вызов без точки перед именем: `foo(`, но не `object.foo(`.
+      if (new RegExp(`(^|[^.\\w])${exportedName}\\s*\\(`).test(code)) {
+        problems.push(`${name} calls ${exportedName} from ${owner} without importing it`);
+      }
+    }
+  }
+
+  assert.deepEqual(problems, []);
+});
+
 test('Ralph rejects a modified approved snapshot ledger before an AFK session starts', () => {
   const ledgerPath = new URL('./approved-issues.json', import.meta.url);
   const originalLedger = readFileSync(ledgerPath, 'utf8');

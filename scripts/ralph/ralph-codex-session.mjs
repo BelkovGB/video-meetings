@@ -14,7 +14,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { terminateProcessTreeByPid } from './ralph-runtime.mjs';
+import { terminateProcessTreeByPid, waitSync } from './ralph-runtime.mjs';
 import {
   commandSpec,
   credentialFreeEnvironment,
@@ -369,4 +369,25 @@ export function verifyCodexAuthentication(dependencies = {}) {
   } finally {
     rmSync(childEnvironment.root, { recursive: true, force: true });
   }
+}
+
+// Повтор review-сессии при технической ошибке. Ошибка с nonRetryable - это
+// вердикт ревьюера, а не сбой запуска, и повторять её нельзя.
+export async function runReviewWithRetries(config, operation, label) {
+  let lastError;
+  for (let attempt = 1; attempt <= config.runtime.reviewRetryAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (error.nonRetryable || attempt === config.runtime.reviewRetryAttempts) throw error;
+      const delay = Math.min(config.runtime.networkRetryBaseDelayMs * 2 ** (attempt - 1), 30_000);
+      console.error(
+        `${label} технически не завершился (попытка ${attempt}): ${error.message}. ` +
+          `Повтор через ${delay} ms.`,
+      );
+      waitSync(delay);
+    }
+  }
+  throw lastError;
 }

@@ -1,0 +1,86 @@
+/**
+ * Prompt для реализации issue и для обоих ревьюеров.
+ *
+ * Модуль не импортирует ничего: это только текст с подстановками.
+ */
+
+function renderTemplate(template, replacements) {
+  let result = template;
+  for (const [placeholder, value] of Object.entries(replacements)) {
+    result = result.replaceAll(placeholder, value);
+  }
+
+  return result;
+}
+
+export function renderPrompt(config, issue, rules) {
+  const replacements = {
+    '{milestone}': config.milestone,
+    '{branch}': config.branch,
+    '{issue_number}': String(issue.number),
+    '{issue_title}': issue.title,
+    '{issue_url}': issue.url,
+    '{max_turns}': String(config.maxTurns),
+    '{max_test_fix_attempts}': String(config.maxTestFixAttempts),
+  };
+
+  const prompt = renderTemplate(config.prompt, replacements);
+  const renderedRules = renderTemplate(rules, replacements);
+  const issueBody = issue.body?.trim() || '(Описание issue пустое.)';
+
+  return `${prompt}\n\n## Текущая issue\n\n- Number: #${issue.number}\n- Title: ${issue.title}\n- URL: ${issue.url}\n\n### Body и критерии готовности\n\n${issueBody}\n\n---\n\n${renderedRules}`;
+}
+
+// Both review prompts carried these blocks verbatim, so editing one silently
+// left the other reviewer on an older contract. They live here once.
+const reviewShellGuidance =
+  'Read efficiently on this Windows/PowerShell host: locate code with `rg -n` before opening a file, read bounded ranges rather than whole files, and pass every discovered path to file cmdlets with `-LiteralPath` so Next.js route segments such as `apps/web/app/meetings/[id]` are not treated as wildcard patterns. Do not dump full logs, lockfiles, or generated files.';
+const reviewDocumentationDiscovery =
+  'Discover documentation paths before reading them: use `rg --files docs` and repository file listings, then read only paths confirmed to exist. Never guess conventional paths such as `docs/README.md`. For public API work in this repository, treat `README.md`, `docs/api.md`, and `docs/api-architecture.md` as canonical entry points when those files exist, while still inspecting the scope-specific documents returned by discovery.';
+const reviewVerdictContract =
+  'Use verdict "fail" when at least one actionable finding exists; otherwise use "pass" with an empty findings array.';
+
+export function buildIndependentReviewPrompt(issue, commit) {
+  const issueBody = issue.body?.trim() || '(empty)';
+
+  return `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; inspect it as evidence, but verify that the current HEAD still satisfies the issue and has not regressed it.
+
+Issue body:
+${issueBody}
+
+Complete the entire audit before deciding the verdict. Do not stop after the first problem. Return every distinct, actionable finding you can substantiate in this single response, without duplicates and without inventing findings to fill a quota.
+
+Audit all of these areas:
+- every requirement and definition-of-done item from the issue body;
+- correctness, edge cases, regressions, security, and test coverage;
+- interactions between all files changed for the issue, not only the most obvious file;
+- public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant;
+- whether tests assert the real externally observable behavior rather than only an implementation detail.
+
+${reviewShellGuidance}
+
+${reviewDocumentationDiscovery}
+
+Only report findings caused by the claimed implementation, regressions at current HEAD, or work required by the issue. Ignore unrelated pre-existing debt. ${reviewVerdictContract} Do not edit files.`;
+}
+
+export function buildMilestoneReviewPrompt(config, milestone, pullRequest) {
+  const milestoneDescription = milestone.description?.trim() || '(Milestone description is empty.)';
+
+  return `Perform a read-only architectural review of pull request #${pullRequest.number} (${pullRequest.url}) for milestone "${milestone.title}".
+
+Milestone description:
+${milestoneDescription}
+
+The branch and pull request may be cumulative and contain work from other milestones. Scope the review exclusively to the requirements in the milestone title and description, plus integrations strictly required for those requirements. Use the branch diff against ${config.baseBranch} as evidence, not as the definition of scope. Do not report defects in unrelated features, infrastructure, or files merely because they are present or changed in the pull request.
+
+Ralph's control plane is maintained manually outside the product loop. Never report findings for .agents/**, scripts/ralph/**, AGENTS.md, or nested **/AGENTS.md files. Those paths must never become milestone issues and must never be modified by an AFK implementation session.
+
+${reviewShellGuidance}
+
+Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. ${reviewDocumentationDiscovery} Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
+
+The Ralph orchestrator has already completed every configured preflight and validation script successfully for the exact reviewed head. Do not rerun npm, npx, builds, linters, type checks, tests, dev servers, or any command that writes caches or artifacts. Use read-only file and git inspection only.
+
+Report every distinct actionable finding in scope in this single response. ${reviewVerdictContract} Do not edit files, create comments, change GitHub state, or run destructive commands. The Ralph orchestrator will publish the structured result.`;
+}
