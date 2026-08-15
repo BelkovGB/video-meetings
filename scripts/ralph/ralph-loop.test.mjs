@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -28,6 +36,7 @@ import {
   failedValidationScript,
   formatFailureSummary,
   githubPagedArray,
+  hasValidationAttestation,
   inheritableEnvironmentVariables,
   issueBodyWithCompletionState,
   issueBodyWithReviewContext,
@@ -45,6 +54,9 @@ import {
   normalizePhases,
   normalizeReviewResult,
   parseSkillFrontmatter,
+  purgeValidationAttestations,
+  readValidationAttestations,
+  recordValidationAttestation,
   recoveryPrompt,
   reviewFindingFingerprint,
   reviewFindingMarker,
@@ -58,6 +70,7 @@ import {
   scopeMilestoneReviewToProduct,
   summarizeCommandFailure,
   uniqueFailedTests,
+  validationAttestationKey,
   validationContainerRunArgs,
   validationImageForSnapshot,
   verifyAgentSkills,
@@ -2826,14 +2839,46 @@ test('the recovery prompt carries the summary and tells the agent to rerun only 
   assert.equal(/Сначала повтори только упавшие проверки/.test(withoutFailure), false);
 });
 
+let cachedTrustedControlFileHashes = null;
+
+function trustedControlFileHashes() {
+  if (!cachedTrustedControlFileHashes) {
+    const loaded = loadConfig();
+    rmSync(loaded.validationContainer.frozenDockerfileDirectory, { recursive: true, force: true });
+    cachedTrustedControlFileHashes = loaded.trustedControlFileHashes;
+  }
+  return cachedTrustedControlFileHashes;
+}
+
+// The real snapshots copy every tracked and untracked file in the repository.
+// Tests that only assert orchestration supply throwaway snapshot directories so
+// `npm run test:ralph` does not pay for a full repository copy per case.
+function withStubbedValidationSnapshots(body) {
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-stub-'));
+  let created = 0;
+  const factory = (kind) => () => {
+    created += 1;
+    const snapshotPath = path.join(directory, `${kind}-${created}`);
+    mkdirSync(snapshotPath, { recursive: true });
+    writeFileSync(path.join(snapshotPath, 'content'), kind, 'utf8');
+    return snapshotPath;
+  };
+  try {
+    return body({
+      createWorkspaceSnapshot: factory('workspace'),
+      createDependencySnapshot: factory('dependencies'),
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function validationConfig(overrides = {}) {
-  const loaded = loadConfig();
-  rmSync(loaded.validationContainer.frozenDockerfileDirectory, { recursive: true, force: true });
   return {
     preflightScripts: ['db:ready', 'db:migrate'],
     validationScripts: ['format:check', 'lint', 'build', 'test:ralph'],
     runtime: { validationTimeoutMs: 5_000, validationRunTimeoutMs: 9_000 },
-    trustedControlFileHashes: loaded.trustedControlFileHashes,
+    trustedControlFileHashes: trustedControlFileHashes(),
     validationContainer: {
       image: 'ralph-validation:single',
       dockerfilePath: fileURLToPath(new URL('./Dockerfile.validation', import.meta.url)),
@@ -2844,16 +2889,19 @@ function validationConfig(overrides = {}) {
 
 test('a validation set runs in one container instead of one per script', () => {
   const calls = [];
-  runConfiguredScripts(
-    validationConfig(),
-    ['format:check', 'lint', 'build', 'test:ralph'],
-    'Validation',
-    {
-      run: (command, args, options) => {
-        calls.push({ command, args, options });
-        return { status: 0, stdout: '' };
+  withStubbedValidationSnapshots((snapshots) =>
+    runConfiguredScripts(
+      validationConfig(),
+      ['format:check', 'lint', 'build', 'test:ralph'],
+      'Validation',
+      {
+        ...snapshots,
+        run: (command, args, options) => {
+          calls.push({ command, args, options });
+          return { status: 0, stdout: '' };
+        },
       },
-    },
+    ),
   );
 
   const runs = calls.filter((call) => call.args[0] === 'run');
@@ -2865,21 +2913,27 @@ test('a validation set runs in one container instead of one per script', () => {
   );
   assert.equal(runs[0].options.timeoutMs, 9_000, 'the run budget, not the per-command budget');
   assert.equal(
-    calls.filter((call) => call.args[0] === 'image' || call.args[0] === 'build').length,
-    1,
-    'the image is resolved once per run',
+    calls.filter((call) => call.args[0] === 'build').length,
+    0,
+    'an existing image is not rebuilt',
   );
+  // Image resolution and the digest probe happen once per run, not once per
+  // script: four scripts must not produce four image inspections.
+  assert.equal(calls.filter((call) => call.args[0] === 'image').length, 2);
 });
 
 test('preflight also collapses into a single container without the validation scripts', () => {
   const calls = [];
-  runConfiguredScripts(validationConfig(), ['db:ready', 'db:migrate'], 'Preflight', {
-    includePreflight: false,
-    run: (command, args) => {
-      calls.push(args);
-      return { status: 0, stdout: '' };
-    },
-  });
+  withStubbedValidationSnapshots((snapshots) =>
+    runConfiguredScripts(validationConfig(), ['db:ready', 'db:migrate'], 'Preflight', {
+      ...snapshots,
+      includePreflight: false,
+      run: (command, args) => {
+        calls.push(args);
+        return { status: 0, stdout: '' };
+      },
+    }),
+  );
 
   const runs = calls.filter((args) => args[0] === 'run');
   assert.equal(runs.length, 1);
@@ -2922,17 +2976,20 @@ test('a failed validation set reports the failing script, not the whole list', (
 
   assert.throws(
     () =>
-      runConfiguredScripts(validationConfig(), ['format:check', 'test:e2e:web'], 'Validation', {
-        run: (command, args) => {
-          if (args[0] !== 'run') return { status: 0, stdout: '' };
-          throw Object.assign(new Error('Команда docker run завершилась с кодом 1.'), {
-            code: 'RALPH_COMMAND_FAILED',
-            status: 1,
-            stdout: output,
-            stderr: '',
-          });
-        },
-      }),
+      withStubbedValidationSnapshots((snapshots) =>
+        runConfiguredScripts(validationConfig(), ['format:check', 'test:e2e:web'], 'Validation', {
+          ...snapshots,
+          run: (command, args) => {
+            if (args[0] !== 'run') return { status: 0, stdout: '' };
+            throw Object.assign(new Error('Команда docker run завершилась с кодом 1.'), {
+              code: 'RALPH_COMMAND_FAILED',
+              status: 1,
+              stdout: output,
+              stderr: '',
+            });
+          },
+        }),
+      ),
     (error) => {
       assert.equal(error.code, 'RALPH_VALIDATION_FAILED');
       assert.equal(error.script, 'test:e2e:web');
@@ -2945,12 +3002,15 @@ test('a failed validation set reports the failing script, not the whole list', (
 test('a validation timeout keeps its own error code and names the whole set', () => {
   assert.throws(
     () =>
-      runConfiguredScripts(validationConfig(), ['format:check', 'lint'], 'Validation', {
-        run: (command, args) => {
-          if (args[0] !== 'run') return { status: 0, stdout: '' };
-          throw Object.assign(new Error('timeout'), { code: 'RALPH_COMMAND_TIMEOUT' });
-        },
-      }),
+      withStubbedValidationSnapshots((snapshots) =>
+        runConfiguredScripts(validationConfig(), ['format:check', 'lint'], 'Validation', {
+          ...snapshots,
+          run: (command, args) => {
+            if (args[0] !== 'run') return { status: 0, stdout: '' };
+            throw Object.assign(new Error('timeout'), { code: 'RALPH_COMMAND_TIMEOUT' });
+          },
+        }),
+      ),
     (error) => {
       assert.equal(error.code, 'RALPH_COMMAND_TIMEOUT');
       assert.equal(error.script, 'db:ready, db:migrate, format:check, lint');
@@ -2989,4 +3049,202 @@ test('the per-run validation budget is validated and defaults when omitted', () 
       ),
     /Поле "runtime\.validationRunTimeoutMs" должно быть целым числом больше 0\./,
   );
+});
+
+// The real snapshots copy the whole repository. These tests are about the
+// attestation key, not about snapshot construction, so they supply tiny
+// snapshots whose bytes they control directly.
+function withAttestationHarness(body) {
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-attestations-'));
+  const attestationsPath = path.join(directory, 'validation-attestations.json');
+  const sources = { workspace: 'source v1', dependencies: 'lockfile v1' };
+  let created = 0;
+
+  const snapshotFactory = (kind) => () => {
+    created += 1;
+    const snapshotPath = path.join(directory, `${kind}-${created}`);
+    mkdirSync(snapshotPath, { recursive: true });
+    writeFileSync(path.join(snapshotPath, 'content'), sources[kind], 'utf8');
+    return snapshotPath;
+  };
+
+  const dockerCalls = [];
+  const validate = (scripts, overrides = {}) =>
+    runConfiguredScripts(
+      validationConfig(overrides.config),
+      scripts,
+      overrides.label ?? 'Validation',
+      {
+        attestationsPath,
+        createWorkspaceSnapshot: snapshotFactory('workspace'),
+        createDependencySnapshot: snapshotFactory('dependencies'),
+        run:
+          overrides.run ??
+          ((command, args, options) => {
+            dockerCalls.push({ command, args, options });
+            if (args[0] === 'image') {
+              return { status: 0, stdout: overrides.digest ?? `sha256:${'a'.repeat(64)}` };
+            }
+            return { status: 0, stdout: '' };
+          }),
+        ...(overrides.includePreflight === undefined
+          ? {}
+          : { includePreflight: overrides.includePreflight }),
+      },
+    );
+
+  const containerRuns = () => dockerCalls.filter((call) => call.args[0] === 'run').length;
+
+  try {
+    return body({ attestationsPath, sources, validate, containerRuns, dockerCalls });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test('an identical source, script list, and image reuse the recorded PASS', () => {
+  withAttestationHarness(({ attestationsPath, validate, containerRuns }) => {
+    validate(['format:check', 'lint']);
+    assert.equal(containerRuns(), 1);
+    assert.equal(readValidationAttestations(attestationsPath).length, 1);
+
+    validate(['format:check', 'lint']);
+    assert.equal(
+      containerRuns(),
+      1,
+      'the second validation of an unchanged tree must not start a container',
+    );
+  });
+});
+
+test('a changed source byte invalidates the attestation', () => {
+  withAttestationHarness(({ sources, validate, containerRuns }) => {
+    validate(['format:check']);
+    assert.equal(containerRuns(), 1);
+
+    sources.workspace = 'source v2';
+    validate(['format:check']);
+    assert.equal(containerRuns(), 2, 'one changed byte must force a new run');
+  });
+});
+
+test('changed dependencies, scripts, or image digest invalidate the attestation', () => {
+  withAttestationHarness(({ sources, validate, containerRuns }) => {
+    validate(['lint']);
+    assert.equal(containerRuns(), 1);
+
+    sources.dependencies = 'lockfile v2';
+    validate(['lint']);
+    assert.equal(containerRuns(), 2, 'a dependency change must force a new run');
+
+    validate(['lint', 'build']);
+    assert.equal(containerRuns(), 3, 'a longer script list must force a new run');
+
+    validate(['lint'], { digest: `sha256:${'b'.repeat(64)}` });
+    assert.equal(containerRuns(), 4, 'a rebuilt image under the same tag must force a new run');
+  });
+});
+
+test('the preflight set and the validation set hold separate attestations', () => {
+  withAttestationHarness(({ validate, containerRuns }) => {
+    validate(['db:ready', 'db:migrate'], { includePreflight: false, label: 'Preflight' });
+    assert.equal(containerRuns(), 1);
+
+    validate(['lint']);
+    assert.equal(containerRuns(), 2, 'preflight PASS must not satisfy the validation set');
+
+    validate(['db:ready', 'db:migrate'], { includePreflight: false, label: 'Preflight' });
+    assert.equal(containerRuns(), 2, 'the preflight set itself is still reused');
+  });
+});
+
+test('a failed validation records no attestation', () => {
+  withAttestationHarness(({ attestationsPath, validate }) => {
+    assert.throws(() =>
+      validate(['lint'], {
+        run: (command, args) => {
+          if (args[0] === 'image') return { status: 0, stdout: `sha256:${'c'.repeat(64)}` };
+          throw Object.assign(new Error('failed'), { code: 'RALPH_COMMAND_FAILED', status: 1 });
+        },
+      }),
+    );
+    assert.deepEqual(readValidationAttestations(attestationsPath), []);
+  });
+});
+
+test('an unresolvable image digest disables attestation instead of trusting a mutable tag', () => {
+  withAttestationHarness(({ attestationsPath, validate, containerRuns }) => {
+    validate(['lint'], { digest: '' });
+    validate(['lint'], { digest: '' });
+
+    assert.deepEqual(readValidationAttestations(attestationsPath), []);
+    assert.equal(containerRuns(), 2, 'without a digest every validation must execute');
+  });
+});
+
+test('a tampered trusted control file purges every stored attestation', () => {
+  withAttestationHarness(({ attestationsPath, validate }) => {
+    const orchestratorPath = fileURLToPath(new URL('./ralph-loop.mjs', import.meta.url));
+    const tamperedHashes = new Map(validationConfig().trustedControlFileHashes);
+    assert.equal(tamperedHashes.has(orchestratorPath), true);
+    tamperedHashes.set(orchestratorPath, 'not-the-real-hash');
+
+    recordValidationAttestation('deadbeef', { label: 'Validation' }, attestationsPath);
+    assert.equal(hasValidationAttestation('deadbeef', attestationsPath), true);
+
+    assert.throws(
+      () => validate(['lint'], { config: { trustedControlFileHashes: tamperedHashes } }),
+      /изменила доверенный файл/,
+    );
+    assert.equal(hasValidationAttestation('deadbeef', attestationsPath), false);
+  });
+});
+
+test('a changed AGENTS.md set also purges every stored attestation', () => {
+  withAttestationHarness(({ attestationsPath, validate }) => {
+    recordValidationAttestation('deadbeef', { label: 'Validation' }, attestationsPath);
+
+    assert.throws(
+      () => validate(['lint'], { config: { trustedControlFileHashes: new Map() } }),
+      /изменила набор доверенных файлов AGENTS\.md/,
+    );
+    assert.equal(hasValidationAttestation('deadbeef', attestationsPath), false);
+  });
+});
+
+test('the attestation store is bounded and keeps the newest entries', () => {
+  withAttestationHarness(({ attestationsPath }) => {
+    for (let index = 0; index < 40; index += 1) {
+      recordValidationAttestation(`key-${index}`, { label: 'Validation' }, attestationsPath);
+    }
+    const entries = readValidationAttestations(attestationsPath);
+    assert.equal(entries.length, 32);
+    assert.equal(entries[0].key, 'key-39');
+    assert.equal(hasValidationAttestation('key-0', attestationsPath), false);
+    assert.equal(hasValidationAttestation('key-39', attestationsPath), true);
+
+    purgeValidationAttestations(attestationsPath);
+    assert.deepEqual(readValidationAttestations(attestationsPath), []);
+  });
+});
+
+test('the attestation key covers every declared input', () => {
+  const inputs = {
+    workspaceHash: 'w',
+    dependencyHash: 'd',
+    imageDigest: 'i',
+    scripts: ['lint', 'build'],
+  };
+  const base = validationAttestationKey(inputs);
+
+  for (const changed of [
+    { ...inputs, workspaceHash: 'w2' },
+    { ...inputs, dependencyHash: 'd2' },
+    { ...inputs, imageDigest: 'i2' },
+    { ...inputs, scripts: ['build', 'lint'] },
+    { ...inputs, scripts: ['lint'] },
+  ]) {
+    assert.notEqual(validationAttestationKey(changed), base);
+  }
+  assert.equal(validationAttestationKey({ ...inputs }), base);
 });

@@ -47,6 +47,7 @@ const runtimeDirectory = path.join(projectRoot, '.git', 'ralph-loop');
 const runtimeStatePath = path.join(runtimeDirectory, 'state.json');
 const runtimeLockPath = path.join(runtimeDirectory, 'run.lock');
 const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
+const runtimeAttestationsPath = path.join(runtimeDirectory, 'validation-attestations.json');
 const commandRunnerPath = path.join(scriptDirectory, 'ralph-command-runner.mjs');
 const ralphInfrastructureLabel = 'ralph-infrastructure';
 let runtimeSettings = {
@@ -924,7 +925,15 @@ function freezeValidationDockerfile(dockerfilePath) {
   }
 }
 
-function assertTrustedControlFilesUnchanged(config) {
+function assertTrustedControlFilesUnchanged(config, options = {}) {
+  const attestationsPath = options.attestationsPath ?? runtimeAttestationsPath;
+  // Доверенный control plane входит в ключ attestation косвенно, через snapshot.
+  // Явная очистка нужна на случай, когда подделка обнаружена до нового хеша:
+  // ни одна ранее выданная запись не должна пережить обнаруженный tamper.
+  const rejectTamper = (message) => {
+    purgeValidationAttestations(attestationsPath);
+    fail(message);
+  };
   const trustedAgentInstructionFiles = new Set(
     [...(config.trustedControlFileHashes?.keys() ?? [])].filter(
       (file) => path.basename(file) === 'AGENTS.md',
@@ -935,14 +944,14 @@ function assertTrustedControlFilesUnchanged(config) {
     trustedAgentInstructionFiles.size !== currentAgentInstructionFiles.size ||
     [...currentAgentInstructionFiles].some((file) => !trustedAgentInstructionFiles.has(file))
   ) {
-    fail(
+    rejectTamper(
       'AFK-сессия изменила набор доверенных файлов AGENTS.md. ' +
         'Изменение отклонено до валидации, commit и push.',
     );
   }
   for (const [file, expectedHash] of config.trustedControlFileHashes ?? []) {
     if (!existsSync(file) || trustedFileHash(file) !== expectedHash) {
-      fail(
+      rejectTamper(
         `AFK-сессия изменила доверенный файл ${file}. ` +
           'Изменение отклонено до валидации, commit и push.',
       );
@@ -2969,6 +2978,68 @@ function ensureValidationImage(config, snapshotPath, dependencies = {}) {
   return image;
 }
 
+// -----------------------------------------------------------------------------
+// Validation attestation
+//
+// PASS принадлежит не «issue» и не «run», а точной тройке
+// (байты проверяемого source, упорядоченный список scripts, образ). Поэтому
+// запись переиспользуется только при полном совпадении всех входов и не зависит
+// от runId. Любое изменение кода, конфигурации, Dockerfile или образа меняет
+// хотя бы один вход. VALIDATION_CONTRACT_VERSION поднимается вручную, когда
+// меняется смысл самого прогона.
+// -----------------------------------------------------------------------------
+
+const VALIDATION_CONTRACT_VERSION = 1;
+const maxStoredValidationAttestations = 32;
+
+function validationAttestationKey(inputs) {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        version: VALIDATION_CONTRACT_VERSION,
+        workspaceHash: inputs.workspaceHash,
+        dependencyHash: inputs.dependencyHash,
+        imageDigest: inputs.imageDigest,
+        scripts: inputs.scripts,
+      }),
+    )
+    .digest('hex');
+}
+
+function readValidationAttestations(attestationsPath = runtimeAttestationsPath) {
+  const stored = readJsonFile(attestationsPath, null);
+  if (stored?.version !== VALIDATION_CONTRACT_VERSION || !Array.isArray(stored.entries)) return [];
+  return stored.entries.filter((entry) => typeof entry?.key === 'string');
+}
+
+function hasValidationAttestation(key, attestationsPath = runtimeAttestationsPath) {
+  return readValidationAttestations(attestationsPath).some((entry) => entry.key === key);
+}
+
+function recordValidationAttestation(key, details, attestationsPath = runtimeAttestationsPath) {
+  const entries = [
+    { key, ...details, recordedAt: new Date().toISOString() },
+    ...readValidationAttestations(attestationsPath).filter((entry) => entry.key !== key),
+  ].slice(0, maxStoredValidationAttestations);
+  writeJsonAtomic(attestationsPath, { version: VALIDATION_CONTRACT_VERSION, entries });
+}
+
+function purgeValidationAttestations(attestationsPath = runtimeAttestationsPath) {
+  removeFileIfExists(attestationsPath);
+}
+
+function validationImageDigest(image, execute) {
+  const inspected = execute('docker', ['image', 'inspect', '--format', '{{.Id}}', image], {
+    allowFailure: true,
+    allowedExitCodes: [1],
+    env: credentialFreeEnvironment(),
+  });
+  const digest = inspected.status === 0 ? inspected.stdout.trim() : '';
+  // Без подтверждённого digest тег остаётся изменяемым указателем, поэтому
+  // attestation не выдаётся вообще: лучше лишний прогон, чем ложный PASS.
+  return digest === '' ? null : digest;
+}
+
 // Entrypoint печатает этот маркер перед каждым script. `set -eu` останавливает
 // цикл на первой ошибке, поэтому последний маркер и есть упавший script.
 const validationScriptMarkerPattern = /RALPH_VALIDATION_SCRIPT=(\S+)/g;
@@ -2983,7 +3054,9 @@ function runConfiguredScripts(config, scripts, label, options = {}) {
   const includePreflight = options.includePreflight ?? true;
   const execute = options.run ?? run;
   if (scripts.length === 0) return;
-  assertTrustedControlFilesUnchanged(config);
+  assertTrustedControlFilesUnchanged(config, {
+    attestationsPath: options.attestationsPath ?? runtimeAttestationsPath,
+  });
   // Один контейнер на весь набор. Изоляция от хоста сохраняется, а workspace,
   // node_modules, PostgreSQL и migrations готовятся один раз вместо одного раза
   // на каждый script. Entrypoint выполняет scripts последовательно и
@@ -2991,11 +3064,32 @@ function runConfiguredScripts(config, scripts, label, options = {}) {
   const isolatedScripts = includePreflight
     ? [...config.preflightScripts, ...scripts]
     : [...scripts];
-  const snapshotPath = createValidationWorkspaceSnapshot();
-  const dependencySnapshotPath = createTrustedValidationDependencySnapshot();
+  const createWorkspaceSnapshot =
+    options.createWorkspaceSnapshot ?? createValidationWorkspaceSnapshot;
+  const createDependencySnapshot =
+    options.createDependencySnapshot ?? createTrustedValidationDependencySnapshot;
+  const snapshotPath = createWorkspaceSnapshot();
+  const dependencySnapshotPath = createDependencySnapshot();
   console.log(`\n=== ${label}: isolated npm run ${isolatedScripts.join(', ')} ===\n`);
   try {
     const image = ensureValidationImage(config, dependencySnapshotPath, { run: execute });
+    const attestationsPath = options.attestationsPath ?? runtimeAttestationsPath;
+    const imageDigest = validationImageDigest(image, execute);
+    const attestationKey = imageDigest
+      ? validationAttestationKey({
+          workspaceHash: validationInputHash(snapshotPath).digest('hex'),
+          dependencyHash: validationInputHash(dependencySnapshotPath).digest('hex'),
+          imageDigest,
+          scripts: isolatedScripts,
+        })
+      : null;
+    if (attestationKey && hasValidationAttestation(attestationKey, attestationsPath)) {
+      console.log(
+        `${label}: тот же source, тот же набор scripts и тот же образ уже прошли проверку ` +
+          `(attestation ${attestationKey.slice(0, 12)}). Повторный прогон пропущен.`,
+      );
+      return;
+    }
     execute(
       'docker',
       validationContainerRunArgs(
@@ -3009,6 +3103,13 @@ function runConfiguredScripts(config, scripts, label, options = {}) {
         env: credentialFreeEnvironment(),
       },
     );
+    if (attestationKey) {
+      recordValidationAttestation(
+        attestationKey,
+        { label, scripts: isolatedScripts, image, imageDigest },
+        attestationsPath,
+      );
+    }
   } catch (error) {
     error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
     error.script = failedValidationScript(error) ?? isolatedScripts.join(', ');
@@ -4124,6 +4225,11 @@ export {
   inheritableEnvironmentVariables,
   failedValidationScript,
   formatFailureSummary,
+  hasValidationAttestation,
+  purgeValidationAttestations,
+  readValidationAttestations,
+  recordValidationAttestation,
+  validationAttestationKey,
   recoveryPrompt,
   summarizeCommandFailure,
   uniqueFailedTests,
