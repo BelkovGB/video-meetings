@@ -46,6 +46,7 @@
   },
 
   "developmentModel": "gpt-5.6-terra",
+  "developmentEffort": "medium",
   "autoApproveConfiguredIssues": true,
   "trustedIssueAuthors": ["codex-ai-Goo"],
   "rulesFile": ".agents/ralph-rules.md",
@@ -64,6 +65,7 @@
   "review": {
     "enabled": true,
     "model": "gpt-5.6-terra",
+    "effort": "medium",
     "schemaFile": ".agents/review.schema.json",
     "outputFile": ".agents/last-review.json"
   },
@@ -71,6 +73,7 @@
   "milestoneReview": {
     "enabled": true,
     "model": "gpt-5.6-sol",
+    "effort": "high",
     "maxTurns": 150,
     "maxFindings": 10,
     "schemaFile": ".agents/review.schema.json",

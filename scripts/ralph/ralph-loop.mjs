@@ -417,6 +417,15 @@ function printCodexEvent(event, turn, maxTurns) {
   }
 }
 
+// Изолированный CODEX_HOME не содержит пользовательский config.toml, поэтому без
+// явного override каждая роль получает текущий default CLI/модели. Передаём
+// эффективное значение сами, чтобы поведение не менялось вместе с default.
+const reasoningEfforts = ['minimal', 'low', 'medium', 'high'];
+
+function reasoningEffortArguments(effort) {
+  return ['-c', `model_reasoning_effort="${effort}"`];
+}
+
 function developmentCodexArguments(config) {
   return [
     'exec',
@@ -425,6 +434,7 @@ function developmentCodexArguments(config) {
     'danger-full-access',
     '--model',
     config.developmentModel,
+    ...reasoningEffortArguments(config.developmentEffort),
     '-C',
     projectRoot,
     '-',
@@ -894,6 +904,7 @@ function loadConfig() {
   config.runtime.maxPages ??= 20;
   config.runtime.reviewRetryAttempts ??= 3;
   config.developmentModel ??= 'gpt-5.6-terra';
+  config.developmentEffort ??= 'medium';
   config.rulesFile ??= '.agents/ralph-rules.md';
   config.autoApproveConfiguredIssues ??= true;
   config.trustedIssueAuthors ??= [];
@@ -1079,6 +1090,7 @@ function loadConfig() {
   if (typeof config.review.enabled !== 'boolean') {
     fail('Поле "review.enabled" должно быть true или false.');
   }
+  config.review.effort ??= 'medium';
   for (const [field, value] of [
     ['developmentModel', config.developmentModel],
     ['review.model', config.review.model],
@@ -1092,6 +1104,16 @@ function loadConfig() {
   }
   if (typeof config.milestoneReview.enabled !== 'boolean') {
     fail('Поле "milestoneReview.enabled" должно быть true или false.');
+  }
+  config.milestoneReview.effort ??= 'high';
+  for (const [field, value] of [
+    ['developmentEffort', config.developmentEffort],
+    ['review.effort', config.review.effort],
+    ['milestoneReview.effort', config.milestoneReview.effort],
+  ]) {
+    if (typeof value !== 'string' || !reasoningEfforts.includes(value)) {
+      fail(`Поле "${field}" должно быть одним из: ${reasoningEfforts.join(', ')}.`);
+    }
   }
   if (
     typeof config.milestoneReview.model !== 'string' ||
@@ -2015,6 +2037,7 @@ async function runIndependentReview(config, repository, issue, commit) {
       '--json',
       '--model',
       config.review.model,
+      ...reasoningEffortArguments(config.review.effort),
       '--output-schema',
       config.review.schemaPath,
       '--output-last-message',
@@ -2947,7 +2970,7 @@ function milestoneReviewMarker(config, milestone, pullRequest) {
     )
     .digest('hex')
     .slice(0, 16);
-  return `<!-- ralph-milestone-review milestone:${milestoneId} head:${pullRequest.headRefOid} model:${config.milestoneReview.model} -->`;
+  return `<!-- ralph-milestone-review milestone:${milestoneId} head:${pullRequest.headRefOid} model:${config.milestoneReview.model} effort:${config.milestoneReview.effort} -->`;
 }
 
 function milestonePassReviewIsClean(body, marker) {
@@ -3147,6 +3170,7 @@ async function runMilestoneReview(config, repository, milestone, pullRequest) {
             '--json',
             '--model',
             config.milestoneReview.model,
+            ...reasoningEffortArguments(config.milestoneReview.effort),
             '--output-schema',
             config.milestoneReview.schemaPath,
             '--output-last-message',
@@ -3421,13 +3445,18 @@ function printCheck(
   );
   console.log(`Лимит шагов на сессию: ${config.maxTurns}`);
   console.log(`Лимит исправлений тестов: ${config.maxTestFixAttempts}`);
-  console.log(`Модель разработки: ${config.developmentModel}`);
+  console.log(`Модель разработки: ${config.developmentModel} (effort=${config.developmentEffort})`);
   console.log(`Правила сессии: ${config.rulesFile}`);
-  console.log(`Review issue: ${config.review.enabled ? config.review.model : 'выключен'}`);
+  console.log(
+    `Review issue: ${
+      config.review.enabled ? `${config.review.model} (effort=${config.review.effort})` : 'выключен'
+    }`,
+  );
   console.log(
     `Review milestone: ${
       config.milestoneReview.enabled
-        ? `${config.milestoneReview.model} (maxTurns=${config.milestoneReview.maxTurns})`
+        ? `${config.milestoneReview.model} (effort=${config.milestoneReview.effort}, ` +
+          `maxTurns=${config.milestoneReview.maxTurns})`
         : 'выключен'
     }`,
   );
@@ -3903,6 +3932,7 @@ export {
   linkedCommitForIssue,
   loadConfig,
   milestonePassReviewIsClean,
+  milestoneReviewMarker,
   normalizeReviewResult,
   normalizePhases,
   parseSkillFrontmatter,

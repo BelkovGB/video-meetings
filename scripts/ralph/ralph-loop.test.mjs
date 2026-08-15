@@ -37,6 +37,7 @@ import {
   linkedCommitForIssue,
   loadConfig,
   milestonePassReviewIsClean,
+  milestoneReviewMarker,
   normalizePhases,
   normalizeReviewResult,
   parseSkillFrontmatter,
@@ -2531,4 +2532,125 @@ test('skill preflight fails with every invalid skill listed at once', () => {
       return true;
     },
   );
+});
+
+test('development codex arguments carry an explicit reasoning effort', () => {
+  const args = developmentCodexArguments({
+    developmentModel: 'gpt-5.6-terra',
+    developmentEffort: 'medium',
+  });
+  const effortIndex = args.indexOf('-c');
+  assert.notEqual(effortIndex, -1);
+  assert.equal(args[effortIndex + 1], 'model_reasoning_effort="medium"');
+  assert.ok(effortIndex > args.indexOf('--model'));
+  assert.equal(args.at(-1), '-');
+});
+
+const ralphConfigPath = fileURLToPath(new URL('../../.agents/ralph.config.json', import.meta.url));
+
+// loadConfig() always reads the real control-plane config, so validation is
+// exercised by patching that file and restoring it unconditionally.
+function withPatchedRalphConfig(patch, assertConfig) {
+  const original = readFileSync(ralphConfigPath, 'utf8');
+  const candidate = { ...JSON.parse(original), ...patch };
+  writeFileSync(ralphConfigPath, `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
+  let config = null;
+  try {
+    config = loadConfig();
+    assertConfig(config);
+  } finally {
+    writeFileSync(ralphConfigPath, original, 'utf8');
+    const frozen = config?.validationContainer?.frozenDockerfileDirectory;
+    if (frozen) rmSync(frozen, { recursive: true, force: true });
+  }
+}
+
+test('the committed configuration pins an explicit reasoning effort per role', () => {
+  const config = loadConfig();
+  try {
+    assert.equal(config.developmentEffort, 'medium');
+    assert.equal(config.review.effort, 'medium');
+    assert.equal(config.milestoneReview.effort, 'high');
+  } finally {
+    rmSync(config.validationContainer.frozenDockerfileDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
+test('reasoning effort defaults to medium/medium/high when the config omits it', () => {
+  const original = JSON.parse(readFileSync(ralphConfigPath, 'utf8'));
+  const { developmentEffort, ...withoutDevelopmentEffort } = original;
+  assert.equal(developmentEffort, 'medium');
+  const { effort: reviewEffort, ...review } = original.review;
+  const { effort: milestoneEffort, ...milestoneReview } = original.milestoneReview;
+  assert.equal(reviewEffort, 'medium');
+  assert.equal(milestoneEffort, 'high');
+
+  withPatchedRalphConfig({ ...withoutDevelopmentEffort, review, milestoneReview }, (config) => {
+    assert.equal(config.developmentEffort, 'medium');
+    assert.equal(config.review.effort, 'medium');
+    assert.equal(config.milestoneReview.effort, 'high');
+  });
+});
+
+test('an unsupported reasoning effort is rejected before a run starts', () => {
+  for (const [patch, expected] of [
+    [{ developmentEffort: 'extreme' }, /Поле "developmentEffort" должно быть одним из/],
+    [
+      { review: { enabled: false, model: 'gpt-5.6-terra', effort: 'nope' } },
+      /Поле "review\.effort"/,
+    ],
+    [
+      {
+        milestoneReview: {
+          enabled: false,
+          model: 'gpt-5.6-sol',
+          maxTurns: 150,
+          maxFindings: 10,
+          effort: 3,
+        },
+      },
+      /Поле "milestoneReview\.effort"/,
+    ],
+  ]) {
+    assert.throws(
+      () =>
+        withPatchedRalphConfig(patch, () => {
+          throw new Error('loadConfig should have failed');
+        }),
+      expected,
+    );
+  }
+  assert.match(
+    readFileSync(ralphConfigPath, 'utf8'),
+    /"developmentEffort": "medium"/,
+    'the real config must be restored after each failed load',
+  );
+});
+
+test('the milestone review marker records the effective model and effort', () => {
+  const config = loadConfig();
+  try {
+    const marker = milestoneReviewMarker(
+      config,
+      { number: 8, title: 'Phase 8', description: '' },
+      { number: 61, headRefOid: 'a'.repeat(40) },
+    );
+    assert.match(marker, /model:gpt-5\.6-sol effort:high -->$/);
+    // A different effort is a different review, so the cached PASS must not match.
+    const lowEffortMarker = milestoneReviewMarker(
+      { ...config, milestoneReview: { ...config.milestoneReview, effort: 'low' } },
+      { number: 8, title: 'Phase 8', description: '' },
+      { number: 61, headRefOid: 'a'.repeat(40) },
+    );
+    assert.notEqual(lowEffortMarker, marker);
+    assert.equal(milestonePassReviewIsClean(`${marker}\nirrelevant body`, lowEffortMarker), false);
+  } finally {
+    rmSync(config.validationContainer.frozenDockerfileDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
 });
