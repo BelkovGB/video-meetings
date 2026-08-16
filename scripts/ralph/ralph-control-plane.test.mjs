@@ -16,6 +16,15 @@ import test from 'node:test';
 
 import { runAgentOnIssue } from './ralph-loop.mjs';
 import { agentInstructionFiles, loadConfig } from './ralph-config.mjs';
+
+/**
+ * Часть тестов здесь перезаписывает настоящие `AGENTS.md` репозитория, чтобы
+ * проверить границу подделки на реальном доверенном наборе. Поэтому весь набор
+ * Ralph запускается с `--test-concurrency=1`: параллельно другой тестовый файл
+ * вызывает `loadConfig()` и хеширует эти же файлы в момент подмены. Локально
+ * планировщик почти всегда разводил их, в контейнере — нет, и валидация падала
+ * на `изменила доверенный файл /workspace/AGENTS.md`.
+ */
 import { commitStagedChanges } from './ralph-git.mjs';
 import {
   approveConfiguredIssue,
@@ -272,7 +281,9 @@ test('Ralph accepts its own lifecycle metadata while preserving approved require
 });
 
 test('Ralph configuration pins approved AFK inputs before starting an agent session', () => {
-  const config = loadConfig();
+  // Тест поднимает поддельный codex, поэтому backend фиксируется здесь, а не
+  // берётся из конфигурации оператора: она может быть переключена на claude.
+  const config = { ...loadConfig(), agentCli: 'codex' };
 
   assert.equal(
     config.approvedIssueSnapshots[67].title,
@@ -378,7 +389,9 @@ test('Ralph rejects a modified approved snapshot ledger before an AFK session st
 });
 
 test('runAgentOnIssue aborts before commit when an AFK session modifies the approved snapshot ledger', async () => {
-  const config = loadConfig();
+  // Тест поднимает поддельный codex, поэтому backend фиксируется здесь, а не
+  // берётся из конфигурации оператора: она может быть переключена на claude.
+  const config = { ...loadConfig(), agentCli: 'codex' };
   const ledgerPath = config.approvedIssueSnapshotsPath;
   const originalLedger = readFileSync(ledgerPath, 'utf8');
   const approvedIssue = config.approvedIssueSnapshots[67];
@@ -420,7 +433,9 @@ process.stdout.write(JSON.stringify({
 });
 
 test('runAgentOnIssue aborts before commit when an AFK session modifies a nested AGENTS instruction file', async () => {
-  const config = loadConfig();
+  // Тест поднимает поддельный codex, поэтому backend фиксируется здесь, а не
+  // берётся из конфигурации оператора: она может быть переключена на claude.
+  const config = { ...loadConfig(), agentCli: 'codex' };
   const agentInstructionsPath = path.join(process.cwd(), 'apps', 'web', 'AGENTS.md');
   const originalInstructions = readFileSync(agentInstructionsPath, 'utf8');
   const approvedIssue = config.approvedIssueSnapshots[67];
@@ -462,7 +477,9 @@ process.stdout.write(JSON.stringify({
 });
 
 test('runAgentOnIssue aborts before commit when an AFK session modifies the root AGENTS instruction file', async () => {
-  const config = loadConfig();
+  // Тест поднимает поддельный codex, поэтому backend фиксируется здесь, а не
+  // берётся из конфигурации оператора: она может быть переключена на claude.
+  const config = { ...loadConfig(), agentCli: 'codex' };
   const agentInstructionsPath = path.join(process.cwd(), 'AGENTS.md');
   const originalInstructions = readFileSync(agentInstructionsPath, 'utf8');
   const approvedIssue = config.approvedIssueSnapshots[67];
@@ -504,7 +521,9 @@ process.stdout.write(JSON.stringify({
 });
 
 test('runAgentOnIssue aborts before commit when an AFK session adds an AGENTS instruction file', async () => {
-  const config = loadConfig();
+  // Тест поднимает поддельный codex, поэтому backend фиксируется здесь, а не
+  // берётся из конфигурации оператора: она может быть переключена на claude.
+  const config = { ...loadConfig(), agentCli: 'codex' };
   const agentInstructionsDirectory = path.join(process.cwd(), 'apps', 'web', 'ralph-test-agent');
   const agentInstructionsPath = path.join(agentInstructionsDirectory, 'AGENTS.md');
   const approvedIssue = config.approvedIssueSnapshots[67];

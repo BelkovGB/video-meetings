@@ -1,6 +1,6 @@
 {
   "active": true,
-  "agentCli": "codex",
+  "agentCli": "claude",
   "baseBranch": "master",
   "draftPullRequest": true,
   "stopAfterFirstIssue": true,
@@ -12,7 +12,7 @@
     }
   ],
   "maxIterations": 20,
-  "maxTurns": 100,
+  "maxTurns": 50,
   "maxTestFixAttempts": 5,
   "runtime": {
     "commandTimeoutMs": 300000,
@@ -24,7 +24,7 @@
     "maxPages": 20,
     "reviewRetryAttempts": 3
   },
-  "developmentModel": "gpt-5.6-terra",
+  "developmentModel": "claude-sonnet-5",
   "developmentEffort": "medium",
   "autoApproveConfiguredIssues": true,
   "trustedIssueAuthors": [
@@ -46,16 +46,16 @@
   ],
   "review": {
     "enabled": true,
-    "model": "gpt-5.6-terra",
+    "model": "claude-sonnet-5",
     "effort": "medium",
     "schemaFile": ".agents/review.schema.json",
     "outputFile": ".agents/last-review.json"
   },
   "milestoneReview": {
     "enabled": true,
-    "model": "gpt-5.6-sol",
-    "effort": "high",
-    "maxTurns": 150,
+    "model": "claude-opus-5",
+    "effort": "max",
+    "maxTurns": 75,
     "maxFindings": 10,
     "schemaFile": ".agents/review.schema.json",
     "outputFile": ".agents/last-milestone-review.json"

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
+import { reasoningEffortsFor } from './ralph-agent-backends.mjs';
 import { developmentCodexArguments } from './ralph-codex-session.mjs';
 import {
   agentSkillFiles,
@@ -328,22 +329,30 @@ test('development codex arguments carry an explicit reasoning effort', () => {
   assert.equal(args.at(-1), '-');
 });
 
-test('the committed configuration pins an explicit reasoning effort per role', () => {
+test('the committed configuration sets an explicit effort valid for its agentCli', () => {
+  // Раньше здесь стояли конкретные значения, и штатное действие оператора —
+  // смена CLI или модели — роняло ворота валидации продукта. Проверяется
+  // свойство: усилие задано явно и допустимо для выбранного CLI.
   const config = loadConfig();
-  assert.equal(config.developmentEffort, 'medium');
-  assert.equal(config.review.effort, 'medium');
-  assert.equal(config.milestoneReview.effort, 'high');
+  const allowed = reasoningEffortsFor(config.agentCli);
+  assert.equal(allowed.length > 0, true, config.agentCli);
+  for (const [role, effort] of [
+    ['developmentEffort', config.developmentEffort],
+    ['review.effort', config.review.effort],
+    ['milestoneReview.effort', config.milestoneReview.effort],
+  ]) {
+    assert.equal(allowed.includes(effort), true, `${role}=${effort}`);
+  }
 });
 
-test('reasoning effort defaults to medium/medium/high when the config omits it', () => {
+test('reasoning effort falls back to medium/medium/high when the config omits it', () => {
   const original = JSON.parse(readFileSync(ralphConfigPath, 'utf8'));
-  const { developmentEffort, ...withoutDevelopmentEffort } = original;
-  assert.equal(developmentEffort, 'medium');
-  const { effort: reviewEffort, ...review } = original.review;
-  const { effort: milestoneEffort, ...milestoneReview } = original.milestoneReview;
-  assert.equal(reviewEffort, 'medium');
-  assert.equal(milestoneEffort, 'high');
+  const { developmentEffort: _development, ...withoutDevelopmentEffort } = original;
+  const { effort: _review, ...review } = original.review;
+  const { effort: _milestone, ...milestoneReview } = original.milestoneReview;
 
+  // Значения по умолчанию записаны здесь потому, что проверяются именно они:
+  // все три поля из конфигурации убраны, и она до результата не дотягивается.
   withPatchedRalphConfig({ ...withoutDevelopmentEffort, review, milestoneReview }, (config) => {
     assert.equal(config.developmentEffort, 'medium');
     assert.equal(config.review.effort, 'medium');
@@ -397,9 +406,11 @@ test('a runtime field the code does not read is rejected, not ignored', () => {
 
 test('an unsupported reasoning effort is rejected before a run starts', () => {
   for (const [patch, expected] of [
+    // Сообщение называет выбранный CLI, потому что словари усилий у Codex и
+    // Claude разные; сам CLI берётся из конфигурации, а не пришивается сюда.
     [
       { developmentEffort: 'extreme' },
-      /Поле "developmentEffort" при agentCli=codex должно быть одним из/,
+      /Поле "developmentEffort" при agentCli=(codex|claude) должно быть одним из/,
     ],
     [
       { review: { enabled: false, model: 'gpt-5.6-terra', effort: 'nope' } },
@@ -440,7 +451,11 @@ test('the milestone review marker records the effective model and effort', () =>
     { number: 8, title: 'Phase 8', description: '' },
     { number: 61, headRefOid: 'a'.repeat(40) },
   );
-  assert.match(marker, /model:gpt-5\.6-sol effort:high -->$/);
+  // Маркер обязан нести действующие модель и усилие, какими бы они ни были:
+  // от них зависит, засчитывается ли кешированный PASS. Сравнение подстрокой,
+  // а не регулярным выражением: в имени модели встречаются точки.
+  const suffix = `model:${config.milestoneReview.model} effort:${config.milestoneReview.effort} -->`;
+  assert.equal(marker.endsWith(suffix), true, marker);
   // A different effort is a different review, so the cached PASS must not match.
   const lowEffortMarker = milestoneReviewMarker(
     { ...config, milestoneReview: { ...config.milestoneReview, effort: 'low' } },
