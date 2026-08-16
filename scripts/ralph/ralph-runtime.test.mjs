@@ -279,6 +279,33 @@ test('every run starts a fresh run.log and keeps a bounded history', () => {
   });
 });
 
+test('retention keeps the newest runs even when every rotation shares one timestamp', () => {
+  withTemporaryDirectory((directory) => {
+    const logPath = path.join(directory, 'run.log');
+    // Метка задаётся явно, а не берётся с часов: восемь ротаций укладываются в
+    // одну миллисекунду на tmpfs контейнера и не укладываются на диске Windows,
+    // из-за чего дефект был виден только в валидации. Явная метка
+    // воспроизводит его на любой машине.
+    const stamp = '2026-08-16T17:41:21.721Z';
+
+    for (let run = 1; run <= 8; run += 1) {
+      writeFileSync(logPath, `marker for run ${run}\n`, 'utf8');
+      rotatePersistentLog(logPath, stamp);
+    }
+
+    const archived = readdirSync(directory)
+      .filter((name) => /^run-.*\.log$/.test(name))
+      .sort();
+    assert.equal(archived.length, 5);
+    // Пока порядок задавал случайный суффикс, здесь оставались прогоны
+    // 5, 6, 3, 8 и 2: самый свежий архив удалялся, самый старый выживал.
+    assert.deepEqual(
+      archived.map((name) => readFileSync(path.join(directory, name), 'utf8').trim()),
+      [4, 5, 6, 7, 8].map((run) => `marker for run ${run}`),
+    );
+  });
+});
+
 test('two rotations within the same millisecond keep both archives', () => {
   withTemporaryDirectory((directory) => {
     const logPath = path.join(directory, 'run.log');

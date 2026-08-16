@@ -147,6 +147,26 @@ const retainedRunLogs = 5;
  * а он единственный след AFK-прогона. Предыдущие логи не удаляются, а
  * переименовываются по времени старта, и хранится последние `retainedRunLogs`.
  */
+// Ширины хватает с запасом: номер отсчитывается заново для каждой метки
+// времени, то есть считает ротации внутри одной миллисекунды.
+const rotationSequenceDigits = 4;
+
+// Номер выводится из уже лежащих рядом архивов, а не из счётчика в памяти:
+// ротации одной миллисекунды могут прийти из разных процессов, и общего
+// счётчика у них нет.
+function nextRotationSequence(directory, namePrefix) {
+  let next = 0;
+  for (const name of readdirSync(directory)) {
+    if (!name.startsWith(namePrefix) || !name.endsWith('.log')) continue;
+    const sequence = Number.parseInt(
+      name.slice(namePrefix.length, namePrefix.length + rotationSequenceDigits),
+      10,
+    );
+    if (Number.isInteger(sequence) && sequence >= next) next = sequence + 1;
+  }
+  return String(next).padStart(rotationSequenceDigits, '0');
+}
+
 function rotatePersistentLog(logPath, startedAt, uniqueSuffix = randomUUID().slice(0, 8)) {
   if (!existsSync(logPath)) return;
 
@@ -157,8 +177,18 @@ function rotatePersistentLog(logPath, startedAt, uniqueSuffix = randomUUID().sli
   // миллисекунды получали одно имя, а renameSync молча затирал первый архив.
   // Суффикс делает имя уникальным по построению, а не по надежде, что часы
   // успели тикнуть.
+  //
+  // Одной уникальности мало. Retention ниже сортирует имена, и при совпавшей
+  // метке порядок задавал случайный суффикс — то есть удалялись произвольные
+  // архивы, а не самые старые: восемь ротаций с одной меткой оставляли прогоны
+  // 5, 6, 3, 8 и 2. На диске Windows восемь ротаций в миллисекунду не
+  // укладываются, а на tmpfs контейнера укладываются, поэтому расходились
+  // только результаты валидации. Порядковый номер делает имя не просто
+  // уникальным, а сортируемым по построению.
   const stamp = startedAt.replaceAll(':', '-').replaceAll('.', '-');
-  renameSync(logPath, path.join(directory, `${prefix}${stamp}-${uniqueSuffix}.log`));
+  const namePrefix = `${prefix}${stamp}-`;
+  const sequence = nextRotationSequence(directory, namePrefix);
+  renameSync(logPath, path.join(directory, `${namePrefix}${sequence}-${uniqueSuffix}.log`));
 
   const archived = readdirSync(directory)
     .filter((name) => name.startsWith(prefix) && name.endsWith('.log'))
