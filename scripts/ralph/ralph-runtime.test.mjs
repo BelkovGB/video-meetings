@@ -202,7 +202,7 @@ test('writeJsonAtomic создаёт и атомарно обновляет JSON
   });
 });
 
-test('initializePersistentLog дописывает журнал и восстанавливает console', () => {
+test('initializePersistentLog отделяет журнал прогона и восстанавливает console', () => {
   withTemporaryDirectory((directory) => {
     const logPath = path.join(directory, 'run.log');
     const originalLog = console.log;
@@ -224,9 +224,42 @@ test('initializePersistentLog дописывает журнал и восста�
     assert.equal(console.error, originalError);
 
     const log = readFileSync(logPath, 'utf8');
-    assert.match(log, /^previous run\n/);
-    assert.match(log, /INFO Ralph process started .*"mode":"--run"/);
+    // Журнал прошлого прогона уезжает в архив, а не дописывается: иначе файл
+    // растёт неограниченно и после падения его нечем открыть.
+    assert.doesNotMatch(log, /previous run/);
+    assert.match(log, /^\S+ INFO Ralph process started .*"mode":"--run"/);
     assert.match(log, /INFO iteration 2/);
     assert.match(log, /ERROR failure: temporary/);
+
+    const archived = readdirSync(directory).filter((name) => /^run-.*\.log$/.test(name));
+    assert.equal(archived.length, 1);
+    assert.equal(readFileSync(path.join(directory, archived[0]), 'utf8'), 'previous run\n');
+  });
+});
+
+test('every run starts a fresh run.log and keeps a bounded history', () => {
+  withTemporaryDirectory((directory) => {
+    const logPath = path.join(directory, 'run.log');
+
+    // Восемь прогонов подряд: run.log должен содержать только последний, а
+    // прошлые — лежать рядом в ограниченном количестве.
+    for (let run = 1; run <= 8; run += 1) {
+      const restore = initializePersistentLog(logPath, { mode: '--run', run });
+      console.log(`marker for run ${run}`);
+      restore();
+    }
+
+    const current = readFileSync(logPath, 'utf8');
+    assert.match(current, /marker for run 8/);
+    assert.doesNotMatch(current, /marker for run 7/);
+
+    const archived = readdirSync(directory)
+      .filter((name) => name.startsWith('run-') && name.endsWith('.log'))
+      .sort();
+    assert.equal(archived.length, 5);
+    // Сохраняются именно последние: прогон 2 уже вытеснен, прогон 7 ещё здесь.
+    const kept = archived.map((name) => readFileSync(path.join(directory, name), 'utf8')).join('');
+    assert.match(kept, /marker for run 7/);
+    assert.doesNotMatch(kept, /marker for run 2/);
   });
 });

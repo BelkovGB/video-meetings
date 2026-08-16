@@ -7,6 +7,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -135,8 +136,40 @@ function acquireRunLock(lockPath, metadata = {}, dependencies = {}) {
   };
 }
 
+// Сколько прошлых прогонов остаётся рядом с текущим.
+const retainedRunLogs = 5;
+
+/**
+ * `run.log` всегда содержит один прогон.
+ *
+ * Раньше файл дописывался бесконечно и дорос до 40 МБ за несколько дней: в него
+ * идёт весь вывод агента и всех команд. Открыть такой файл после падения нельзя,
+ * а он единственный след AFK-прогона. Предыдущие логи не удаляются, а
+ * переименовываются по времени старта, и хранится последние `retainedRunLogs`.
+ */
+function rotatePersistentLog(logPath, startedAt) {
+  if (!existsSync(logPath)) return;
+
+  const directory = path.dirname(logPath);
+  const prefix = `${path.basename(logPath, '.log')}-`;
+  // Метка сортируется лексикографически, поэтому старые находятся без разбора
+  // имени: 2026-08-16T15-24-31-042Z.
+  renameSync(
+    logPath,
+    path.join(directory, `${prefix}${startedAt.replaceAll(':', '-').replaceAll('.', '-')}.log`),
+  );
+
+  const archived = readdirSync(directory)
+    .filter((name) => name.startsWith(prefix) && name.endsWith('.log'))
+    .sort();
+  for (const name of archived.slice(0, -retainedRunLogs)) {
+    removeFileIfExists(path.join(directory, name));
+  }
+}
+
 function initializePersistentLog(logPath, metadata = {}) {
   mkdirSync(path.dirname(logPath), { recursive: true });
+  rotatePersistentLog(logPath, new Date().toISOString());
   appendFileSync(
     logPath,
     `${new Date().toISOString()} INFO Ralph process started ${JSON.stringify({ pid: process.pid, ...metadata })}\n`,
@@ -225,6 +258,7 @@ export {
   acquireRunLock,
   commandTimeoutError,
   initializePersistentLog,
+  rotatePersistentLog,
   isProcessAlive,
   isTransientFailure,
   readJsonFile,

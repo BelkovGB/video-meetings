@@ -218,7 +218,9 @@ review задаёт `reviewRetryAttempts`. `maxPages` ограничивает �
 самовольная смена ветки/commit/issue, невозможность создать ровно один commit,
 техническая ошибка review, FAIL milestone-review без findings, исчерпание
 `maxIterations`, wall-clock timeout, ошибка GitHub/Git/агента. Диагностику берите
-из самого сообщения и `run.log`, а не из этого списка.
+из самого сообщения и `run.log`, а не из этого списка. `run.log` содержит только
+текущий прогон: при старте предыдущий переименовывается в `run-<время>.log`, и
+рядом хранятся последние пять.
 
 Перед закрытием issue, push и PR выполняются npm scripts из `validationScripts`.
 В AFK-конфигурации обязательны `format:check`, `lint`, `build`, unit-тесты Ralph
