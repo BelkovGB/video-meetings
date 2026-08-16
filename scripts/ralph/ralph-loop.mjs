@@ -917,11 +917,19 @@ export async function runContinuousLoop(context, actions) {
     }
     if (config.stopAfterFirstIssue) {
       if (result?.completed === false) {
+        // Причина берётся из результата, а не предполагается. Остановка после
+        // упавшей валидации сообщала об отказе ревью, до которого цикл не дошёл,
+        // и отправляла оператора искать замечания, которых нет.
+        const [reason, outcome] = result.agentFailed
+          ? ['сессия агента не завершилась', { agentFailed: true }]
+          : result.validationFailed
+            ? ['валидация не прошла', { validationFailed: true }]
+            : ['независимое ревью вернуло замечания', { reviewFailed: true }];
         console.log(
-          `Issue #${currentIssue.number} осталась открытой после review. ` +
+          `Issue #${currentIssue.number} осталась открытой: ${reason}. ` +
             'Цикл остановлен после одной итерации.',
         );
-        return { mode: 'run', completed: 0, reviewFailed: true };
+        return { mode: 'run', completed: 0, ...outcome };
       }
       stateStore?.finish();
       console.log(`Issue #${currentIssue.number} завершена. Цикл остановлен после одной итерации.`);

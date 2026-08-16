@@ -147,17 +147,18 @@ const retainedRunLogs = 5;
  * а он единственный след AFK-прогона. Предыдущие логи не удаляются, а
  * переименовываются по времени старта, и хранится последние `retainedRunLogs`.
  */
-function rotatePersistentLog(logPath, startedAt) {
+function rotatePersistentLog(logPath, startedAt, uniqueSuffix = randomUUID().slice(0, 8)) {
   if (!existsSync(logPath)) return;
 
   const directory = path.dirname(logPath);
   const prefix = `${path.basename(logPath, '.log')}-`;
-  // Метка сортируется лексикографически, поэтому старые находятся без разбора
-  // имени: 2026-08-16T15-24-31-042Z.
-  renameSync(
-    logPath,
-    path.join(directory, `${prefix}${startedAt.replaceAll(':', '-').replaceAll('.', '-')}.log`),
-  );
+  // Метка времени делает имя сортируемым и читаемым, но идентичностью не
+  // является: её разрешение — миллисекунда, и две ротации внутри одной
+  // миллисекунды получали одно имя, а renameSync молча затирал первый архив.
+  // Суффикс делает имя уникальным по построению, а не по надежде, что часы
+  // успели тикнуть.
+  const stamp = startedAt.replaceAll(':', '-').replaceAll('.', '-');
+  renameSync(logPath, path.join(directory, `${prefix}${stamp}-${uniqueSuffix}.log`));
 
   const archived = readdirSync(directory)
     .filter((name) => name.startsWith(prefix) && name.endsWith('.log'))

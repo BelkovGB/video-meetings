@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   acquireRunLock,
   initializePersistentLog,
+  rotatePersistentLog,
   isTransientFailure,
   readJsonFile,
   retryTransientOperation,
@@ -261,5 +262,29 @@ test('every run starts a fresh run.log and keeps a bounded history', () => {
     const kept = archived.map((name) => readFileSync(path.join(directory, name), 'utf8')).join('');
     assert.match(kept, /marker for run 7/);
     assert.doesNotMatch(kept, /marker for run 2/);
+  });
+});
+
+test('two rotations within the same millisecond keep both archives', () => {
+  withTemporaryDirectory((directory) => {
+    const logPath = path.join(directory, 'run.log');
+    // Метка времени одна и та же для обеих ротаций: именно так вело себя
+    // окружение контейнера, где восемь ротаций уложились в одну миллисекунду.
+    // Раньше вторая ротация переименовывала поверх первой и уничтожала её.
+    const stamp = '2026-08-16T13:45:51.316Z';
+
+    writeFileSync(logPath, 'first run\n', 'utf8');
+    rotatePersistentLog(logPath, stamp);
+    writeFileSync(logPath, 'second run\n', 'utf8');
+    rotatePersistentLog(logPath, stamp);
+
+    const archived = readdirSync(directory)
+      .filter((name) => /^run-.*\.log$/.test(name))
+      .sort();
+    assert.equal(archived.length, 2);
+    assert.deepEqual(
+      archived.map((name) => readFileSync(path.join(directory, name), 'utf8')).sort(),
+      ['first run\n', 'second run\n'],
+    );
   });
 });
