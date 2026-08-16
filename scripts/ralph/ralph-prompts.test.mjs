@@ -6,16 +6,18 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { loadConfig } from './ralph-config.mjs';
+import { milestonePassReviewIsClean } from './ralph-milestone-review.mjs';
 import {
   buildIndependentReviewPrompt,
   buildMilestoneReviewPrompt,
+  renderPrompt,
+} from './ralph-prompts.mjs';
+import {
   isRalphInfrastructureIssue,
   isRalphInfrastructurePath,
-  loadConfig,
-  milestonePassReviewIsClean,
-  renderPrompt,
   scopeMilestoneReviewToProduct,
-} from './ralph-loop.mjs';
+} from './ralph-scope.mjs';
 
 test('implementation prompt delegates full validation to the outer orchestrator', () => {
   const rules = readFileSync(new URL('../../.agents/ralph-rules.md', import.meta.url), 'utf8');

@@ -13,17 +13,17 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { runCodex } from './ralph-loop.mjs';
+import { loadConfig } from './ralph-config.mjs';
+import { commitStagedChanges } from './ralph-git.mjs';
 import {
   approveConfiguredIssue,
   assertTrustedIssue,
-  commitStagedChanges,
   issueBodyWithCompletionState,
   issueBodyWithReviewContext,
-  issueContentHash,
   issueCompletionState,
-  loadConfig,
-  runCodex,
-} from './ralph-loop.mjs';
+  issueContentHash,
+} from './ralph-issue-contract.mjs';
 import { withFakeCodex } from './ralph-test-support.mjs';
 
 test('orchestrated commits bypass host hooks after canonical validation', () => {

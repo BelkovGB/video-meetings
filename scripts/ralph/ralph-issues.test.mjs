@@ -3,29 +3,34 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
+import { developmentCodexArguments } from './ralph-codex-session.mjs';
 import {
   agentSkillFiles,
-  alreadyFixedCommitFromAgent,
-  developmentCodexArguments,
-  createOrReopenReviewIssues,
+  loadConfig,
+  parseSkillFrontmatter,
+  verifyAgentSkills,
+} from './ralph-config.mjs';
+import {
   formatFailureSummary,
+  recoveryPrompt,
+  summarizeCommandFailure,
+  uniqueFailedTests,
+} from './ralph-failure-summary.mjs';
+import { alreadyFixedCommitFromAgent, linkedCommitForIssue } from './ralph-git.mjs';
+import {
   issueBodyWithCompletionState,
   issueBodyWithReviewContext,
   issueCompletionState,
+  normalizeReviewResult,
+} from './ralph-issue-contract.mjs';
+import {
+  createOrReopenReviewIssues,
   limitMilestoneReviewFindings,
-  linkedCommitForIssue,
-  loadConfig,
   milestonePassReviewIsClean,
   milestoneReviewMarker,
-  normalizeReviewResult,
-  parseSkillFrontmatter,
-  recoveryPrompt,
   reviewFindingFingerprint,
   reviewFindingMarker,
-  summarizeCommandFailure,
-  uniqueFailedTests,
-  verifyAgentSkills,
-} from './ralph-loop.mjs';
+} from './ralph-milestone-review.mjs';
 import { ralphConfigPath, withPatchedRalphConfig } from './ralph-test-support.mjs';
 
 test('finding fingerprint is stable for Unicode titles and changes with location', () => {

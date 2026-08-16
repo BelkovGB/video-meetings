@@ -1,14 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
-  executeMode,
-  iterationBudget,
-  printCheck,
-  run,
-  runCodexWithTurnLimit,
-  runContinuousLoop,
-} from './ralph-loop.mjs';
+import { executeMode, iterationBudget, printCheck, runContinuousLoop } from './ralph-loop.mjs';
+import { runCodexWithTurnLimit } from './ralph-codex-session.mjs';
+import { run } from './ralph-process-runner.mjs';
 import { actions, context, withFakeCodex } from './ralph-test-support.mjs';
 
 function persistentState({ iterationsUsed = 0, issue = null } = {}) {

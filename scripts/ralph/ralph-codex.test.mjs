@@ -4,19 +4,21 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { runCodex } from './ralph-loop.mjs';
 import {
   agentReportedWriteAccessFailure,
   createSandboxedCodexEnvironment,
+  developmentCodexArguments,
+  runCodexWithTurnLimit,
+  verifyCodexAuthentication,
+} from './ralph-codex-session.mjs';
+import {
   credentialFreeEnvironment,
   credentialFreeEnvironmentVariables,
-  developmentCodexArguments,
   inheritableEnvironmentVariables,
   run,
-  runCodex,
-  runCodexWithTurnLimit,
-  validationContainerRunArgs,
-  verifyCodexAuthentication,
-} from './ralph-loop.mjs';
+} from './ralph-process-runner.mjs';
+import { validationContainerRunArgs } from './ralph-validation-runner.mjs';
 import { withFakeCodex } from './ralph-test-support.mjs';
 
 test('runCodex rejects freshly fetched mutable content before a fake Codex executable starts', async () => {

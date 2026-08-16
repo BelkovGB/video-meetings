@@ -7,28 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 import { acquireRunLock, initializePersistentLog, readJsonFile } from './ralph-runtime.mjs';
 
-import {
-  fail,
-  isRalphInfrastructureIssue,
-  isRalphInfrastructurePath,
-  scopeMilestoneReviewToProduct,
-} from './ralph-scope.mjs';
+import { fail, isRalphInfrastructureIssue } from './ralph-scope.mjs';
 
-import {
-  credentialFreeEnvironment,
-  credentialFreeEnvironmentVariables,
-  inheritableEnvironmentVariables,
-  run,
-  runNetwork,
-} from './ralph-process-runner.mjs';
+import { run, runNetwork } from './ralph-process-runner.mjs';
 
-import {
-  agentReportedWriteAccessFailure,
-  createSandboxedCodexEnvironment,
-  developmentCodexArguments,
-  runCodexWithTurnLimit,
-  verifyCodexAuthentication,
-} from './ralph-codex-session.mjs';
+import { agentReportedWriteAccessFailure } from './ralph-codex-session.mjs';
 
 import { runReviewWithRetries } from './ralph-agent-session.mjs';
 
@@ -40,14 +23,11 @@ import {
 } from './ralph-agent-backends.mjs';
 
 import {
-  agentSkillFiles,
   configForPhase,
   configPath,
   loadConfig,
   loadRalphRules,
-  normalizePhases,
   parseJson,
-  parseSkillFrontmatter,
   verifyAgentSkills,
 } from './ralph-config.mjs';
 
@@ -58,29 +38,12 @@ import {
   setActiveStateStore,
 } from './ralph-state-store.mjs';
 
-import {
-  clearedFailure,
-  formatFailureSummary,
-  recordedFailure,
-  recoveryPrompt,
-  summarizeCommandFailure,
-  uniqueFailedTests,
-} from './ralph-failure-summary.mjs';
+import { clearedFailure, recordedFailure, recoveryPrompt } from './ralph-failure-summary.mjs';
 
 import {
   assertTrustedControlFilesUnchanged,
-  createTrustedValidationDependencySnapshot,
-  ensureValidationImage,
-  failedValidationScript,
-  hasValidationAttestation,
-  readValidationAttestations,
-  recordValidationAttestation,
-  runConfiguredScripts,
   runConfiguredValidation,
   runPreflight,
-  validationAttestationKey,
-  validationContainerRunArgs,
-  validationImageForSnapshot,
 } from './ralph-validation-runner.mjs';
 
 import {
@@ -98,7 +61,6 @@ import {
 } from './ralph-git.mjs';
 
 import {
-  githubPagedArray,
   issueState,
   openIssues,
   patchIssue,
@@ -115,30 +77,15 @@ import {
   assertTrustedIssue,
   clearIssueCompletionState,
   formatReviewComment,
-  issueBodyWithCompletionState,
-  issueBodyWithReviewContext,
   issueCompletionState,
-  issueContentHash,
   normalizeReviewResult,
   setIssueCompletionState,
   updateIssueReviewContext,
 } from './ralph-issue-contract.mjs';
 
-import {
-  buildIndependentReviewPrompt,
-  buildMilestoneReviewPrompt,
-  renderPrompt,
-} from './ralph-prompts.mjs';
+import { buildIndependentReviewPrompt, renderPrompt } from './ralph-prompts.mjs';
 
-import {
-  createOrReopenReviewIssues,
-  limitMilestoneReviewFindings,
-  milestonePassReviewIsClean,
-  milestoneReviewMarker,
-  reviewFindingFingerprint,
-  reviewFindingMarker,
-  runMilestoneReview,
-} from './ralph-milestone-review.mjs';
+import { createOrReopenReviewIssues, runMilestoneReview } from './ralph-milestone-review.mjs';
 
 // -----------------------------------------------------------------------------
 // Пути проекта и режим запуска
@@ -464,7 +411,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 // Реализация одной issue на Terra и проверка правил завершения
 // -----------------------------------------------------------------------------
 
-async function runCodex(config, repository, issue, rules) {
+export async function runCodex(config, repository, issue, rules) {
   issue = assertTrustedIssue(config, issue, repository);
   const storedIssue =
     activeStateStore()?.issue?.number === issue.number ? activeStateStore().issue : null;
@@ -757,13 +704,13 @@ function closeMilestone(repository, milestone) {
 
 // Бюджет итераций живёт в state и переживает перезапуск, поэтому конфигурация
 // может быть корректной, а `--run` при этом останавливаться сразу.
-function iterationBudget(config, stateStore) {
+export function iterationBudget(config, stateStore) {
   const limit = config.maxIterations;
   const used = stateStore?.iterationsUsed ?? 0;
   return { used, limit, remaining: Math.max(0, limit - used) };
 }
 
-function printCheck(
+export function printCheck(
   config,
   repository,
   milestone,
@@ -821,7 +768,7 @@ function printCheck(
 // Главный цикл Ralph Loop: --check и --run
 // -----------------------------------------------------------------------------
 
-async function runContinuousLoop(context, actions) {
+export async function runContinuousLoop(context, actions) {
   const { config, repository, milestone, rules } = context;
   const stateStore = context.stateStore ?? activeStateStore();
   let iteration = stateStore?.iterationsUsed ?? 0;
@@ -1022,7 +969,7 @@ async function runContinuousLoop(context, actions) {
   }
 }
 
-async function executeMode(context, actions) {
+export async function executeMode(context, actions) {
   const { mode: selectedMode, config, repository, milestone, repositoryState } = context;
 
   if (selectedMode === '--check') {
@@ -1070,7 +1017,7 @@ function initialPhaseIndex(config, state = readJsonFile(runtimeStatePath, null))
   return 0;
 }
 
-async function runPhasePlan(config, stateStore, runPhase) {
+export async function runPhasePlan(config, stateStore, runPhase) {
   const results = [];
   let phaseIndex = stateStore?.phaseIndex ?? 0;
   while (true) {
@@ -1187,7 +1134,7 @@ async function main() {
 const isMainModule =
   process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
-async function runCli() {
+export async function runCli() {
   try {
     await main();
   } catch (error) {
@@ -1199,67 +1146,3 @@ async function runCli() {
 if (isMainModule) {
   await runCli();
 }
-
-export {
-  agentSkillFiles,
-  approveConfiguredIssue,
-  assertTrustedIssue,
-  assertTrustedControlFilesUnchanged,
-  alreadyFixedCommitFromAgent,
-  buildIndependentReviewPrompt,
-  buildMilestoneReviewPrompt,
-  commitStagedChanges,
-  configForPhase,
-  createTrustedValidationDependencySnapshot,
-  createStateStore,
-  createSandboxedCodexEnvironment,
-  credentialFreeEnvironment,
-  developmentCodexArguments,
-  createOrReopenReviewIssues,
-  executeMode,
-  ensureValidationImage,
-  issueBodyWithCompletionState,
-  issueContentHash,
-  iterationBudget,
-  githubPagedArray,
-  printCheck,
-  issueBodyWithReviewContext,
-  issueCompletionState,
-  isRalphInfrastructureIssue,
-  isRalphInfrastructurePath,
-  limitMilestoneReviewFindings,
-  linkedCommitForIssue,
-  loadConfig,
-  milestonePassReviewIsClean,
-  milestoneReviewMarker,
-  normalizeReviewResult,
-  normalizePhases,
-  parseSkillFrontmatter,
-  reviewFindingMarker,
-  renderPrompt,
-  reviewFindingFingerprint,
-  run,
-  runCli,
-  runCodex,
-  runCodexWithTurnLimit,
-  runConfiguredScripts,
-  runContinuousLoop,
-  runPhasePlan,
-  scopeMilestoneReviewToProduct,
-  credentialFreeEnvironmentVariables,
-  inheritableEnvironmentVariables,
-  failedValidationScript,
-  formatFailureSummary,
-  hasValidationAttestation,
-  readValidationAttestations,
-  recordValidationAttestation,
-  validationAttestationKey,
-  recoveryPrompt,
-  summarizeCommandFailure,
-  uniqueFailedTests,
-  agentReportedWriteAccessFailure,
-  validationContainerRunArgs,
-  validationImageForSnapshot,
-  verifyAgentSkills,
-  verifyCodexAuthentication,
-};

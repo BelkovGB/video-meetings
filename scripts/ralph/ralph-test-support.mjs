@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfig } from './ralph-loop.mjs';
+import { loadConfig } from './ralph-config.mjs';
 
 /**
  * Общие фикстуры тестов Ralph: те, которыми пользуется больше одного файла.

@@ -4,13 +4,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import {
-  configForPhase,
-  createStateStore,
-  githubPagedArray,
-  normalizePhases,
-  runPhasePlan,
-} from './ralph-loop.mjs';
+import { runPhasePlan } from './ralph-loop.mjs';
+import { configForPhase, normalizePhases } from './ralph-config.mjs';
+import { githubPagedArray } from './ralph-github-client.mjs';
+import { createStateStore } from './ralph-state-store.mjs';
 
 test('persistent state survives restart and enforces branch identity', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'ralph-state-'));
