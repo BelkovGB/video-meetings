@@ -17,6 +17,7 @@ import {
   summarizeCommandFailure,
   uniqueFailedTests,
 } from './ralph-failure-summary.mjs';
+import { committedRecoveryPhases } from './ralph-loop.mjs';
 import {
   alreadyFixedCommitFromAgent,
   issueChangeInventory,
@@ -138,6 +139,33 @@ test('issue review context is replaced instead of growing on every retry', () =>
   assert.doesNotMatch(second, /First review|First finding/);
   assert.match(second, /Second review/);
   assert.equal(second.match(/ralph-issue-review-context:start/g)?.length, 1);
+});
+
+test('after a rejected review the retry is told the work is already committed', () => {
+  const commit = 'a'.repeat(40);
+  const prompt = recoveryPrompt({
+    phase: 'review-failed',
+    commit,
+    startingCommit: commit,
+    lastFailure: null,
+  });
+
+  assert.match(prompt, new RegExp(`HEAD уже содержит commit ${commit}`));
+  assert.match(prompt, /не переделывай реализацию заново/);
+  // Сбоя не было: обычная формулировка восстановления здесь врала бы.
+  assert.doesNotMatch(prompt, /исправь последний сбой/);
+  assert.doesNotMatch(prompt, /процесс завершился до фиксации результата/);
+
+  // Замечания в prompt не копируются: их несёт тело issue, которое и так
+  // подставляется целиком.
+  assert.doesNotMatch(prompt, /Location:/);
+});
+
+test('a rejected review never resumes without a new agent session', () => {
+  // На фазе review-failed commit существует, и попадание её в этот список
+  // означало бы бесконечный повтор того же ревью над тем же деревом.
+  assert.equal(committedRecoveryPhases.includes('review-failed'), false);
+  assert.deepEqual(committedRecoveryPhases, ['committed', 'pushed', 'reviewing']);
 });
 
 test('review context is separable from the issue body so the next review can be asked about it', () => {

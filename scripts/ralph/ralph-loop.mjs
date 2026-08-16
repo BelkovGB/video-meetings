@@ -143,6 +143,16 @@ export function incompleteIssueOutcome(result) {
   return { outcome, reason, runOutcome: { [flag]: true } };
 }
 
+/**
+ * Фазы, с которых issue продолжается без новой сессии агента: работа уже
+ * закоммичена, осталось её протолкнуть и отревьюить.
+ *
+ * `review-failed` сюда не входит и входить не должен. На этой фазе commit тоже
+ * существует, но ревью его уже отклонило: продолжение без сессии агента
+ * означало бы бесконечный повтор того же ревью над тем же деревом.
+ */
+export const committedRecoveryPhases = ['committed', 'pushed', 'reviewing'];
+
 function reportIssueMetrics(outcome) {
   const record = finishIssueMetrics(outcome);
   if (record) console.log(formatIssueMetrics(record));
@@ -317,7 +327,21 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
   if (review.verdict !== 'pass') {
     updateIssueReviewContext(repository, issue, review);
     reopenIssueWithComment(repository, issue, formatReviewComment(review));
-    activeStateStore()?.clearIssue();
+    // Состояние сохраняется, а не стирается: реализация уже в HEAD и уже прошла
+    // валидацию, и следующая сессия должна чинить замечания поверх неё, а не
+    // выяснять заново, что сделано. `startingCommit` обязан переехать на этот
+    // commit — иначе сверка HEAD отвергнет повторный прогон, а проверка «ровно
+    // один commit» отвергнет исправляющий commit.
+    activeStateStore()?.updateIssue({
+      phase: 'review-failed',
+      startingCommit: commit,
+      commit,
+      pushedHead: null,
+      expectedTree: null,
+      commitMessage: null,
+      validationFixAttempts: 0,
+      ...clearedFailure,
+    });
     return { completed: false, commit, review };
   }
 
@@ -453,7 +477,7 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
   issue = assertTrustedIssue(config, issue, repository);
   const storedIssue =
     activeStateStore()?.issue?.number === issue.number ? activeStateStore().issue : null;
-  if (storedIssue?.commit && ['committed', 'pushed', 'reviewing'].includes(storedIssue.phase)) {
+  if (storedIssue?.commit && committedRecoveryPhases.includes(storedIssue.phase)) {
     assertCleanTree(`Issue #${issue.number}: committed recovery требует чистое рабочее дерево.`);
     const commit = verifiedIssueCommit(storedIssue.commit, issue);
     console.log(
@@ -944,7 +968,7 @@ export async function runContinuousLoop(context, actions) {
     const linkedCommit = storedPhase ? null : actions.linkedCommitForIssue?.(currentIssue);
     if (linkedCommit) currentIssue.linkedCommit = linkedCommit;
     const needsDevelopmentIteration =
-      !['committed', 'pushed', 'reviewing'].includes(storedPhase) && !linkedCommit;
+      !committedRecoveryPhases.includes(storedPhase) && !linkedCommit;
 
     if (needsDevelopmentIteration && iteration >= config.maxIterations) {
       fail(

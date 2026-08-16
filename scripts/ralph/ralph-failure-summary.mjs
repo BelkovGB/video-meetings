@@ -142,7 +142,32 @@ export function recordedFailure(error, options = {}) {
 
 export const clearedFailure = { lastFailure: null, lastFailureSummary: null };
 
+/**
+ * Продолжение после отказа независимого ревью.
+ *
+ * Отдельная ветка нужна потому, что состояние здесь противоположное обычному
+ * восстановлению: сбоя не было, дерево чистое, реализация уже в HEAD и уже
+ * прошла валидацию. Без этого сессия начиналась с нуля и заново выясняла, что
+ * сделано, — самая крупная повторная трата на многоитерационной issue.
+ *
+ * Сами замечания сюда не копируются: оркестратор кладёт их в тело issue, а тело
+ * и так целиком попадает в prompt.
+ */
+function reviewRecoveryPrompt(storedIssue) {
+  return (
+    '\n\n## AFK recovery: независимое ревью вернуло замечания\n\nHEAD уже содержит ' +
+    `commit ${storedIssue.commit} — твою реализацию этой issue, и весь набор ` +
+    'validationScripts на этом дереве прошёл. Замечания ревьюера перечислены в теле ' +
+    'issue выше. Исправь их поверх HEAD: не переделывай реализацию заново и не ' +
+    'откатывай существующие изменения.'
+  );
+}
+
 export function recoveryPrompt(storedIssue) {
+  if (storedIssue?.phase === 'review-failed' && storedIssue.commit) {
+    return reviewRecoveryPrompt(storedIssue);
+  }
+
   const failure = storedIssue?.lastFailure ?? 'процесс завершился до фиксации результата';
   const failedTests = storedIssue?.lastFailureSummary?.failedTests ?? [];
   const focus =
