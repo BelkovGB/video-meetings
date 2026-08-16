@@ -179,6 +179,8 @@ export function issueBodyWithoutCompletionState(issue) {
     .trim();
 }
 
+// Маркер больше не записывается. Формат читается, потому что тела issue от
+// прежних прогонов его содержат и он не должен попадать в prompt.
 export function issueCompletionState(issue) {
   const match = (issue.body ?? '').match(
     /<!-- ralph-issue-completion status:(pending-review|review-passed) commit:([0-9a-f]{40}) -->/i,
@@ -186,17 +188,8 @@ export function issueCompletionState(issue) {
   return match ? { status: match[1].toLowerCase(), commit: match[2].toLowerCase() } : null;
 }
 
-export function issueBodyWithCompletionState(issue, status, commit) {
-  const body = issueBodyWithoutCompletionState(issue);
-  return `${body}\n\n<!-- ralph-issue-completion status:${status} commit:${commit} -->`.trim();
-}
-
-export function setIssueCompletionState(repository, issue, status, commit) {
-  const latest = issueDetails(repository, issue.number);
-  const updatedBody = issueBodyWithCompletionState({ ...issue, body: latest.body }, status, commit);
-  issue.body = patchIssue(repository, issue.number, { body: updatedBody }).body;
-}
-
+// Убирает маркер прежних версий из тела issue. Ничего не делает, когда его
+// там нет, поэтому лишнего GitHub-запроса на чистых issue не будет.
 export function clearIssueCompletionState(repository, issue) {
   const latest = issueDetails(repository, issue.number);
   const updatedBody = issueBodyWithoutCompletionState({ ...issue, body: latest.body });

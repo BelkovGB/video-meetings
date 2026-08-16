@@ -77,9 +77,7 @@ import {
   assertTrustedIssue,
   clearIssueCompletionState,
   formatReviewComment,
-  issueCompletionState,
   normalizeReviewResult,
-  setIssueCompletionState,
   updateIssueReviewContext,
 } from './ralph-issue-contract.mjs';
 
@@ -206,7 +204,7 @@ function closeIssue(config, repository, issue, commit) {
   }
 }
 
-async function reviewAndCloseCommittedIssue(config, repository, issue, commit, markPending = true) {
+async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
   const pushedHead = pushBranchAndVerify(config);
   activeStateStore()?.updateIssue({
     phase: 'pushed',
@@ -226,9 +224,6 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
     };
   }
 
-  if (markPending) {
-    setIssueCompletionState(repository, issue, 'pending-review', commit);
-  }
   activeStateStore()?.updateIssue({ phase: 'reviewing' });
   let review;
   try {
@@ -263,43 +258,9 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
   }
 
   verifyPushedHead(config, pushedHead);
-  // Удаляем recovery-marker до закрытия: позднее ручное reopen должно снова
-  // пройти обычную реализацию, а не использовать старый commit как актуальный.
-  clearIssueCompletionState(repository, issue);
-  try {
-    closeIssue(config, repository, issue, commit);
-  } catch (error) {
-    // Если закрытие технически не удалось, стараемся сохранить точку resume.
-    try {
-      setIssueCompletionState(repository, issue, 'pending-review', commit);
-    } catch (restoreError) {
-      console.error(
-        `Не удалось восстановить состояние pending-review для issue #${issue.number}: ${restoreError.message}`,
-      );
-    }
-    throw error;
-  }
+  closeIssue(config, repository, issue, commit);
   activeStateStore()?.clearIssue();
   return { completed: true, commit, review };
-}
-
-async function resumeIssueCompletion(config, repository, issue, completion) {
-  const commit = verifiedIssueCommit(completion.commit, issue);
-  assertCleanTree(`Issue #${issue.number}: нельзя продолжить review при грязном рабочем дереве.`);
-
-  // Marker хранится в редактируемом body issue и служит только указателем на
-  // commit. Он не является доверенным доказательством пройденных проверок.
-  runConfiguredValidation(config);
-  assertValidationLeftTree(
-    '',
-    `Issue #${issue.number}: проверки при возобновлении изменили рабочее дерево.`,
-  );
-
-  console.log(
-    `Issue #${issue.number}: повторяем validations и review commit ${commit} ` +
-      `(сохранённое состояние: ${completion.status}).`,
-  );
-  return reviewAndCloseCommittedIssue(config, repository, issue, commit, false);
 }
 
 async function commitAndCompleteIssue(config, repository, issue, startingCommit, lastAgentMessage) {
@@ -443,16 +404,6 @@ export async function runCodex(config, repository, issue, rules) {
       throw error;
     }
     return reviewAndCloseCommittedIssue(config, repository, issue, commit);
-  }
-
-  const completion = issueCompletionState(issue);
-  if (completion?.status === 'pending-review') {
-    return resumeIssueCompletion(config, repository, issue, completion);
-  }
-  if (completion) {
-    // Совместимость со старым review-passed marker: он не является доверенным
-    // состоянием и не должен обходить новую реализацию после reopen.
-    clearIssueCompletionState(repository, issue);
   }
 
   const currentHead = run('git', ['rev-parse', 'HEAD']).stdout;
@@ -921,16 +872,12 @@ export async function runContinuousLoop(context, actions) {
     }
     approveConfiguredIssue(config, refreshedIssue, repository, stateStore);
     currentIssue = refreshedIssue;
-    const completion = issueCompletionState(currentIssue);
     const storedPhase =
       stateStore?.issue?.number === currentIssue.number ? stateStore.issue.phase : null;
-    const linkedCommit =
-      !completion && !storedPhase ? actions.linkedCommitForIssue?.(currentIssue) : null;
+    const linkedCommit = storedPhase ? null : actions.linkedCommitForIssue?.(currentIssue);
     if (linkedCommit) currentIssue.linkedCommit = linkedCommit;
     const needsDevelopmentIteration =
-      completion?.status !== 'pending-review' &&
-      !['committed', 'pushed', 'reviewing'].includes(storedPhase) &&
-      !linkedCommit;
+      !['committed', 'pushed', 'reviewing'].includes(storedPhase) && !linkedCommit;
 
     if (needsDevelopmentIteration && iteration >= config.maxIterations) {
       fail(

@@ -19,7 +19,6 @@ import { commitStagedChanges } from './ralph-git.mjs';
 import {
   approveConfiguredIssue,
   assertTrustedIssue,
-  issueBodyWithCompletionState,
   issueBodyWithReviewContext,
   issueCompletionState,
   issueContentHash,
@@ -237,7 +236,9 @@ test('Ralph accepts its own lifecycle metadata while preserving approved require
     authorLogin: 'BelkovGB',
     authorAssociation: 'OWNER',
     body: issueBodyWithReviewContext(
-      { body: issueBodyWithCompletionState(approvedIssue, 'pending-review', commit) },
+      {
+        body: `${approvedIssue.body}\n\n<!-- ralph-issue-completion status:pending-review commit:${commit} -->`,
+      },
       {
         summary: 'Independent review found a regression.',
         findings: [

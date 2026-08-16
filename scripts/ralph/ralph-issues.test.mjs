@@ -18,7 +18,6 @@ import {
 } from './ralph-failure-summary.mjs';
 import { alreadyFixedCommitFromAgent, linkedCommitForIssue } from './ralph-git.mjs';
 import {
-  issueBodyWithCompletionState,
   issueBodyWithReviewContext,
   issueCompletionState,
   normalizeReviewResult,
@@ -133,28 +132,19 @@ test('issue review context is replaced instead of growing on every retry', () =>
   assert.equal(second.match(/ralph-issue-review-context:start/g)?.length, 1);
 });
 
-test('issue completion state can be replaced and removed by review context', () => {
-  const firstCommit = 'a'.repeat(40);
-  const secondCommit = 'b'.repeat(40);
-  const pending = issueBodyWithCompletionState(
-    { body: 'Original requirements' },
-    'pending-review',
-    firstCommit,
-  );
-  const passed = issueBodyWithCompletionState({ body: pending }, 'review-passed', secondCommit);
+test('a completion marker left by an older Ralph is read and then stripped', () => {
+  const commit = 'a'.repeat(40);
+  // Литерал, а не вызов форматтера: писателя маркера больше нет, и тест должен
+  // проверять именно тот текст, который лежит в issue от прежних прогонов.
+  const staleBody = `Original requirements\n\n<!-- ralph-issue-completion status:pending-review commit:${commit} -->`;
 
-  assert.deepEqual(issueCompletionState({ body: pending }), {
+  assert.deepEqual(issueCompletionState({ body: staleBody }), {
     status: 'pending-review',
-    commit: firstCommit,
+    commit,
   });
-  assert.deepEqual(issueCompletionState({ body: passed }), {
-    status: 'review-passed',
-    commit: secondCommit,
-  });
-  assert.equal(passed.match(/ralph-issue-completion/g)?.length, 1);
 
   const retryBody = issueBodyWithReviewContext(
-    { body: passed },
+    { body: staleBody },
     {
       summary: 'Needs another fix',
       findings: [{ severity: 'P1', title: 'Finding', file: 'file.ts', line: 1, body: 'Fix it' }],
@@ -162,6 +152,7 @@ test('issue completion state can be replaced and removed by review context', () 
   );
   assert.equal(issueCompletionState({ body: retryBody }), null);
   assert.doesNotMatch(retryBody, /ralph-issue-completion/);
+  assert.match(retryBody, /^Original requirements/);
 });
 
 test('already-fixed marker accepts a commit SHA only on its own final line', () => {
