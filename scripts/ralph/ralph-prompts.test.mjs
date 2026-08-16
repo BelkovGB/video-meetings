@@ -72,6 +72,68 @@ test('issue review prompt requires one exhaustive in-scope audit', () => {
   assert.match(prompt, /Ignore unrelated pre-existing debt/);
 });
 
+test('issue review prompt carries the change set the reviewer cannot obtain itself', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude', validationScripts: ['lint', 'build', 'test:e2e:api'] },
+    { number: 57, title: 'End the browser session', body: 'Outcome text.' },
+    'b'.repeat(40),
+    {
+      changes: {
+        commit: 'b'.repeat(40),
+        stat: ' apps/web/app/login/page.tsx | 12 ++++--',
+        nameStatus: 'M\tapps/web/app/login/page.tsx',
+        diff: '--- a/apps/web/app/login/page.tsx\n+++ b/apps/web/app/login/page.tsx',
+        truncated: false,
+      },
+      previousFindings: '- **P2 — Missing guard** (apps/web/use-meeting-files.ts:36)',
+    },
+  );
+
+  assert.match(prompt, /M\tapps\/web\/app\/login\/page\.tsx/);
+  assert.match(prompt, /```diff/);
+  assert.match(prompt, /complete set of changes made for this issue/);
+  assert.match(prompt, /already ran lint, build, test:e2e:api/);
+  assert.match(prompt, /Do not rerun them/);
+  // Замечания прошлого ревью обязаны быть подписаны: внутри тела issue они
+  // неотличимы от критериев готовности, и требовать их проверки бессмысленно.
+  assert.match(prompt, /previous review of this issue reported the findings below/);
+  assert.match(prompt, /P2 — Missing guard/);
+  assert.doesNotMatch(prompt, /truncated/);
+});
+
+test('a truncated change set says so instead of looking complete', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 58, title: 'Large change', body: 'Outcome text.' },
+    'c'.repeat(40),
+    {
+      changes: {
+        commit: 'c'.repeat(40),
+        stat: ' 40 files changed',
+        nameStatus: 'M\tone.ts',
+        diff: '--- a/one.ts',
+        truncated: true,
+      },
+    },
+  );
+
+  assert.match(prompt, /The diff above is truncated/);
+  // Набор validationScripts не задан: утверждать, что проверки прошли, нечем.
+  assert.doesNotMatch(prompt, /already ran/);
+  assert.doesNotMatch(prompt, /previous review/);
+});
+
+test('without a change set the prompt keeps its previous shape', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'codex' },
+    { number: 59, title: 'No inventory', body: 'Outcome text.' },
+    'd'.repeat(40),
+  );
+
+  assert.doesNotMatch(prompt, /```diff/);
+  assert.match(prompt, /Do not stop after the first problem/);
+});
+
 test('milestone review stays within milestone scope and trusts completed validations', () => {
   const prompt = buildMilestoneReviewPrompt(
     { baseBranch: 'master' },

@@ -59,6 +59,7 @@ import {
   commitMessageFromAgent,
   commitStagedChanges,
   commitTrailerForIssue,
+  issueChangeInventory,
   linkedCommitForIssue,
   pushBranchAndVerify,
   reconcileStateAfterCrash,
@@ -86,7 +87,9 @@ import {
   assertTrustedIssue,
   clearIssueCompletionState,
   formatReviewComment,
+  issueBodyWithoutRalphMetadata,
   normalizeReviewResult,
+  reviewContextFromIssueBody,
   updateIssueReviewContext,
 } from './ralph-issue-contract.mjs';
 
@@ -186,7 +189,18 @@ async function runIndependentReview(config, repository, issue, commit) {
     unlinkSync(config.review.outputPath);
   }
 
-  const reviewPrompt = buildIndependentReviewPrompt(config, issue, commit);
+  // Замечания прошлого ревью вынимаются из тела issue в отдельную секцию
+  // prompt: внутри тела они приезжали без подписи, вперемешку с критериями
+  // готовности, и требование «проверь их закрытие» опереться было не на что.
+  const reviewPrompt = buildIndependentReviewPrompt(
+    config,
+    { ...issue, body: issueBodyWithoutRalphMetadata(issue) },
+    commit,
+    {
+      changes: issueChangeInventory(commit),
+      previousFindings: reviewContextFromIssueBody(issue),
+    },
+  );
 
   console.log(`\n=== Independent review for issue #${issue.number} ===\n`);
 

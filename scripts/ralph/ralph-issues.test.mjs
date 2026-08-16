@@ -17,11 +17,17 @@ import {
   summarizeCommandFailure,
   uniqueFailedTests,
 } from './ralph-failure-summary.mjs';
-import { alreadyFixedCommitFromAgent, linkedCommitForIssue } from './ralph-git.mjs';
+import {
+  alreadyFixedCommitFromAgent,
+  issueChangeInventory,
+  linkedCommitForIssue,
+} from './ralph-git.mjs';
 import {
   issueBodyWithReviewContext,
+  issueBodyWithoutRalphMetadata,
   issueCompletionState,
   normalizeReviewResult,
+  reviewContextFromIssueBody,
 } from './ralph-issue-contract.mjs';
 import {
   createOrReopenReviewIssues,
@@ -132,6 +138,50 @@ test('issue review context is replaced instead of growing on every retry', () =>
   assert.doesNotMatch(second, /First review|First finding/);
   assert.match(second, /Second review/);
   assert.equal(second.match(/ralph-issue-review-context:start/g)?.length, 1);
+});
+
+test('review context is separable from the issue body so the next review can be asked about it', () => {
+  const body = issueBodyWithReviewContext(
+    { body: 'Original requirements' },
+    {
+      summary: 'Review summary',
+      findings: [
+        { severity: 'P2', title: 'Missing guard', file: 'guard.ts', line: 7, body: 'Add it' },
+      ],
+    },
+  );
+
+  const findings = reviewContextFromIssueBody({ body });
+  assert.match(findings, /Missing guard/);
+  assert.doesNotMatch(findings, /ralph-issue-review-context/);
+  // Тело без метаданных не должно повторять тот же блок: иначе замечания
+  // приезжают в prompt дважды и оба раза без подписи.
+  assert.equal(issueBodyWithoutRalphMetadata({ body }), 'Original requirements');
+  assert.equal(reviewContextFromIssueBody({ body: 'Original requirements' }), null);
+});
+
+test('the change inventory asks git for one commit and marks an oversized diff', () => {
+  const calls = [];
+  const respond = (args) => {
+    calls.push(args.join(' '));
+    if (args.includes('--name-status')) return { stdout: 'M\tapps/api/src/profile.ts' };
+    if (args.includes('--stat')) return { stdout: ' apps/api/src/profile.ts | 4 +++-' };
+    return { stdout: 'x'.repeat(70_000) };
+  };
+
+  const inventory = issueChangeInventory('a'.repeat(40), { run: (_name, args) => respond(args) });
+
+  assert.equal(inventory.truncated, true);
+  assert.equal(inventory.diff.length, 60_000);
+  assert.match(inventory.nameStatus, /apps\/api\/src\/profile\.ts/);
+  // Ни одна из трёх команд не должна обращаться к диапазону: оркестратор
+  // гарантирует один commit на issue, а у `git show` нет особого случая для
+  // корневого commit, в отличие от `commit^..commit`.
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((call) => call.startsWith('show --format=')));
+  assert.ok(!calls.some((call) => call.includes('..')));
+  // Lockfile исключается только из построчного diff и остаётся в списке файлов.
+  assert.ok(calls.some((call) => call.includes(':(exclude)package-lock.json')));
 });
 
 test('a completion marker left by an older Ralph is read and then stripped', () => {

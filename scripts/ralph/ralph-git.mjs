@@ -19,6 +19,40 @@ export function commitTrailerForIssue(issue) {
   return `Ralph-Issue: #${issue.number}`;
 }
 
+// Бюджет подобран по наблюдаемой цене альтернативы: без diff ревьюер Claude
+// запускается с Read, Glob и Grep и без оболочки, то есть получить изменения
+// сам не может вовсе и восстанавливает область правки чтением файлов целиком —
+// на issue #57 это 34 шага и шесть минут. Diff на 60 000 символов дешевле.
+const reviewDiffCharacterBudget = 60_000;
+
+// package-lock.json меняется на сотни строк от одной зависимости и вытеснил бы
+// из бюджета продуктовый код. Файл остаётся в списке изменений и в статистике;
+// исчезает только его построчный diff.
+const reviewDiffExcludedPaths = [':(exclude)package-lock.json', ':(exclude)**/package-lock.json'];
+
+/**
+ * Полный набор изменений issue одним объектом: список файлов, статистика и
+ * ограниченный diff. Опора на `git show`, а не на `commit^..commit`: оркестратор
+ * требует ровно один commit на issue, а у show нет особого случая для корневого.
+ */
+export function issueChangeInventory(commit, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const show = (flags, pathspecs = []) =>
+    execute('git', ['show', '--format=', ...flags, commit, ...pathspecs]).stdout;
+  const patch = show(['--patch', '--unified=3'], ['--', '.', ...reviewDiffExcludedPaths]);
+  const truncated = patch.length > reviewDiffCharacterBudget;
+
+  return {
+    commit,
+    nameStatus: show(['--name-status']),
+    stat: show(['--stat']),
+    // Обрезанный diff полезнее отсутствующего: ревьюер видит начало изменений и
+    // знает, что остаток надо дочитать сам.
+    diff: truncated ? patch.slice(0, reviewDiffCharacterBudget) : patch,
+    truncated,
+  };
+}
+
 export function commitStagedChanges(commitMessage, issue, timeoutMs, dependencies = {}) {
   const execute = dependencies.run ?? run;
   const emptyHooksDirectory = mkdtempSync(path.join(tmpdir(), 'ralph-empty-hooks-'));

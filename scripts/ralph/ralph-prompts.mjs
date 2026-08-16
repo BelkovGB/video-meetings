@@ -63,20 +63,66 @@ function reviewDocumentationDiscovery(config) {
 const reviewVerdictContract =
   'Use verdict "fail" when at least one actionable finding exists; otherwise use "pass" with an empty findings array.';
 
-export function buildIndependentReviewPrompt(config, issue, commit) {
+/**
+ * Блок изменений: то, что оркестратор уже знает, и то, что ревьюер иначе
+ * добывает сам. Claude-ревьюер запускается без оболочки и `git` вызвать не
+ * может: без этого блока «изменения для issue» для него — догадка по тексту.
+ */
+function reviewChangeInventory(changes) {
+  if (!changes) return '';
+  const truncationNote = changes.truncated
+    ? '\n\nThe diff above is truncated. Read the remaining changed files from the list yourself.'
+    : '';
+
+  return `
+
+Changes in commit ${changes.commit}. This is the complete set of changes made for this issue; the orchestrator enforces exactly one commit per issue.
+
+${changes.stat}
+
+${changes.nameStatus}
+
+\`\`\`diff
+${changes.diff}
+\`\`\`${truncationNote}`;
+}
+
+// Ревьюер, которому не сказали, что проверки уже прошли, тратит шаги на их
+// повторение или выдаёт «нужно прогнать тесты» за замечание. Ни то, ни другое
+// не является дефектом реализации.
+function reviewValidationEvidence(config) {
+  const scripts = config?.validationScripts ?? [];
+  if (scripts.length === 0) return '';
+
+  return `
+
+The Ralph orchestrator already ran ${scripts.join(', ')} in an isolated container against this exact tree, and all of them passed. Do not rerun them, and do not report a finding whose only content is that a check should be run.`;
+}
+
+function reviewPreviousFindings(previousFindings) {
+  if (!previousFindings) return '';
+
+  return `
+
+The previous review of this issue reported the findings below. Check each one before anything else: state in your summary whether it is resolved at HEAD, and report it again only if it is not.
+
+${previousFindings}`;
+}
+
+export function buildIndependentReviewPrompt(config, issue, commit, context = {}) {
   const issueBody = issue.body?.trim() || '(empty)';
 
-  return `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; inspect it as evidence, but verify that the current HEAD still satisfies the issue and has not regressed it.
+  return `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; verify that the current HEAD still satisfies the issue and has not regressed it.
 
 Issue body:
-${issueBody}
+${issueBody}${reviewPreviousFindings(context.previousFindings)}${reviewChangeInventory(context.changes)}${reviewValidationEvidence(config)}
 
 Complete the entire audit before deciding the verdict. Do not stop after the first problem. Return every distinct, actionable finding you can substantiate in this single response, without duplicates and without inventing findings to fill a quota.
 
 Audit all of these areas:
 - every requirement and definition-of-done item from the issue body;
 - correctness, edge cases, regressions, security, and test coverage;
-- interactions between all files changed for the issue, not only the most obvious file;
+- interactions between all changed files, not only the most obvious one;
 - public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant;
 - whether tests assert the real externally observable behavior rather than only an implementation detail.
 
