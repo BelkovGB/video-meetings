@@ -116,6 +116,16 @@ export function formatReviewComment(review) {
   return `## Ralph Loop: independent review found problems\n\n${review.summary}\n\n${findings}\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.`;
 }
 
+export function assertReviewPayloadShape(review, label) {
+  if (
+    !['pass', 'fail'].includes(review.verdict) ||
+    typeof review.summary !== 'string' ||
+    !Array.isArray(review.findings)
+  ) {
+    fail(`${label} вернул некорректный результат.`);
+  }
+}
+
 export function normalizeReviewResult(review) {
   if (review.verdict === 'fail' && review.findings.length === 0) {
     fail('Review returned FAIL without actionable findings.');

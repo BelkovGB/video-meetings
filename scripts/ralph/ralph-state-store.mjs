@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 
 import { readJsonFile, removeFileIfExists, writeJsonAtomic } from './ralph-runtime.mjs';
 import { fail } from './ralph-scope.mjs';
-import { phasePlanId } from './ralph-config.mjs';
 
 /**
  * Состояние AFK-запуска: переживает перезапуск Node и не попадает в Git.
@@ -33,11 +32,7 @@ export function createStateStore(config, selectedMode, statePath = runtimeStateP
   let state = readJsonFile(statePath, null);
   const configuredPhaseIndex = config.phaseIndex ?? 0;
   const configuredPhaseCount = config.phaseCount ?? 1;
-  const configuredPlanId =
-    config.phasePlanId ??
-    phasePlanId([
-      { milestone: config.milestone, branch: config.branch, baseBranch: config.baseBranch },
-    ]);
+  const configuredPlanId = config.phasePlanId;
   if (state) {
     const identityMismatch =
       state.version !== 2 ||
@@ -110,7 +105,7 @@ export function createStateStore(config, selectedMode, statePath = runtimeStateP
       persist();
       return snapshot;
     },
-    beginIssue(issue, startingCommit, continuation = false) {
+    beginIssue(issue, startingCommit) {
       if (!state) return;
       if (state.issue && state.issue.number !== issue.number) {
         fail(`State ожидает issue #${state.issue.number}, но очередь выбрала #${issue.number}.`);
@@ -125,7 +120,6 @@ export function createStateStore(config, selectedMode, statePath = runtimeStateP
         startingCommit,
         phase: 'agent-running',
         validationFixAttempts: 0,
-        agentAttempts: 0,
         lastFailure: null,
         lastFailureSummary: null,
         commit: null,
@@ -134,8 +128,6 @@ export function createStateStore(config, selectedMode, statePath = runtimeStateP
         commitMessage: null,
       };
       state.issue.phase = 'agent-running';
-      state.issue.agentAttempts += 1;
-      state.issue.continuation = continuation;
       persist();
       return state.issue;
     },

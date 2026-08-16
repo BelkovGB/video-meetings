@@ -16,7 +16,7 @@ import {
   postIssueCommentOnce,
   postPullRequestReview,
 } from './ralph-github-client.mjs';
-import { normalizeReviewResult } from './ralph-issue-contract.mjs';
+import { assertReviewPayloadShape, normalizeReviewResult } from './ralph-issue-contract.mjs';
 import { buildMilestoneReviewPrompt } from './ralph-prompts.mjs';
 
 /**
@@ -203,13 +203,7 @@ export async function runMilestoneReview(config, repository, milestone, pullRequ
           readFileSync(config.milestoneReview.outputPath, 'utf8'),
           config.milestoneReview.outputPath,
         );
-        if (
-          !['pass', 'fail'].includes(candidate.verdict) ||
-          typeof candidate.summary !== 'string' ||
-          !Array.isArray(candidate.findings)
-        ) {
-          fail(`Milestone review PR #${pullRequest.number} вернул некорректный результат.`);
-        }
+        assertReviewPayloadShape(candidate, `Milestone review PR #${pullRequest.number}`);
         const normalized = normalizeReviewResult(candidate);
         const changed = run('git', ['status', '--porcelain']).stdout !== '';
         const headChanged = run('git', ['rev-parse', 'HEAD']).stdout !== reviewedHead;

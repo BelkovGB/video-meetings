@@ -104,6 +104,7 @@ import {
 
 import {
   approveConfiguredIssue,
+  assertReviewPayloadShape,
   assertTrustedIssue,
   clearIssueCompletionState,
   formatReviewComment,
@@ -207,14 +208,7 @@ async function runIndependentReview(config, repository, issue, commit) {
 
   let review = parseJson(readFileSync(config.review.outputPath, 'utf8'), config.review.outputPath);
 
-  if (
-    !['pass', 'fail'].includes(review.verdict) ||
-    typeof review.summary !== 'string' ||
-    !Array.isArray(review.findings)
-  ) {
-    fail(`Review issue #${issue.number} вернул некорректный результат.`);
-  }
-
+  assertReviewPayloadShape(review, `Review issue #${issue.number}`);
   review = normalizeReviewResult(review);
 
   const changes = run('git', ['status', '--porcelain']).stdout;
@@ -224,7 +218,7 @@ async function runIndependentReview(config, repository, issue, commit) {
     fail(`Review issue #${issue.number} изменил рабочее дерево.`);
   }
 
-  if (review.verdict !== 'pass' || review.findings.length > 0) {
+  if (review.verdict !== 'pass') {
     console.log(
       `Review issue #${issue.number}: FAIL — найдено замечаний: ${review.findings.length}.`,
     );
@@ -309,7 +303,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
     }
     throw error;
   }
-  if (review.verdict !== 'pass' || review.findings.length > 0) {
+  if (review.verdict !== 'pass') {
     updateIssueReviewContext(repository, issue, review);
     reopenIssueWithComment(repository, issue, formatReviewComment(review));
     activeStateStore()?.clearIssue();
@@ -520,7 +514,7 @@ async function runCodex(config, repository, issue, rules) {
       `Issue #${issue.number}: recovery ожидал HEAD ${startingCommit}, но найден ${currentHead}.`,
     );
   }
-  activeStateStore()?.beginIssue(issue, startingCommit, continuation);
+  activeStateStore()?.beginIssue(issue, startingCommit);
 
   const linkedCommit = issue.linkedCommit ?? linkedCommitForIssue(issue);
   if (!continuation && linkedCommit) {

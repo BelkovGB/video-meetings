@@ -280,7 +280,6 @@ test('Ralph configuration pins approved AFK inputs before starting an agent sess
     config.approvedIssueSnapshotsPath,
     /[\\/]scripts[\\/]ralph[\\/]approved-issues\.json$/,
   );
-  assert.equal(config.validationContainer.network, 'none');
   assert.match(
     config.validationContainer.dockerfilePath,
     /[\\/]scripts[\\/]ralph[\\/]Dockerfile\.validation$/,

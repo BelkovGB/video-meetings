@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { fail } from './ralph-scope.mjs';
-import { applyRuntimeSettings } from './ralph-process-runner.mjs';
+import { applyRuntimeSettings, defaultRuntimeSettings } from './ralph-process-runner.mjs';
 import { reasoningEfforts } from './ralph-codex-session.mjs';
 
 /**
@@ -232,10 +232,8 @@ export function configForPhase(config, phaseIndex) {
 }
 
 function requirePromptTemplate(config) {
-  for (const field of ['prompt']) {
-    if (typeof config[field] !== 'string' || config[field].trim() === '') {
-      fail(`Заполните строковое поле "${field}" в ${configPath}.`);
-    }
+  if (typeof config.prompt !== 'string' || config.prompt.trim() === '') {
+    fail(`Заполните строковое поле "prompt" в ${configPath}.`);
   }
 }
 
@@ -253,16 +251,13 @@ function applyLoopDefaults(config) {
   config.maxTurns ??= 50;
   config.maxTestFixAttempts ??= 5;
   config.runtime ??= {};
-  config.runtime.commandTimeoutMs ??= 300_000;
-  config.runtime.validationTimeoutMs ??= 1_800_000;
-  // Один контейнер выполняет весь набор, поэтому бюджет задаётся на прогон,
-  // а не на команду. validationTimeoutMs остаётся бюджетом docker build.
-  config.runtime.validationRunTimeoutMs ??= 3_600_000;
-  config.runtime.codexTimeoutMs ??= 5_400_000;
-  config.runtime.networkRetryAttempts ??= 3;
-  config.runtime.networkRetryBaseDelayMs ??= 2_000;
-  config.runtime.maxPages ??= 20;
-  config.runtime.reviewRetryAttempts ??= 3;
+  // Значения живут в ralph-process-runner.mjs: тот же набор действует до
+  // loadConfig, и раздвоение дефолтов расходилось бы молча.
+  // validationTimeoutMs — бюджет docker build, validationRunTimeoutMs — бюджет
+  // прогона всего набора в одном контейнере.
+  for (const [field, value] of Object.entries(defaultRuntimeSettings)) {
+    config.runtime[field] ??= value;
+  }
   config.developmentModel ??= 'gpt-5.6-terra';
   config.developmentEffort ??= 'medium';
   config.rulesFile ??= '.agents/ralph-rules.md';
@@ -272,12 +267,6 @@ function applyLoopDefaults(config) {
 }
 
 function readApprovedIssueSnapshots(config) {
-  if (
-    typeof config.approvedIssueSnapshotsFile !== 'string' ||
-    config.approvedIssueSnapshotsFile.trim() === ''
-  ) {
-    fail('Поле "approvedIssueSnapshotsFile" должно быть непустым путём к snapshots issue.');
-  }
   const approvedIssueSnapshotsPath = resolveProjectFile(
     config.approvedIssueSnapshotsFile,
     'approvedIssueSnapshotsFile',
@@ -302,7 +291,6 @@ function applyValidationAndReviewDefaults(config) {
   config.validationContainer ??= {
     image: 'video-meetings-ralph-validation:latest',
     dockerfile: 'scripts/ralph/Dockerfile.validation',
-    network: 'none',
   };
   config.preflightScripts ??= [];
   config.validationScripts ??= ['format:check', 'lint', 'build'];
@@ -327,9 +315,6 @@ function applyValidationAndReviewDefaults(config) {
 function validateLoopFields(config) {
   if (typeof config.active !== 'boolean') {
     fail('Поле "active" должно быть true или false.');
-  }
-  if (typeof config.baseBranch !== 'string' || config.baseBranch.trim() === '') {
-    fail('Поле "baseBranch" должно быть непустой строкой.');
   }
   if (typeof config.draftPullRequest !== 'boolean') {
     fail('Поле "draftPullRequest" должно быть true или false.');
@@ -397,9 +382,6 @@ function prepareValidationContainer(config) {
     ) {
       fail(`Поле "validationContainer.${field}" должно содержать безопасное значение.`);
     }
-  }
-  if (config.validationContainer.network !== 'none') {
-    fail('Поле "validationContainer.network" должно быть равно "none" для изолированной проверки.');
   }
   config.validationContainer.dockerfilePath = resolveProjectFile(
     config.validationContainer.dockerfile,

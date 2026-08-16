@@ -13,7 +13,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { terminateProcessTreeByPid, waitSync } from './ralph-runtime.mjs';
+import { retryDelayMs, terminateProcessTreeByPid, waitSync } from './ralph-runtime.mjs';
 import {
   commandSpec,
   credentialFreeEnvironment,
@@ -374,7 +374,7 @@ export async function runReviewWithRetries(config, operation, label) {
     } catch (error) {
       lastError = error;
       if (error.nonRetryable || attempt === config.runtime.reviewRetryAttempts) throw error;
-      const delay = Math.min(config.runtime.networkRetryBaseDelayMs * 2 ** (attempt - 1), 30_000);
+      const delay = retryDelayMs(config.runtime.networkRetryBaseDelayMs, attempt);
       console.error(
         `${label} технически не завершился (попытка ${attempt}): ${error.message}. ` +
           `Повтор через ${delay} ms.`,

@@ -21,7 +21,7 @@ const commandRunnerPath = path.join(scriptDirectory, 'ralph-command-runner.mjs')
 
 // Значения по умолчанию действуют, пока конфигурация не загружена: часть тестов
 // и ранние проверки запускают команды до `loadConfig`.
-let settings = {
+export const defaultRuntimeSettings = Object.freeze({
   commandTimeoutMs: 300_000,
   validationTimeoutMs: 1_800_000,
   validationRunTimeoutMs: 3_600_000,
@@ -30,7 +30,9 @@ let settings = {
   networkRetryBaseDelayMs: 2_000,
   maxPages: 20,
   reviewRetryAttempts: 3,
-};
+});
+
+let settings = { ...defaultRuntimeSettings };
 
 export function applyRuntimeSettings(runtime) {
   settings = { ...runtime };
@@ -99,7 +101,7 @@ export const credentialFreeEnvironmentVariables = inheritableEnvironmentVariable
     ].includes(name),
 );
 
-export function createEnvironment(variableNames, source = process.env) {
+function createEnvironment(variableNames, source = process.env) {
   return Object.fromEntries(
     variableNames.flatMap((name) => (source[name] === undefined ? [] : [[name, source[name]]])),
   );

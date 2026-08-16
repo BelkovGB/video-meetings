@@ -50,12 +50,16 @@ function retryTransientOperation(operation, options = {}) {
     } catch (error) {
       lastError = error;
       if (!transient(error) || attempt === attempts) throw error;
-      const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), 30_000);
+      const delay = retryDelayMs(baseDelayMs, attempt);
       options.onRetry?.(error, attempt, delay);
       wait(delay);
     }
   }
   throw lastError;
+}
+
+export function retryDelayMs(baseDelayMs, attempt) {
+  return Math.min(baseDelayMs * 2 ** (attempt - 1), 30_000);
 }
 
 function isProcessAlive(pid) {
@@ -171,8 +175,9 @@ function writeJsonAtomic(filePath, value) {
   try {
     writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
     renameSync(temporaryPath, filePath);
-  } finally {
+  } catch (error) {
     removeFileIfExists(temporaryPath);
+    throw error;
   }
 }
 

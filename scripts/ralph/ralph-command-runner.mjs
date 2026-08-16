@@ -36,6 +36,11 @@ child.stdin.on('error', (error) => {
 });
 child.stdin.end(request.input);
 
+// Похоже на terminateProcessTreeByPid из ralph-runtime.mjs, но объединять их
+// нельзя по двум причинам. Здесь дочерний процесс запускается без detached, то
+// есть своей группы у него нет и kill(-pid) на POSIX промахнётся. И этот shim
+// стартует на каждую внешнюю команду, поэтому лишний импорт — время запуска на
+// каждый git, gh и npm.
 function killTree() {
   if (!child.pid) return;
   if (process.platform === 'win32') {

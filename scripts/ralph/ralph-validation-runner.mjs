@@ -79,6 +79,8 @@ export function validationContainerRunArgs(config, scripts, snapshotPath) {
     'run',
     '--rm',
     '--init',
+    // Сеть отключена всегда: изоляция валидации — единственная причина
+    // существования контейнера, поэтому это не настройка.
     '--network',
     'none',
     '--read-only',
