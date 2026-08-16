@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { runCodex } from './ralph-loop.mjs';
+import { runAgentOnIssue } from './ralph-loop.mjs';
 import { loadConfig } from './ralph-config.mjs';
 import { commitStagedChanges } from './ralph-git.mjs';
 import {
@@ -376,7 +376,7 @@ test('Ralph rejects a modified approved snapshot ledger before an AFK session st
   }
 });
 
-test('runCodex aborts before commit when an AFK session modifies the approved snapshot ledger', async () => {
+test('runAgentOnIssue aborts before commit when an AFK session modifies the approved snapshot ledger', async () => {
   const config = loadConfig();
   const ledgerPath = config.approvedIssueSnapshotsPath;
   const originalLedger = readFileSync(ledgerPath, 'utf8');
@@ -396,7 +396,7 @@ process.stdout.write(JSON.stringify({
       async () => {
         await assert.rejects(
           () =>
-            runCodex(
+            runAgentOnIssue(
               config,
               'BelkovGB/video-meetings',
               {
@@ -418,7 +418,7 @@ process.stdout.write(JSON.stringify({
   }
 });
 
-test('runCodex aborts before commit when an AFK session modifies a nested AGENTS instruction file', async () => {
+test('runAgentOnIssue aborts before commit when an AFK session modifies a nested AGENTS instruction file', async () => {
   const config = loadConfig();
   const agentInstructionsPath = path.join(process.cwd(), 'apps', 'web', 'AGENTS.md');
   const originalInstructions = readFileSync(agentInstructionsPath, 'utf8');
@@ -438,7 +438,7 @@ process.stdout.write(JSON.stringify({
       async () => {
         await assert.rejects(
           () =>
-            runCodex(
+            runAgentOnIssue(
               config,
               'BelkovGB/video-meetings',
               {
@@ -460,7 +460,7 @@ process.stdout.write(JSON.stringify({
   }
 });
 
-test('runCodex aborts before commit when an AFK session modifies the root AGENTS instruction file', async () => {
+test('runAgentOnIssue aborts before commit when an AFK session modifies the root AGENTS instruction file', async () => {
   const config = loadConfig();
   const agentInstructionsPath = path.join(process.cwd(), 'AGENTS.md');
   const originalInstructions = readFileSync(agentInstructionsPath, 'utf8');
@@ -480,7 +480,7 @@ process.stdout.write(JSON.stringify({
       async () => {
         await assert.rejects(
           () =>
-            runCodex(
+            runAgentOnIssue(
               config,
               'BelkovGB/video-meetings',
               {
@@ -502,7 +502,7 @@ process.stdout.write(JSON.stringify({
   }
 });
 
-test('runCodex aborts before commit when an AFK session adds an AGENTS instruction file', async () => {
+test('runAgentOnIssue aborts before commit when an AFK session adds an AGENTS instruction file', async () => {
   const config = loadConfig();
   const agentInstructionsDirectory = path.join(process.cwd(), 'apps', 'web', 'ralph-test-agent');
   const agentInstructionsPath = path.join(agentInstructionsDirectory, 'AGENTS.md');
@@ -523,7 +523,7 @@ process.stdout.write(JSON.stringify({
       async () => {
         await assert.rejects(
           () =>
-            runCodex(
+            runAgentOnIssue(
               config,
               'BelkovGB/video-meetings',
               {

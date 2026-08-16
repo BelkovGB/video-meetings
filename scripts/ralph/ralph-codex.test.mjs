@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { runCodex } from './ralph-loop.mjs';
+import { runAgentOnIssue } from './ralph-loop.mjs';
 import {
   agentReportedWriteAccessFailure,
   createSandboxedCodexEnvironment,
@@ -21,7 +21,7 @@ import {
 import { validationContainerRunArgs } from './ralph-validation-runner.mjs';
 import { withFakeCodex } from './ralph-test-support.mjs';
 
-test('runCodex rejects freshly fetched mutable content before a fake Codex executable starts', async () => {
+test('runAgentOnIssue rejects freshly fetched mutable content before a fake Codex executable starts', async () => {
   const approvedIssue = {
     number: 66,
     title: 'Keep AFK instructions immutable',
@@ -48,7 +48,7 @@ test('runCodex rejects freshly fetched mutable content before a fake Codex execu
       `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(markerPath)}, 'started');`,
       async () => {
         await assert.rejects(
-          () => runCodex(config, 'BelkovGB/video-meetings', fetchedIssue, 'trusted rules'),
+          () => runAgentOnIssue(config, 'BelkovGB/video-meetings', fetchedIssue, 'trusted rules'),
           /does not match the approved immutable snapshot/,
         );
       },

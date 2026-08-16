@@ -128,7 +128,7 @@ function verifyTools(config) {
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
-// Локальное ревью commit одной issue на модели Terra
+// Локальное ревью commit одной issue отдельной сессией агента
 // -----------------------------------------------------------------------------
 
 async function runIndependentReview(config, repository, issue, commit) {
@@ -272,13 +272,13 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   const violations = [];
 
   if (currentBranch !== config.branch) {
-    violations.push(`Codex переключился на ветку ${currentBranch}`);
+    violations.push(`Агент переключился на ветку ${currentBranch}`);
   }
   if (currentCommit !== startingCommit) {
-    violations.push('Codex самостоятельно создал commit');
+    violations.push('Агент самостоятельно создал commit');
   }
   if (issueState(repository, issue.number) !== 'OPEN') {
-    violations.push('Codex самостоятельно изменил состояние issue');
+    violations.push('Агент самостоятельно изменил состояние issue');
   }
   if (violations.length > 0) {
     fail(`Issue #${issue.number}: ${violations.join('; ')}. Цикл остановлен.`);
@@ -287,7 +287,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   if (changes === '') {
     const alreadyFixedCommit = alreadyFixedCommitFromAgent(lastAgentMessage);
     if (!alreadyFixedCommit) {
-      fail(`Issue #${issue.number}: Codex не оставил изменений и не указал ALREADY_FIXED commit.`);
+      fail(`Issue #${issue.number}: агент не оставил изменений и не указал ALREADY_FIXED commit.`);
     }
     const commit = verifiedIssueCommit(alreadyFixedCommit, issue);
     activeStateStore()?.updateIssue({ phase: 'validating' });
@@ -303,7 +303,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       if (attempts >= config.maxTestFixAttempts) throw error;
       console.error(
         `Issue #${issue.number}: validation не прошла (${attempts}/${config.maxTestFixAttempts}); ` +
-          'Ralph передаст ошибку Terra на следующей итерации.',
+          'Ralph передаст ошибку агенту на следующей итерации.',
       );
       return { completed: false, validationFailed: true };
     }
@@ -383,10 +383,10 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 }
 
 // -----------------------------------------------------------------------------
-// Реализация одной issue на Terra и проверка правил завершения
+// Реализация одной issue агентом и проверка правил завершения
 // -----------------------------------------------------------------------------
 
-export async function runCodex(config, repository, issue, rules) {
+export async function runAgentOnIssue(config, repository, issue, rules) {
   issue = assertTrustedIssue(config, issue, repository);
   const storedIssue =
     activeStateStore()?.issue?.number === issue.number ? activeStateStore().issue : null;
@@ -421,7 +421,7 @@ export async function runCodex(config, repository, issue, rules) {
   if (!continuation && linkedCommit) {
     console.log(
       `Issue #${issue.number}: найден свежий commit ${linkedCommit} с trailer ` +
-        `${commitTrailerForIssue(issue)}; повторная Terra-сессия не требуется.`,
+        `${commitTrailerForIssue(issue)}; повторная сессия агента не требуется.`,
     );
     return commitAndCompleteIssue(
       config,
@@ -453,19 +453,19 @@ export async function runCodex(config, repository, issue, rules) {
       reopenIssueWithComment(
         repository,
         issue,
-        `## Ralph Loop: Codex circuit breaker\n\nThe Codex session was stopped by **${error.code}** after ${error.turns ?? 'an unknown number of'} observable steps. Existing work is preserved and AFK will continue the same issue while the shared iteration budget allows.`,
+        `## Ralph Loop: agent circuit breaker\n\nThe ${config.agentCli} session was stopped by **${error.code}** after ${error.turns ?? 'an unknown number of'} observable steps. Existing work is preserved and AFK will continue the same issue while the shared iteration budget allows.`,
       );
     }
     console.error(
-      `Issue #${issue.number}: Terra-сессия не завершилась; существующий diff сохранён: ${error.message}`,
+      `Issue #${issue.number}: сессия агента не завершилась; существующий diff сохранён: ${error.message}`,
     );
     return { completed: false, agentFailed: true };
   }
 
   if (agentReportedWriteAccessFailure(codexResult.lastAgentMessage)) {
     const error = new Error(
-      `Issue #${issue.number}: дочерний Codex сообщил об отсутствии write-доступа, ` +
-        'хотя development-сессия запущена с danger-full-access.',
+      `Issue #${issue.number}: дочерний агент сообщил об отсутствии write-доступа, ` +
+        'хотя development-сессия запущена с полным доступом к файловой системе.',
     );
     error.code = 'RALPH_AGENT_WRITE_ACCESS';
     activeStateStore()?.updateIssue({ phase: 'working-tree', ...recordedFailure(error) });
@@ -768,7 +768,7 @@ export async function runContinuousLoop(context, actions) {
       }
       console.log(
         `Recovery issue #${recoveryIssue.number} относится к Ralph-инфраструктуре; ` +
-          'служебное состояние очищено без запуска Codex.',
+          'служебное состояние очищено без запуска агента.',
       );
       stateStore.clearIssue();
       continue;
@@ -895,7 +895,7 @@ export async function runContinuousLoop(context, actions) {
     );
     let result;
     try {
-      result = await actions.runCodex(config, repository, currentIssue, rules);
+      result = await actions.runAgentOnIssue(config, repository, currentIssue, rules);
     } catch (error) {
       if (
         needsDevelopmentIteration &&
@@ -954,7 +954,7 @@ function defaultActions() {
     refreshIssue,
     printCheck,
     runPreflight,
-    runCodex,
+    runAgentOnIssue,
     createPullRequest,
     runMilestoneReview,
     createOrReopenReviewIssues,

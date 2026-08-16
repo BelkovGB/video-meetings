@@ -148,7 +148,7 @@ test('--check reports state without running an issue or creating a PR', async ()
       openIssues: () => [{ number: 1 }],
       printCheck: () => calls.push('check'),
       runPreflight: () => calls.push('preflight'),
-      runCodex: async () => calls.push('codex'),
+      runAgentOnIssue: async () => calls.push('codex'),
       createPullRequest: () => calls.push('pr'),
     }),
   );
@@ -264,7 +264,7 @@ test('stopAfterFirstIssue runs preflight before reading and implementing an issu
         calls.push('issues');
         return [{ number: 11 }];
       },
-      runCodex: async () => {
+      runAgentOnIssue: async () => {
         calls.push('codex');
         return { completed: true };
       },
@@ -323,7 +323,7 @@ test('a failed preflight prevents --run from reading or changing GitHub state', 
           throw new Error('database is unavailable');
         },
         openIssues: () => calls.push('issues'),
-        runCodex: async () => calls.push('codex'),
+        runAgentOnIssue: async () => calls.push('codex'),
         createPullRequest: () => calls.push('pr'),
       }),
     ),
@@ -339,7 +339,7 @@ test('stopAfterFirstIssue completes exactly one open issue', async () => {
     context({ config: { stopAfterFirstIssue: true } }),
     actions({
       openIssues: () => [{ number: 11 }, { number: 12 }],
-      runCodex: async (_config, _repository, issue) => {
+      runAgentOnIssue: async (_config, _repository, issue) => {
         completed.push(issue.number);
         return { completed: true };
       },
@@ -354,7 +354,7 @@ test('stopAfterFirstIssue exits cleanly when no issue is open', async () => {
   let codexRuns = 0;
   const result = await executeMode(
     context({ config: { stopAfterFirstIssue: true } }),
-    actions({ runCodex: async () => (codexRuns += 1) }),
+    actions({ runAgentOnIssue: async () => (codexRuns += 1) }),
   );
 
   assert.deepEqual(result, { mode: 'run', completed: 0 });
@@ -366,7 +366,7 @@ test('stopAfterFirstIssue reports an issue-level review failure without claiming
     context({ config: { stopAfterFirstIssue: true } }),
     actions({
       openIssues: () => [{ number: 11 }],
-      runCodex: async () => ({ completed: false }),
+      runAgentOnIssue: async () => ({ completed: false }),
     }),
   );
 
@@ -393,7 +393,7 @@ test('continuous loop does not spend a development iteration for a linked commit
             ]
           : [],
       linkedCommitForIssue: () => commit,
-      runCodex: async (_config, _repository, issue) => {
+      runAgentOnIssue: async (_config, _repository, issue) => {
         receivedIssue = issue;
         open = false;
         return { completed: true };
@@ -434,7 +434,7 @@ test('continuous loop fixes new review issues even while GitHub list remains sta
         title: finding.title,
       }));
     },
-    runCodex: async (_config, _repository, issue) => {
+    runAgentOnIssue: async (_config, _repository, issue) => {
       completed.push(issue.number);
       return { completed: true };
     },
@@ -480,7 +480,7 @@ test('continuous loop treats PASS with findings as recovery work', async () => {
           : { verdict: 'pass', summary: 'clean', findings: [] };
       },
       createOrReopenReviewIssues: () => [{ number: 201, title: 'still broken' }],
-      runCodex: async (_config, _repository, issue) => {
+      runAgentOnIssue: async (_config, _repository, issue) => {
         completed.push(issue.number);
         return { completed: true };
       },
@@ -503,7 +503,7 @@ test('continuous loop stops when the shared issue iteration budget is exhausted'
       limitedContext,
       actions({
         openIssues: () => [...open],
-        runCodex: async (_config, _repository, issue) => {
+        runAgentOnIssue: async (_config, _repository, issue) => {
           open = open.filter((candidate) => candidate.number !== issue.number);
         },
       }),
@@ -524,7 +524,7 @@ test('continuous loop does not reset an iteration budget restored from persisten
       }),
       actions({
         openIssues: () => [{ number: 8, title: 'Still open' }],
-        runCodex: async () => {
+        runAgentOnIssue: async () => {
           codexRuns += 1;
           return { completed: true };
         },
@@ -548,7 +548,7 @@ test('continuous loop stops immediately and refunds an iteration on Codex authen
       context({ stateStore }),
       actions({
         openIssues: () => [{ number: 67, title: 'Product issue' }],
-        runCodex: async () => {
+        runAgentOnIssue: async () => {
           codexRuns += 1;
           throw authenticationError;
         },
@@ -571,7 +571,7 @@ test('continuous loop refunds an iteration when the agent cannot write the works
       context({ stateStore }),
       actions({
         openIssues: () => [{ number: 67, title: 'Product issue' }],
-        runCodex: async () => {
+        runAgentOnIssue: async () => {
           throw writeError;
         },
       }),
@@ -592,7 +592,7 @@ test('continuous loop refunds an iteration when issue approval fails before deve
       context({ stateStore }),
       actions({
         openIssues: () => [{ number: 26, title: 'Unapproved product issue' }],
-        runCodex: async () => {
+        runAgentOnIssue: async () => {
           throw approvalError;
         },
       }),
@@ -613,7 +613,7 @@ test('once mode refunds an iteration when issue approval fails before developmen
       context({ config: { stopAfterFirstIssue: true }, stateStore }),
       actions({
         openIssues: () => [{ number: 26, title: 'Unapproved product issue' }],
-        runCodex: async () => {
+        runAgentOnIssue: async () => {
           throw approvalError;
         },
       }),
@@ -643,7 +643,7 @@ test('continuous loop prioritizes a persisted recovery issue over a lower issue 
     context({ stateStore }),
     actions({
       openIssues: () => [...visibleIssues],
-      runCodex: async (_config, _repository, issue) => {
+      runAgentOnIssue: async (_config, _repository, issue) => {
         completed.push(issue.number);
         visibleIssues = visibleIssues.filter((candidate) => candidate.number !== issue.number);
         if (issue.number === 20) stateStore.clearIssue();
@@ -665,7 +665,7 @@ test('continuous loop retries the same issue after an issue-level review finding
     context(),
     actions({
       openIssues: () => [...open],
-      runCodex: async () => {
+      runAgentOnIssue: async () => {
         attempts += 1;
         if (attempts === 2) {
           open = [];
@@ -692,7 +692,7 @@ test('continuous loop keeps fresh retry context and ignores a stale completed is
       // Имитируем eventual consistency: GitHub продолжает возвращать старый объект
       // даже после обновления body и закрытия issue.
       openIssues: () => [{ ...staleIssue }],
-      runCodex: async (_config, _repository, issue) => {
+      runAgentOnIssue: async (_config, _repository, issue) => {
         attempts += 1;
         seenBodies.push(issue.body);
         if (attempts === 1) {
@@ -719,7 +719,7 @@ test('continuous loop processes an issue that was genuinely reopened', async () 
     actions({
       openIssues: () => (visible ? [{ ...issue }] : []),
       issueState: () => 'OPEN',
-      runCodex: async () => {
+      runAgentOnIssue: async () => {
         codexRuns += 1;
         // После первого закрытия GitHub возвращает эту issue как действительно
         // переоткрытую; после второй реализации она исчезает из списка.

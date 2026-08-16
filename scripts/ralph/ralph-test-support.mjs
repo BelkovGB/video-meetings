@@ -146,7 +146,7 @@ export function actions(overrides = {}) {
     }),
     printCheck: () => {},
     runPreflight: () => {},
-    runCodex: async () => {},
+    runAgentOnIssue: async () => {},
     createPullRequest: () => ({ number: 10, headRefOid: 'head-1' }),
     runMilestoneReview: async () => ({ verdict: 'pass', summary: 'ok', findings: [] }),
     createOrReopenReviewIssues: () => [],
