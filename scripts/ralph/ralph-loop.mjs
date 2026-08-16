@@ -388,6 +388,11 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   }
 
   const commitMessage = commitMessageFromAgent(lastAgentMessage, issue);
+  // expectedTree переживает падение процесса: только он позволяет
+  // восстановлению отличить «проверенный индекс цел» от «индекс кто-то трогал».
+  // Сверять его с tree только что созданного commit не нужно — commitStagedChanges
+  // коммитит индекс с пустым core.hooksPath, между двумя вызовами ничего не
+  // выполняется.
   const expectedTree = run('git', ['write-tree']).stdout;
   activeStateStore()?.updateIssue({
     phase: 'staging',
@@ -406,10 +411,6 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   }
 
   const commit = run('git', ['rev-parse', 'HEAD']).stdout;
-  const committedTree = run('git', ['rev-parse', `${commit}^{tree}`]).stdout;
-  if (committedTree !== expectedTree) {
-    fail(`Issue #${issue.number}: tree созданного commit не совпал с проверенным staged tree.`);
-  }
   activeStateStore()?.updateIssue({
     phase: 'committed',
     commit,
@@ -587,6 +588,10 @@ function verifyPullRequestTarget(config, pullRequest) {
   return pullRequest;
 }
 
+// Сравнение с OID до ревью формально перекрывается verifyPullRequestTarget,
+// который и так требует совпадения с локальным HEAD. Оно остаётся ради
+// сообщения: «PR изменился во время milestone review» называет реальное
+// событие — кто-то запушил в ветку, пока шло ревью, — а не «head не совпал».
 function verifyReviewedPullRequestHead(config, repository, pullRequest) {
   const refreshed = verifyPullRequestTarget(
     config,

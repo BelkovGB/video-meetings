@@ -382,6 +382,10 @@ function prepareValidationContainer(config) {
   if (typeof config.validationContainer !== 'object' || config.validationContainer === null) {
     fail('Поле "validationContainer" должно быть объектом.');
   }
+  // Набор символов ограничен не ради опечаток: на Windows commandSpec
+  // запускает codex, claude, npm и npx через `cmd.exe /d /s /c <name>.cmd`,
+  // то есть через настоящий shell, который заново разбирает аргументы. Тот же
+  // довод действует для имён моделей ниже — они попадают в argv агента.
   for (const field of ['image', 'dockerfile']) {
     if (
       typeof config.validationContainer[field] !== 'string' ||
