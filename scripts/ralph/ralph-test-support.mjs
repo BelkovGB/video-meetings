@@ -61,18 +61,22 @@ export async function withFakeCodex(source, operation) {
 }
 
 export function context(overrides = {}) {
+  const { config: configOverrides, ...rest } = overrides;
   return {
     mode: '--run',
+    // config сливается с базовым, чтобы тест переопределял одно поле, а не
+    // повторял весь набор.
     config: {
       branch: 'feature/test',
       milestone: 'Test milestone',
       maxIterations: 5,
+      ...configOverrides,
     },
     repository: 'owner/repository',
     milestone: { number: 7, title: 'Test milestone' },
     repositoryState: { currentBranch: 'feature/test', clean: true },
     rules: 'test rules',
-    ...overrides,
+    ...rest,
   };
 }
 

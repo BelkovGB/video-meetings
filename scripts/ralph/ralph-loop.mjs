@@ -139,7 +139,7 @@ import {
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const mode = process.argv[2] ?? '--check';
-const supportedModes = new Set(['--check', '--once', '--run']);
+const supportedModes = new Set(['--check', '--run']);
 const runtimeDirectory = path.join(projectRoot, '.git', 'ralph-loop');
 const runtimeLockPath = path.join(runtimeDirectory, 'run.lock');
 const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
@@ -827,7 +827,7 @@ function printCheck(
 }
 
 // -----------------------------------------------------------------------------
-// Главный цикл Ralph Loop: --check, --once и --run
+// Главный цикл Ralph Loop: --check и --run
 // -----------------------------------------------------------------------------
 
 async function runContinuousLoop(context, actions) {
@@ -902,6 +902,11 @@ async function runContinuousLoop(context, actions) {
       return left.number - right.number;
     });
     if (issues.length === 0) {
+      if (config.stopAfterFirstIssue) {
+        console.log('Открытых issues нет. Для push и создания PR снимите stopAfterFirstIssue.');
+        stateStore?.finish();
+        return { mode: 'run', completed: 0 };
+      }
       const pullRequest = actions.createPullRequest(config, repository);
       const review = await actions.runMilestoneReview(config, repository, milestone, pullRequest);
       if (review.verdict === 'pass' && review.findings.length === 0) {
@@ -1011,11 +1016,23 @@ async function runContinuousLoop(context, actions) {
       pendingIssues.delete(currentIssue.number);
       completedIssueNumbers.add(currentIssue.number);
     }
+    if (config.stopAfterFirstIssue) {
+      if (result?.completed === false) {
+        console.log(
+          `Issue #${currentIssue.number} осталась открытой после review. ` +
+            'Цикл остановлен после одной итерации.',
+        );
+        return { mode: 'run', completed: 0, reviewFailed: true };
+      }
+      stateStore?.finish();
+      console.log(`Issue #${currentIssue.number} завершена. Цикл остановлен после одной итерации.`);
+      return { mode: 'run', completed: 1 };
+    }
   }
 }
 
 async function executeMode(context, actions) {
-  const { mode: selectedMode, config, repository, milestone, repositoryState, rules } = context;
+  const { mode: selectedMode, config, repository, milestone, repositoryState } = context;
 
   if (selectedMode === '--check') {
     const issues = actions.openIssues(repository, milestone);
@@ -1025,54 +1042,6 @@ async function executeMode(context, actions) {
   }
 
   actions.runPreflight(config);
-
-  if (selectedMode === '--once') {
-    const issues = actions.openIssues(repository, milestone);
-    if (!issues[0]) {
-      console.log('Открытых issues нет. Для push и создания PR запустите --run.');
-      context.stateStore?.finish();
-      return { mode: 'once', completed: 0 };
-    }
-    approveConfiguredIssue(config, issues[0], repository, context.stateStore);
-    const completion = issueCompletionState(issues[0]);
-    const storedPhase =
-      context.stateStore?.issue?.number === issues[0].number
-        ? context.stateStore.issue.phase
-        : null;
-    const needsDevelopmentIteration =
-      completion?.status !== 'pending-review' &&
-      !['committed', 'pushed', 'reviewing'].includes(storedPhase);
-    if (
-      needsDevelopmentIteration &&
-      (context.stateStore?.iterationsUsed ?? 0) >= config.maxIterations
-    ) {
-      fail(`Достигнут лимит ${config.maxIterations} итераций.`);
-    }
-    if (needsDevelopmentIteration) context.stateStore?.reserveIteration();
-    let result;
-    try {
-      result = await actions.runCodex(config, repository, issues[0], rules);
-    } catch (error) {
-      if (
-        needsDevelopmentIteration &&
-        ['RALPH_CODEX_AUTH', 'RALPH_AGENT_WRITE_ACCESS', 'RALPH_UNTRUSTED_ISSUE'].includes(
-          error.code,
-        )
-      ) {
-        context.stateStore?.releaseIteration();
-      }
-      throw error;
-    }
-    if (result?.completed === false) {
-      console.log(
-        `Issue #${issues[0].number} осталась открытой после review. Цикл остановлен после одной итерации.`,
-      );
-      return { mode: 'once', completed: 0, reviewFailed: true };
-    }
-    context.stateStore?.finish();
-    console.log(`Issue #${issues[0].number} завершена. Цикл остановлен после одной итерации.`);
-    return { mode: 'once', completed: 1 };
-  }
 
   return runContinuousLoop(context, actions);
 }
@@ -1143,7 +1112,7 @@ async function runPhasePlan(config, stateStore, runPhase) {
 async function main() {
   // Проверяем, что передан поддерживаемый режим запуска.
   if (!supportedModes.has(mode)) {
-    fail(`Неизвестный режим ${mode}. Используйте --check, --once или --run.`);
+    fail(`Неизвестный режим ${mode}. Используйте --check или --run.`);
   }
 
   const config = loadConfig();

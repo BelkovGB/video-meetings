@@ -247,6 +247,7 @@ function applyLoopDefaults(config) {
     baseBranch: config.baseBranch,
   } = config.phases[0]);
   config.draftPullRequest ??= true;
+  config.stopAfterFirstIssue ??= false;
   config.maxIterations ??= 20;
   config.maxTurns ??= 50;
   config.maxTestFixAttempts ??= 5;
@@ -318,6 +319,9 @@ function validateLoopFields(config) {
   }
   if (typeof config.draftPullRequest !== 'boolean') {
     fail('Поле "draftPullRequest" должно быть true или false.');
+  }
+  if (typeof config.stopAfterFirstIssue !== 'boolean') {
+    fail('Поле "stopAfterFirstIssue" должно быть true или false.');
   }
   if (typeof config.autoApproveConfiguredIssues !== 'boolean') {
     fail('Поле "autoApproveConfiguredIssues" должно быть true или false.');

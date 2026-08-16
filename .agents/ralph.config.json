@@ -2,6 +2,7 @@
   "active": true,
   "baseBranch": "master",
   "draftPullRequest": true,
+  "stopAfterFirstIssue": false,
 
   "phases": [
   {

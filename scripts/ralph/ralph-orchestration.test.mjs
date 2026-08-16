@@ -258,11 +258,11 @@ test('printCheck stays quiet about the budget while iterations remain', () => {
   assert.equal(/ВНИМАНИЕ/.test(output), false);
 });
 
-test('--once runs preflight before reading and implementing an issue', async () => {
+test('stopAfterFirstIssue runs preflight before reading and implementing an issue', async () => {
   const calls = [];
 
   const result = await executeMode(
-    context({ mode: '--once' }),
+    context({ config: { stopAfterFirstIssue: true } }),
     actions({
       runPreflight: () => calls.push('preflight'),
       openIssues: () => {
@@ -276,7 +276,7 @@ test('--once runs preflight before reading and implementing an issue', async () 
     }),
   );
 
-  assert.deepEqual(result, { mode: 'once', completed: 1 });
+  assert.deepEqual(result, { mode: 'run', completed: 1 });
   assert.deepEqual(calls, ['preflight', 'issues', 'codex']);
 });
 
@@ -338,10 +338,10 @@ test('a failed preflight prevents --run from reading or changing GitHub state', 
   assert.deepEqual(calls, ['preflight']);
 });
 
-test('--once completes exactly one open issue', async () => {
+test('stopAfterFirstIssue completes exactly one open issue', async () => {
   const completed = [];
   const result = await executeMode(
-    context({ mode: '--once' }),
+    context({ config: { stopAfterFirstIssue: true } }),
     actions({
       openIssues: () => [{ number: 11 }, { number: 12 }],
       runCodex: async (_config, _repository, issue) => {
@@ -351,31 +351,31 @@ test('--once completes exactly one open issue', async () => {
     }),
   );
 
-  assert.deepEqual(result, { mode: 'once', completed: 1 });
+  assert.deepEqual(result, { mode: 'run', completed: 1 });
   assert.deepEqual(completed, [11]);
 });
 
-test('--once exits cleanly when no issue is open', async () => {
+test('stopAfterFirstIssue exits cleanly when no issue is open', async () => {
   let codexRuns = 0;
   const result = await executeMode(
-    context({ mode: '--once' }),
+    context({ config: { stopAfterFirstIssue: true } }),
     actions({ runCodex: async () => (codexRuns += 1) }),
   );
 
-  assert.deepEqual(result, { mode: 'once', completed: 0 });
+  assert.deepEqual(result, { mode: 'run', completed: 0 });
   assert.equal(codexRuns, 0);
 });
 
-test('--once reports an issue-level review failure without claiming completion', async () => {
+test('stopAfterFirstIssue reports an issue-level review failure without claiming completion', async () => {
   const result = await executeMode(
-    context({ mode: '--once' }),
+    context({ config: { stopAfterFirstIssue: true } }),
     actions({
       openIssues: () => [{ number: 11 }],
       runCodex: async () => ({ completed: false }),
     }),
   );
 
-  assert.deepEqual(result, { mode: 'once', completed: 0, reviewFailed: true });
+  assert.deepEqual(result, { mode: 'run', completed: 0, reviewFailed: true });
 });
 
 test('continuous loop does not spend a development iteration for a linked commit', async () => {
@@ -615,7 +615,7 @@ test('once mode refunds an iteration when issue approval fails before developmen
 
   await assert.rejects(
     executeMode(
-      context({ mode: '--once', stateStore }),
+      context({ config: { stopAfterFirstIssue: true }, stateStore }),
       actions({
         openIssues: () => [{ number: 26, title: 'Unapproved product issue' }],
         runCodex: async () => {
