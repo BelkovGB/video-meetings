@@ -97,7 +97,10 @@ export default function ProfilePage() {
               }
               onUnauthorized={handleUnauthorized}
             />
-            <PasswordChangeForm onUnauthorized={handleUnauthorized} />
+            <PasswordChangeForm
+              onUnauthorized={handleUnauthorized}
+              onPasswordChanged={handleUnauthorized}
+            />
             <div className="grid gap-2 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center">
               <p className="text-sm font-medium text-slate-600">Email</p>
               <div>

@@ -676,6 +676,38 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page).toHaveURL('/profile');
 });
 
+test('changes the password against the real API, ends the session, and requires the new password to sign in', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-password-success');
+  const newPassword = 'brand-new-secure-password-789';
+
+  await authenticate(page, session);
+  await page.goto('/profile');
+
+  await page.getByLabel('Текущий пароль', { exact: true }).fill(password);
+  await page.getByLabel('Новый пароль', { exact: true }).fill(newPassword);
+  await page.getByLabel('Подтвердите новый пароль', { exact: true }).fill(newPassword);
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByRole('heading', { name: 'С возвращением' })).toBeVisible();
+  await expect(
+    page.evaluate(() => window.sessionStorage.getItem('accessToken')),
+  ).resolves.toBeNull();
+
+  const oldPasswordLogin = await request.post(`${apiUrl}/auth/login`, {
+    data: { email: session.email, password },
+  });
+  expect(oldPasswordLogin.status()).toBe(401);
+
+  const newPasswordLogin = await request.post(`${apiUrl}/auth/login`, {
+    data: { email: session.email, password: newPassword },
+  });
+  expect(newPasswordLogin.ok()).toBeTruthy();
+});
+
 test('clears an expired session and redirects to login without showing profile data', async ({
   page,
   request,

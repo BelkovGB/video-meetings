@@ -12,6 +12,7 @@ const maximumPasswordBytes = 72;
 
 type PasswordChangeFormProps = {
   onUnauthorized: () => void;
+  onPasswordChanged: () => void;
 };
 
 type PasswordField = 'currentPassword' | 'newPassword' | 'confirmation';
@@ -81,7 +82,7 @@ async function getPasswordChangeApiError(response: Response): Promise<string> {
 }
 
 /** Changes the signed-in user's password while retaining field-level recovery feedback. */
-export function PasswordChangeForm({ onUnauthorized }: PasswordChangeFormProps) {
+export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: PasswordChangeFormProps) {
   const router = useRouter();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -163,7 +164,7 @@ export function PasswordChangeForm({ onUnauthorized }: PasswordChangeFormProps) 
         return;
       }
 
-      onUnauthorized();
+      onPasswordChanged();
     } catch {
       setRequestError('Не удалось изменить пароль. Проверьте соединение и повторите попытку.');
       focusField('currentPassword');
