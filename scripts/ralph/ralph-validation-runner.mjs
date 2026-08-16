@@ -201,8 +201,7 @@ export function validationImageForSnapshot(config, snapshotPath) {
     inputsHash.update('Dockerfile.validation\0').update(readFileSync(dockerfilePath));
   }
   const inputHash = inputsHash.digest('hex').slice(0, 16);
-  const imageRepository = config.validationContainer.image.split('@', 1)[0];
-  return `${imageRepository}-inputs-${inputHash}`;
+  return `${config.validationContainer.image}-inputs-${inputHash}`;
 }
 
 export function ensureValidationImage(config, snapshotPath, dependencies = {}) {

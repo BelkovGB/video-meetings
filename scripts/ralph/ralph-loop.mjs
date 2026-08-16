@@ -102,6 +102,20 @@ const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
 // Проверка инструментов, Git-репозитория и рабочей ветки
 // -----------------------------------------------------------------------------
 
+function workingTreeStatus() {
+  return run('git', ['status', '--porcelain']).stdout;
+}
+
+function assertCleanTree(message) {
+  if (workingTreeStatus() !== '') fail(message);
+}
+
+// Проверки не имеют права трогать рабочее дерево: сгенерированный ими файл
+// означает, что коммит уже не соответствует проверенному состоянию.
+function assertValidationLeftTree(expected, message) {
+  if (workingTreeStatus() !== expected) fail(message);
+}
+
 function verifyTools(config) {
   run('git', ['--version']);
   run('gh', ['--version']);
@@ -271,16 +285,15 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit, m
 
 async function resumeIssueCompletion(config, repository, issue, completion) {
   const commit = verifiedIssueCommit(completion.commit, issue);
-  if (run('git', ['status', '--porcelain']).stdout !== '') {
-    fail(`Issue #${issue.number}: нельзя продолжить review при грязном рабочем дереве.`);
-  }
+  assertCleanTree(`Issue #${issue.number}: нельзя продолжить review при грязном рабочем дереве.`);
 
   // Marker хранится в редактируемом body issue и служит только указателем на
   // commit. Он не является доверенным доказательством пройденных проверок.
   runConfiguredValidation(config);
-  if (run('git', ['status', '--porcelain']).stdout !== '') {
-    fail(`Issue #${issue.number}: проверки при возобновлении изменили рабочее дерево.`);
-  }
+  assertValidationLeftTree(
+    '',
+    `Issue #${issue.number}: проверки при возобновлении изменили рабочее дерево.`,
+  );
 
   console.log(
     `Issue #${issue.number}: повторяем validations и review commit ${commit} ` +
@@ -332,9 +345,10 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       );
       return { completed: false, validationFailed: true };
     }
-    if (run('git', ['status', '--porcelain']).stdout !== '') {
-      fail(`Issue #${issue.number}: проверки already-fixed решения изменили рабочее дерево.`);
-    }
+    assertValidationLeftTree(
+      '',
+      `Issue #${issue.number}: проверки already-fixed решения изменили рабочее дерево.`,
+    );
     return reviewAndCloseCommittedIssue(config, repository, issue, commit);
   }
 
@@ -355,13 +369,11 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     );
     return { completed: false, validationFailed: true };
   }
-  const changesAfterValidation = run('git', ['status', '--porcelain']).stdout;
-  if (changesAfterValidation !== changes) {
-    fail(
-      `Issue #${issue.number}: проектные проверки изменили рабочее дерево. ` +
-        'Проверьте generated-файлы перед повторным запуском.',
-    );
-  }
+  assertValidationLeftTree(
+    changes,
+    `Issue #${issue.number}: проектные проверки изменили рабочее дерево. ` +
+      'Проверьте generated-файлы перед повторным запуском.',
+  );
   activeStateStore()?.updateIssue({ phase: 'staging' });
   run('git', ['add', '--all']);
 
@@ -416,9 +428,7 @@ export async function runCodex(config, repository, issue, rules) {
   const storedIssue =
     activeStateStore()?.issue?.number === issue.number ? activeStateStore().issue : null;
   if (storedIssue?.commit && ['committed', 'pushed', 'reviewing'].includes(storedIssue.phase)) {
-    if (run('git', ['status', '--porcelain']).stdout !== '') {
-      fail(`Issue #${issue.number}: committed recovery требует чистое рабочее дерево.`);
-    }
+    assertCleanTree(`Issue #${issue.number}: committed recovery требует чистое рабочее дерево.`);
     const commit = verifiedIssueCommit(storedIssue.commit, issue);
     console.log(
       `Issue #${issue.number}: продолжаем pipeline с сохранённого commit ${commit} ` +
@@ -593,15 +603,13 @@ function verifyReviewedPullRequestHead(config, repository, pullRequest) {
 }
 
 function createPullRequest(config, repository) {
-  const changes = run('git', ['status', '--porcelain']).stdout;
-  if (changes !== '') {
-    fail('Нельзя создать PR: в рабочем дереве есть незакоммиченные изменения.');
-  }
+  assertCleanTree('Нельзя создать PR: в рабочем дереве есть незакоммиченные изменения.');
 
   runConfiguredValidation(config);
-  if (run('git', ['status', '--porcelain']).stdout !== '') {
-    fail('Нельзя обновить PR: проектные проверки изменили чистое рабочее дерево.');
-  }
+  assertValidationLeftTree(
+    '',
+    'Нельзя обновить PR: проектные проверки изменили чистое рабочее дерево.',
+  );
   runNetwork('git', ['fetch', 'origin', config.baseBranch], { echoOutput: true });
   const commitCount = Number(
     run('git', ['rev-list', '--count', `origin/${config.baseBranch}..HEAD`]).stdout,
@@ -999,7 +1007,7 @@ function defaultActions() {
     createOrReopenReviewIssues,
     linkedCommitForIssue,
     verifyReviewedPullRequestHead,
-    workingTreeStatus: () => run('git', ['status', '--porcelain']).stdout,
+    workingTreeStatus,
   };
 }
 

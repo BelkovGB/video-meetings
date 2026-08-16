@@ -386,7 +386,7 @@ function prepareValidationContainer(config) {
     if (
       typeof config.validationContainer[field] !== 'string' ||
       config.validationContainer[field].trim() === '' ||
-      !/^[a-zA-Z0-9._/:@-]+$/.test(config.validationContainer[field])
+      !/^[a-zA-Z0-9._/:-]+$/.test(config.validationContainer[field])
     ) {
       fail(`Поле "validationContainer.${field}" должно содержать безопасное значение.`);
     }
