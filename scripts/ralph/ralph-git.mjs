@@ -41,7 +41,10 @@ export function commitStagedChanges(commitMessage, issue, timeoutMs, dependencie
   }
 }
 
-function validateRecoveredCommit(issue, storedIssue, currentHead) {
+// Обе ветки восстановления сверяют результат одинаково: parent, tree и trailer
+// должны совпасть с тем, что Ralph собирался закоммитить. Иначе это чужой
+// commit, и автоматический reset запрещён.
+function validateRecoveredCommit(storedIssue, currentHead) {
   const commitCount = Number(
     run('git', ['rev-list', '--count', `${storedIssue.startingCommit}..${currentHead}`]).stdout,
   );
@@ -58,10 +61,10 @@ function validateRecoveredCommit(issue, storedIssue, currentHead) {
     parent !== storedIssue.startingCommit ||
     !storedIssue.expectedTree ||
     tree !== storedIssue.expectedTree ||
-    trailer !== `#${issue.number}`
+    trailer !== `#${storedIssue.number}`
   ) {
     fail(
-      `Issue #${issue.number}: HEAD изменился во время staging, но новый commit не совпал ` +
+      `Issue #${storedIssue.number}: HEAD изменился во время staging, но новый commit не совпал ` +
         'с сохранёнными parent/tree/trailer. Автоматический reset запрещён.',
     );
   }
@@ -81,7 +84,7 @@ export function reconcileStateAfterCrash(config, stateStore = activeStateStore()
           'Ralph не будет автоматически смешивать или сбрасывать их.',
       );
     }
-    const commit = validateRecoveredCommit(storedIssue, storedIssue, currentHead);
+    const commit = validateRecoveredCommit(storedIssue, currentHead);
     stateStore.updateIssue({ phase: 'committed', commit, ...clearedFailure });
     console.log(`Issue #${storedIssue.number}: распознан commit ${commit} после crash.`);
     return;
@@ -96,11 +99,7 @@ export function reconcileStateAfterCrash(config, stateStore = activeStateStore()
   }
 
   commitStagedChanges(storedIssue.commitMessage, storedIssue, config.runtime.validationTimeoutMs);
-  const commit = validateRecoveredCommit(
-    storedIssue,
-    storedIssue,
-    run('git', ['rev-parse', 'HEAD']).stdout,
-  );
+  const commit = validateRecoveredCommit(storedIssue, run('git', ['rev-parse', 'HEAD']).stdout);
   stateStore.updateIssue({ phase: 'committed', commit, ...clearedFailure });
   console.log(`Issue #${storedIssue.number}: staging завершён commit ${commit} после crash.`);
 }
