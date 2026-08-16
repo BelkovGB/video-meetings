@@ -197,7 +197,7 @@ async function runIndependentReview(config, repository, issue, commit) {
     { ...issue, body: issueBodyWithoutRalphMetadata(issue) },
     commit,
     {
-      changes: issueChangeInventory(commit),
+      changes: issueChangeInventory(issue, commit),
       previousFindings: reviewContextFromIssueBody(issue),
     },
   );

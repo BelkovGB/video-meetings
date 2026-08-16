@@ -160,28 +160,52 @@ test('review context is separable from the issue body so the next review can be 
   assert.equal(reviewContextFromIssueBody({ body: 'Original requirements' }), null);
 });
 
-test('the change inventory asks git for one commit and marks an oversized diff', () => {
+function inventoryRunner(commits) {
   const calls = [];
-  const respond = (args) => {
+  const run = (_name, args) => {
     calls.push(args.join(' '));
+    if (args[0] === 'log') return { status: 0, stdout: commits.join('\n') };
+    if (args[0] === 'rev-parse') return { status: 0, stdout: 'd'.repeat(40) };
     if (args.includes('--name-status')) return { stdout: 'M\tapps/api/src/profile.ts' };
     if (args.includes('--stat')) return { stdout: ' apps/api/src/profile.ts | 4 +++-' };
     return { stdout: 'x'.repeat(70_000) };
   };
 
-  const inventory = issueChangeInventory('a'.repeat(40), { run: (_name, args) => respond(args) });
+  return { calls, run };
+}
+
+test('the change inventory reads one commit through show and marks an oversized diff', () => {
+  const commit = 'a'.repeat(40);
+  const { calls, run } = inventoryRunner([commit]);
+
+  const inventory = issueChangeInventory({ number: 57 }, commit, { run });
 
   assert.equal(inventory.truncated, true);
   assert.equal(inventory.diff.length, 60_000);
   assert.match(inventory.nameStatus, /apps\/api\/src\/profile\.ts/);
-  // Ни одна из трёх команд не должна обращаться к диапазону: оркестратор
-  // гарантирует один commit на issue, а у `git show` нет особого случая для
-  // корневого commit, в отличие от `commit^..commit`.
-  assert.equal(calls.length, 3);
-  assert.ok(calls.every((call) => call.startsWith('show --format=')));
-  assert.ok(!calls.some((call) => call.includes('..')));
+  assert.deepEqual(inventory.commits, [commit]);
+  // У `git show` нет особого случая для корневого commit, в отличие от
+  // `commit^..commit`, поэтому одиночный commit читается именно так.
+  assert.equal(calls.filter((call) => call.startsWith('show --format=')).length, 3);
+  assert.ok(!calls.some((call) => call.startsWith('rev-parse')));
   // Lockfile исключается только из построчного diff и остаётся в списке файлов.
   assert.ok(calls.some((call) => call.includes(':(exclude)package-lock.json')));
+});
+
+test('a second iteration is reviewed as a whole, not as its fix-up commit alone', () => {
+  const newest = 'b'.repeat(40);
+  const oldest = 'c'.repeat(40);
+  const { calls, run } = inventoryRunner([newest, oldest]);
+
+  const inventory = issueChangeInventory({ number: 57 }, newest, { run });
+
+  assert.deepEqual(inventory.commits, [newest, oldest]);
+  // Диапазон строится от родителя самого раннего commit этой issue: иначе
+  // ревью второй итерации судит о реализации, которой ему не показали.
+  assert.ok(calls.some((call) => call === `rev-parse --verify ${oldest}^`));
+  assert.equal(calls.filter((call) => call.startsWith('diff ')).length, 3);
+  assert.ok(calls.every((call) => !call.startsWith('show ')));
+  assert.ok(calls.some((call) => call.includes(`${'d'.repeat(40)} ${newest}`)));
 });
 
 test('a completion marker left by an older Ralph is read and then stripped', () => {

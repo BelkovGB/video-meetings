@@ -64,6 +64,63 @@ test('claude arguments always carry --verbose alongside stream-json', () => {
   }
 });
 
+test('both roles keep the cached prefix free of per-machine sections', () => {
+  // Каждая сессия получает свой mkdtemp-HOME, и его путь печатался в секции
+  // памяти системного промпта: префикс двух соседних сессий расходился, кэш не
+  // переиспользовался. Замер в песочнице: без флага вторая сессия создаёт
+  // 6 168 токенов кэша, с флагом — 1 156.
+  for (const args of [
+    developmentClaudeArguments({ developmentModel: 'claude-opus-5', developmentEffort: 'medium' }),
+    reviewClaudeArguments({
+      model: 'claude-opus-5',
+      effort: 'high',
+      schemaPath,
+      outputPath: 'unused',
+    }),
+  ]) {
+    assert.equal(args.includes('--exclude-dynamic-system-prompt-sections'), true);
+  }
+});
+
+test('the development role is not handed tools it never calls', () => {
+  // Схемы инструментов лежат в кэшируемом префиксе и оплачиваются каждой
+  // сессией: полный набор — 43 442 токена входа, урезанный — 25 961.
+  const args = developmentClaudeArguments({
+    developmentModel: 'claude-opus-5',
+    developmentEffort: 'medium',
+  });
+  const denied = args[args.indexOf('--disallowedTools') + 1].split(',');
+
+  assert.equal(denied.includes('Workflow'), true);
+  assert.equal(denied.includes('WebSearch'), true);
+  // Инструменты реализации остаются: без них итерация не сможет закончиться.
+  for (const tool of ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep']) {
+    assert.equal(denied.includes(tool), false);
+  }
+  // WebFetch — единственный запрет, способный превратиться в заблокированную
+  // итерацию: контракт issue иногда живёт во внешней документации.
+  assert.equal(denied.includes('WebFetch'), false);
+});
+
+test('a closed quota window is reported instead of being swallowed', () => {
+  const open = claudeBackend.readEvent(
+    JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } }),
+  );
+  assert.deepEqual(open, {});
+
+  const closed = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: 1786933800 },
+    }),
+  );
+
+  assert.match(closed.errorLog, /квота five_hour: rejected/);
+  assert.match(closed.errorLog, /2026-08-17T/);
+  // Событие не должно считаться шагом: иначе ожидание съедало бы maxTurns.
+  assert.equal(closed.stepId, undefined);
+});
+
 test('the claude review role gets a read-only tool set and an inline schema', () => {
   const args = reviewClaudeArguments({
     model: 'claude-opus-5',

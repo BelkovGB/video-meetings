@@ -123,6 +123,28 @@ test('a truncated change set says so instead of looking complete', () => {
   assert.doesNotMatch(prompt, /previous review/);
 });
 
+test('a second iteration names every commit of the issue, not just the last', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 57, title: 'Second pass', body: 'Outcome text.' },
+    'e'.repeat(40),
+    {
+      changes: {
+        commit: 'e'.repeat(40),
+        commits: ['e'.repeat(40), 'f'.repeat(40)],
+        stat: ' two.ts | 2 +-',
+        nameStatus: 'M\ttwo.ts',
+        diff: '--- a/two.ts',
+        truncated: false,
+      },
+    },
+  );
+
+  assert.match(prompt, /across the 2 commits of this issue/);
+  assert.match(prompt, /complete set of changes made for this issue/);
+  assert.doesNotMatch(prompt, /exactly one commit/);
+});
+
 test('without a change set the prompt keeps its previous shape', () => {
   const prompt = buildIndependentReviewPrompt(
     { agentCli: 'codex' },

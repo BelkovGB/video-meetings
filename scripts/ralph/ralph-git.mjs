@@ -31,21 +31,55 @@ const reviewDiffCharacterBudget = 60_000;
 const reviewDiffExcludedPaths = [':(exclude)package-lock.json', ':(exclude)**/package-lock.json'];
 
 /**
- * Полный набор изменений issue одним объектом: список файлов, статистика и
- * ограниченный diff. Опора на `git show`, а не на `commit^..commit`: оркестратор
- * требует ровно один commit на issue, а у show нет особого случая для корневого.
+ * Все commit этой issue, новейший первым.
+ *
+ * Оркестратор требует один commit на прогон, а не на issue: после отказа ревью
+ * состояние очищается, следующая итерация стартует с нового HEAD и добавляет
+ * второй commit с тем же trailer. Номер issue уникален в репозитории, поэтому
+ * совпадение trailer однозначно и ограничивать поиск по истории не нужно.
  */
-export function issueChangeInventory(commit, dependencies = {}) {
+export function issueCommits(issue, head, execute = run) {
+  const found = execute(
+    'git',
+    ['log', '--format=%H', '--fixed-strings', '--grep', commitTrailerForIssue(issue), head],
+    { allowFailure: true },
+  );
+  if (found.status !== 0) return [];
+
+  return found.stdout.split(/\r?\n/).filter((line) => /^[0-9a-f]{40}$/i.test(line));
+}
+
+function commitParent(commit, execute) {
+  const parent = execute('git', ['rev-parse', '--verify', `${commit}^`], { allowFailure: true });
+
+  return parent.status === 0 && /^[0-9a-f]{40}$/i.test(parent.stdout) ? parent.stdout : null;
+}
+
+/**
+ * Полный набор изменений issue одним объектом: список файлов, статистика и
+ * ограниченный diff.
+ *
+ * Для одного commit берётся `git show`: у него нет особого случая для корневого
+ * commit, в отличие от `commit^..commit`. Для нескольких — diff от родителя
+ * самого раннего, иначе ревью второй итерации видело бы только доработку и
+ * судило бы о реализации, которой ему не показали.
+ */
+export function issueChangeInventory(issue, commit, dependencies = {}) {
   const execute = dependencies.run ?? run;
-  const show = (flags, pathspecs = []) =>
-    execute('git', ['show', '--format=', ...flags, commit, ...pathspecs]).stdout;
-  const patch = show(['--patch', '--unified=3'], ['--', '.', ...reviewDiffExcludedPaths]);
+  const commits = issueCommits(issue, commit, execute);
+  const base = commits.length > 1 ? commitParent(commits.at(-1), execute) : null;
+  const inspect = (flags, pathspecs = []) =>
+    base
+      ? execute('git', ['diff', ...flags, base, commit, ...pathspecs]).stdout
+      : execute('git', ['show', '--format=', ...flags, commit, ...pathspecs]).stdout;
+  const patch = inspect(['--patch', '--unified=3'], ['--', '.', ...reviewDiffExcludedPaths]);
   const truncated = patch.length > reviewDiffCharacterBudget;
 
   return {
     commit,
-    nameStatus: show(['--name-status']),
-    stat: show(['--stat']),
+    commits: commits.length > 0 ? commits : [commit],
+    nameStatus: inspect(['--name-status']),
+    stat: inspect(['--stat']),
     // Обрезанный diff полезнее отсутствующего: ревьюер видит начало изменений и
     // знает, что остаток надо дочитать сам.
     diff: truncated ? patch.slice(0, reviewDiffCharacterBudget) : patch,

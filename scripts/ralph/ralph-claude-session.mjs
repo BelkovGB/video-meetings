@@ -72,13 +72,66 @@ export function createSandboxedClaudeEnvironment(source = process.env, options =
 // stdout, поэтому флаг зашит рядом, а не оставлен на вызывающего.
 const streamArguments = ['-p', '--verbose', '--output-format', 'stream-json'];
 
+/**
+ * Флаг уносит машинно-зависимые секции — cwd, окружение, пути памяти, git
+ * status — из системного блока в первое сообщение пользователя. Информация не
+ * теряется, меняется только то, что попадает в кэшируемый префикс.
+ *
+ * Для Ralph это существенно: каждая сессия получает свой mkdtemp-HOME, его путь
+ * печатался в секции памяти, и префикс двух соседних сессий расходился на
+ * ровном месте. Замер в песочнице, повторяющей боевую: без флага вторая сессия
+ * заново создаёт 6 168 токенов кэша, с флагом — 1 156, а цена префикса падает с
+ * $0,0436 до $0,0150.
+ */
+const cacheStableArguments = ['--exclude-dynamic-system-prompt-sections'];
+
+/**
+ * Инструменты, которых у сессии Ralph быть не должно.
+ *
+ * Схемы всех инструментов лежат в кэшируемом префиксе и оплачиваются каждой
+ * сессией. Замер: полный набор — 43 442 токена входа, с этим списком — 25 961.
+ *
+ * Список запрещает, а не разрешает, сознательно: allowlist при обновлении CLI
+ * молча отрежет новый полезный инструмент, denylist молча вернёт лишний вес.
+ * Второе дешевле.
+ *
+ * `WebFetch` намеренно оставлен: контракт issue иногда живёт во внешней
+ * документации, и это единственный запрет, способный превратиться в
+ * заблокированную итерацию. `WebSearch` запрещён — поиск без возможности
+ * открыть найденное бесполезен.
+ */
+const deniedDevelopmentTools = [
+  'Task',
+  'Workflow',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'ScheduleWakeup',
+  'EnterWorktree',
+  'ExitWorktree',
+  'SendMessage',
+  'TaskCreate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'TaskUpdate',
+  'WebSearch',
+  'NotebookEdit',
+  'ReportFindings',
+  'Skill',
+];
+
 export function developmentClaudeArguments(config) {
   return [
     ...streamArguments,
+    ...cacheStableArguments,
     '--model',
     config.developmentModel,
     '--effort',
     config.developmentEffort,
+    '--disallowedTools',
+    deniedDevelopmentTools.join(','),
     // Аналог `--sandbox danger-full-access` у Codex: сессия не должна ждать
     // подтверждения, которое в AFK-режиме некому дать.
     '--permission-mode',
@@ -89,6 +142,7 @@ export function developmentClaudeArguments(config) {
 export function reviewClaudeArguments(role) {
   return [
     ...streamArguments,
+    ...cacheStableArguments,
     '--model',
     role.model,
     '--effort',
@@ -187,6 +241,18 @@ function readClaudeEvent(line) {
         `api_retry ${event.attempt}/${event.max_retries} status=${event.error_status} ` +
         `error=${event.error} повтор через ${event.retry_delay_ms} ms`,
     };
+  }
+
+  // Состояние квоты приходит отдельным событием и раньше молча отбрасывалось.
+  // Пока окно открыто, оно шум; когда закрывается — это единственная строка,
+  // объясняющая, почему прогон встал, и когда его можно продолжить.
+  if (event.type === 'rate_limit_event') {
+    const limit = event.rate_limit_info ?? {};
+    if (limit.status === 'allowed') return {};
+    const resets = Number.isFinite(limit.resetsAt)
+      ? `, сброс в ${new Date(limit.resetsAt * 1000).toISOString()}`
+      : '';
+    return { errorLog: `квота ${limit.rateLimitType ?? 'без имени'}: ${limit.status}${resets}` };
   }
 
   // Шагом считается ответ ассистента: это та же единица, которую CLI сам

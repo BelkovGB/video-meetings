@@ -73,10 +73,17 @@ function reviewChangeInventory(changes) {
   const truncationNote = changes.truncated
     ? '\n\nThe diff above is truncated. Read the remaining changed files from the list yourself.'
     : '';
+  // Со второй итерации у issue больше одного commit, и назвать только
+  // последний значило бы выдать доработку за всю реализацию.
+  const commits = changes.commits ?? [changes.commit];
+  const range =
+    commits.length > 1
+      ? `across the ${commits.length} commits of this issue (${commits.join(', ')})`
+      : `in commit ${changes.commit}`;
 
   return `
 
-Changes in commit ${changes.commit}. This is the complete set of changes made for this issue; the orchestrator enforces exactly one commit per issue.
+Changes ${range}. This is the complete set of changes made for this issue.
 
 ${changes.stat}
 
