@@ -260,6 +260,18 @@ function applyLoopDefaults(config) {
   for (const [field, value] of Object.entries(defaultRuntimeSettings)) {
     config.runtime[field] ??= value;
   }
+  // Незнакомый ключ отклоняется, а не игнорируется: переименование
+  // codexTimeoutMs в agentTimeoutMs оставило в конфиге мёртвую настройку,
+  // которую можно было править без всякого эффекта.
+  const unknownRuntimeFields = Object.keys(config.runtime).filter(
+    (field) => !Object.hasOwn(defaultRuntimeSettings, field),
+  );
+  if (unknownRuntimeFields.length > 0) {
+    fail(
+      `Неизвестные поля в "runtime": ${unknownRuntimeFields.join(', ')}. ` +
+        `Допустимы: ${Object.keys(defaultRuntimeSettings).join(', ')}.`,
+    );
+  }
   config.developmentModel ??= 'gpt-5.6-terra';
   config.developmentEffort ??= 'medium';
   config.rulesFile ??= '.agents/ralph-rules.md';

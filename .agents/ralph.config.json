@@ -41,7 +41,7 @@
     "commandTimeoutMs": 300000,
     "validationTimeoutMs": 1800000,
     "validationRunTimeoutMs": 3600000,
-    "codexTimeoutMs": 5400000,
+    "agentTimeoutMs": 5400000,
     "networkRetryAttempts": 3,
     "networkRetryBaseDelayMs": 2000,
     "maxPages": 20,

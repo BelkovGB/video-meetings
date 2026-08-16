@@ -82,15 +82,23 @@ export function fakeClaudeScript(source) {
   return directory;
 }
 
+/**
+ * operation получает `receivedArguments()` — argv, который реально дошёл до
+ * поддельного CLI. Без этого тесты проходили бы при аргументе, обрезанном
+ * cmd.exe: именно так многострочная схема ревью доходила как «{».
+ */
 export async function withFakeClaude(source, operation) {
   const directory = fakeClaudeScript(source);
+  const argumentsPath = path.join(directory, 'received-argv.json');
   const originalPath = process.env.PATH;
   const originalApiKey = process.env.ANTHROPIC_API_KEY;
   process.env.PATH = `${directory}${path.delimiter}${originalPath ?? ''}`;
   process.env.ANTHROPIC_API_KEY = 'test-key';
 
   try {
-    return await operation();
+    return await operation({
+      receivedArguments: () => JSON.parse(readFileSync(argumentsPath, 'utf8')),
+    });
   } finally {
     if (originalPath === undefined) {
       delete process.env.PATH;

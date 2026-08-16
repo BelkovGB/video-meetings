@@ -87,7 +87,7 @@ test('check mode does not create persistent state', () => {
   }
 });
 
-test('phase config supports an ordered plan and legacy single-phase fields', () => {
+test('phase config supports an ordered plan and rejects the removed legacy fields', () => {
   const phases = normalizePhases({
     baseBranch: 'master',
     phases: [

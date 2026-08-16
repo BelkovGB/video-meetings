@@ -107,7 +107,18 @@ test('a claude session without an API key stops before the process starts', () =
   assert.throws(() => verifyClaudeAuthentication({ env: {} }), /ANTHROPIC_API_KEY/);
 });
 
+// Поддельный CLI записывает полученный argv: аргумент, обрезанный cmd.exe,
+// иначе выглядел бы как успешный прогон.
 const claudeStreamScript = (events) => `
+import { writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+writeFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'received-argv.json'),
+  JSON.stringify(process.argv.slice(2)),
+);
+
 const lines = ${JSON.stringify(events)};
 let input = '';
 process.stdin.on('data', (chunk) => {
@@ -122,6 +133,37 @@ process.stdin.on('end', () => {
 const assistantEvent = (id, text) => ({
   type: 'assistant',
   message: { id, role: 'assistant', content: [{ type: 'text', text }] },
+});
+
+test('tool output reaches the log the same way Codex command output does', () => {
+  // Без разбора события user в run.log Claude-сессии остались бы только реплики
+  // модели, тогда как для Codex туда попадает aggregated_output команд.
+  const stringContent = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', content: '12 passed\n' }] },
+    }),
+  );
+  assert.equal(stringContent.log, '12 passed');
+
+  const blockContent = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', content: [{ type: 'text', text: 'build ok' }] }],
+      },
+    }),
+  );
+  assert.equal(blockContent.log, 'build ok');
+
+  // Событие без вывода не должно печатать пустую строку.
+  assert.equal(
+    claudeBackend.readEvent(JSON.stringify({ type: 'user', message: { content: [] } })).log,
+    undefined,
+  );
+  // Результат инструмента шагом не считается: шаги — это ответы модели.
+  assert.equal(stringContent.stepId, undefined);
 });
 
 test('a claude session counts assistant turns and returns the final message', async () => {
@@ -247,12 +289,20 @@ test('a claude review writes its verdict to the outputPath the orchestrator read
           result: JSON.stringify(verdict),
         },
       ]),
-      async () => {
+      async ({ receivedArguments }) => {
         await runReviewSession(
           { agentCli: 'claude' },
           { model: 'claude-opus-5', effort: 'high', schemaPath, outputPath },
           { input: 'review', maxTurns: 10, timeoutMs: 60_000, label: 'Claude review' },
         );
+
+        // Схема должна дойти до процесса целиком. На Windows аргументы проходят
+        // через cmd.exe, который обрезает командную строку на первом переводе
+        // строки: pretty-printed схема доходила как «{», ревью падало всегда.
+        const received = receivedArguments();
+        const schemaArgument = received[received.indexOf('--json-schema') + 1];
+        assert.deepEqual(JSON.parse(schemaArgument), JSON.parse(readFileSync(schemaPath, 'utf8')));
+        assert.equal(received.at(-1), schemaArgument);
       },
     );
 

@@ -2,6 +2,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
+import { fail } from './ralph-scope.mjs';
+import { outputTail } from './ralph-process-runner.mjs';
 import { createSandboxRoot, genericExitFailure, runAgentSession } from './ralph-agent-session.mjs';
 
 /**
@@ -84,10 +86,23 @@ export function reviewClaudeArguments(role) {
     // после ревью: она работает одинаково для обоих CLI.
     '--tools',
     'Read,Glob,Grep',
-    // Схема передаётся строкой, а не путём: файлового флага у CLI нет.
+    // Схема передаётся строкой, а не путём: файлового флага у CLI нет. Строка
+    // обязана быть однострочной: на Windows commandSpec пропускает claude через
+    // `cmd.exe /d /s /c claude.cmd`, а cmd.exe обрезает командную строку на
+    // первом переводе строки — до сериализации сюда доходил только «{», и
+    // каждое ревью падало с «--json-schema is not valid JSON».
     '--json-schema',
-    readFileSync(role.schemaPath, 'utf8'),
+    singleLineSchema(role.schemaPath),
   ];
+}
+
+function singleLineSchema(schemaPath) {
+  const source = readFileSync(schemaPath, 'utf8');
+  try {
+    return JSON.stringify(JSON.parse(source));
+  } catch (error) {
+    fail(`Некорректный JSON схемы ревью ${schemaPath}: ${error.message}`);
+  }
 }
 
 function readClaudeEvent(line) {
@@ -118,6 +133,26 @@ function readClaudeEvent(line) {
       log: text || undefined,
       agentMessage: text || undefined,
     };
+  }
+
+  // Результаты инструментов приходят отдельными событиями с ролью user. Без
+  // них run.log Claude-сессии содержал бы только реплики модели, тогда как для
+  // Codex туда попадает вывод выполненных команд.
+  if (event.type === 'user') {
+    const output = (event.message?.content ?? [])
+      .filter((part) => part.type === 'tool_result')
+      .map((part) =>
+        typeof part.content === 'string'
+          ? part.content
+          : (part.content ?? [])
+              .filter((piece) => piece.type === 'text' && piece.text)
+              .map((piece) => piece.text)
+              .join('\n'),
+      )
+      .filter(Boolean)
+      .join('\n')
+      .replace(/\r?\n$/, '');
+    return output ? { log: outputTail(output) } : {};
   }
 
   if (event.type !== 'result') return {};

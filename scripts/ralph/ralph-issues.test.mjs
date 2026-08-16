@@ -350,6 +350,23 @@ test('reasoning effort defaults to medium/medium/high when the config omits it',
   });
 });
 
+test('a runtime field the code does not read is rejected, not ignored', () => {
+  // Ровно этот случай уже произошёл: переименование codexTimeoutMs в
+  // agentTimeoutMs оставило в конфиге ключ, который можно было править
+  // без всякого эффекта на таймаут сессии.
+  const original = JSON.parse(readFileSync(ralphConfigPath, 'utf8'));
+  assert.throws(
+    () =>
+      withPatchedRalphConfig(
+        { runtime: { ...original.runtime, codexTimeoutMs: 5_400_000 } },
+        () => {
+          throw new Error('loadConfig should have failed');
+        },
+      ),
+    /Неизвестные поля в "runtime": codexTimeoutMs/,
+  );
+});
+
 test('an unsupported reasoning effort is rejected before a run starts', () => {
   for (const [patch, expected] of [
     [
