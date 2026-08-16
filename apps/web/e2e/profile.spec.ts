@@ -572,6 +572,110 @@ test('redirects to login without loading profile data when authentication is mis
   await expect(page.getByText('Профиль')).toHaveCount(0);
 });
 
+test('validates and recovers from password-change failures without clearing the session', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-password-change');
+  let responseMessage = 'Current password is incorrect';
+  let submittedPasswordChange: unknown;
+
+  await page.route('**/users/me/password', async (route) => {
+    submittedPasswordChange = route.request().postDataJSON();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await route.fulfill({
+      status: responseMessage === 'Слишком много попыток.' ? 429 : 400,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: responseMessage }),
+    });
+  });
+  await authenticate(page, session);
+  await page.goto('/profile');
+
+  const currentPassword = page.getByLabel('Текущий пароль', { exact: true });
+  const newPassword = page.getByLabel('Новый пароль', { exact: true });
+  const confirmation = page.getByLabel('Подтвердите новый пароль', { exact: true });
+  await expect(currentPassword).toHaveAttribute('autocomplete', 'current-password');
+  await expect(newPassword).toHaveAttribute('autocomplete', 'new-password');
+  await expect(confirmation).toHaveAttribute('autocomplete', 'new-password');
+  await expect(currentPassword.locator('xpath=ancestor::form')).toHaveScreenshot(
+    'password-change-form.png',
+  );
+
+  await newPassword.fill('short');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#new-password-error')).toHaveText('Используйте не менее 9 символов.');
+  await expect(newPassword).toBeFocused();
+
+  await newPassword.fill('😀'.repeat(19));
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#new-password-error')).toHaveText(
+    'Пароль не должен превышать 72 байта UTF-8.',
+  );
+
+  await currentPassword.fill(password);
+  await newPassword.fill('new-secure-password-456');
+  await confirmation.fill('different-password');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-confirmation-error')).toHaveText('Пароли не совпадают.');
+
+  await newPassword.fill(password);
+  await confirmation.fill(password);
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#new-password-error')).toHaveText(
+    'Новый пароль должен отличаться от текущего.',
+  );
+
+  await currentPassword.fill('passe\u0301word');
+  await newPassword.fill('passéword');
+  await confirmation.fill('passéword');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#new-password-error')).toHaveText(
+    'Новый пароль должен отличаться от текущего.',
+  );
+
+  await currentPassword.fill('wrong-password');
+  await newPassword.fill('new-secure-password-456');
+  await confirmation.fill('new-secure-password-456');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.getByRole('button', { name: 'Изменяем пароль…' })).toBeDisabled();
+  await expect(currentPassword).toBeDisabled();
+  await expect(page.locator('#password-change-status')).toHaveText('Изменяем пароль…');
+  await expect(page.locator('#current-password-error')).toHaveText('Current password is incorrect');
+  expect(submittedPasswordChange).toEqual({
+    currentPassword: 'wrong-password',
+    newPassword: 'new-secure-password-456',
+    confirmation: 'new-secure-password-456',
+  });
+  await expect(currentPassword).toBeFocused();
+  await expect(page.locator('#current-password-error')).toHaveAttribute('role', 'alert');
+  await expect(page.evaluate(() => window.sessionStorage.getItem('accessToken'))).resolves.toBe(
+    session.accessToken,
+  );
+
+  responseMessage = 'New password must differ from the current password';
+  await currentPassword.fill(password);
+  await newPassword.fill('another-secure-password-456');
+  await confirmation.fill('another-secure-password-456');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#new-password-error')).toHaveText(
+    'New password must differ from the current password',
+  );
+  await expect(newPassword).toBeFocused();
+
+  responseMessage = 'Password confirmation does not match';
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-confirmation-error')).toHaveText(
+    'Password confirmation does not match',
+  );
+  await expect(confirmation).toBeFocused();
+
+  responseMessage = 'Слишком много попыток.';
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText('Слишком много попыток.');
+  await expect(page).toHaveURL('/profile');
+});
+
 test('clears an expired session and redirects to login without showing profile data', async ({
   page,
   request,

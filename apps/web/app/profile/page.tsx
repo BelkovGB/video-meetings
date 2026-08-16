@@ -4,6 +4,7 @@ import Link from 'next/link';
 
 import { AvatarSection } from './avatar-section';
 import { DisplayNameForm } from './display-name-form';
+import { PasswordChangeForm } from './password-change-form';
 import { ProfileOverview } from './profile-overview';
 import { useCurrentProfile } from './use-current-profile';
 
@@ -96,6 +97,7 @@ export default function ProfilePage() {
               }
               onUnauthorized={handleUnauthorized}
             />
+            <PasswordChangeForm onUnauthorized={handleUnauthorized} />
             <div className="grid gap-2 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center">
               <p className="text-sm font-medium text-slate-600">Email</p>
               <div>
