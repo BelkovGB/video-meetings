@@ -24,6 +24,12 @@ import { withFakeClaude } from './ralph-test-support.mjs';
 
 const schemaPath = fileURLToPath(new URL('../../.agents/review.schema.json', import.meta.url));
 
+// Схема, какой её обязан получить CLI: файл целиком, но без объявления диалекта.
+function schemaWithoutDialect() {
+  const { $schema: _dialect, ...schema } = JSON.parse(readFileSync(schemaPath, 'utf8'));
+  return schema;
+}
+
 test('agentCli selects the backend and its reasoning-effort vocabulary', () => {
   assert.equal(agentBackend({ agentCli: 'claude' }).cli, 'claude');
   assert.equal(agentBackend({ agentCli: 'codex' }).cli, 'codex');
@@ -69,10 +75,31 @@ test('the claude review role gets a read-only tool set and an inline schema', ()
   assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep');
   // Флага --output-schema с путём у CLI нет: схема передаётся строкой.
   assert.equal(args.includes('--output-schema'), false);
-  assert.deepEqual(
-    JSON.parse(args[args.indexOf('--json-schema') + 1]),
-    JSON.parse(readFileSync(schemaPath, 'utf8')),
-  );
+  assert.deepEqual(JSON.parse(args[args.indexOf('--json-schema') + 1]), schemaWithoutDialect());
+});
+
+test('the inline review schema drops the $schema key the CLI cannot resolve', () => {
+  // Валидатор CLI 2.1.229 не знает мета-схему 2020-12 и отклоняет весь аргумент
+  // до старта сессии: «--json-schema is not a valid JSON Schema: no schema with
+  // key or ref …», exit 1, пустой stdout. Отказ ронял подряд все ревью, поэтому
+  // ключ обязан отсутствовать — а в самом файле схемы остаться.
+  const onDisk = JSON.parse(readFileSync(schemaPath, 'utf8'));
+  assert.equal(typeof onDisk.$schema, 'string');
+
+  const args = reviewClaudeArguments({
+    model: 'claude-opus-5',
+    effort: 'high',
+    schemaPath,
+    outputPath: 'unused',
+  });
+  const inline = args[args.indexOf('--json-schema') + 1];
+
+  assert.equal(Object.hasOwn(JSON.parse(inline), '$schema'), false);
+  // Однострочность — второе требование того же аргумента: при откате на
+  // cmd.exe командная строка обрезается на первом переводе строки.
+  assert.equal(inline.includes('\n'), false);
+  // Всё остальное обязано дойти без потерь.
+  assert.deepEqual(JSON.parse(inline), schemaWithoutDialect());
 });
 
 test('the claude sandbox isolates HOME and carries only the credentials', () => {
@@ -94,6 +121,12 @@ test('the claude sandbox isolates HOME and carries only the credentials', () => 
       assert.notEqual(sandbox.env.HOME, source.HOME);
       assert.notEqual(sandbox.env.CLAUDE_CONFIG_DIR, source.CLAUDE_CONFIG_DIR);
       assert.match(sandbox.env.CLAUDE_CONFIG_DIR, /ralph-claude-/);
+      // cwd сессии — корень репозитория, куда она же пишет с полным доступом,
+      // поэтому cmd.exe не должен искать команду в текущем каталоге.
+      assert.equal(
+        sandbox.env.NoDefaultCurrentDirectoryInExePath,
+        process.platform === 'win32' ? '1' : undefined,
+      );
     } finally {
       rmSync(sandbox.root, { recursive: true, force: true });
     }
@@ -233,6 +266,125 @@ test('an unauthenticated claude session fails even though the CLI exits 0', asyn
   );
 });
 
+test('a synthetic API-error message is an error, not an agent step', () => {
+  // При ошибке API CLI подставляет сообщение от лица ассистента с обычным
+  // message.id. Пока оно считалось шагом, транзиентный 5xx съедал шаг из
+  // maxTurns и подменял собой lastAgentMessage — то есть COMMIT_MESSAGE агента
+  // и вердикт ревью терялись, а вину за исчерпанный лимит шагов Ralph
+  // приписывал агенту в комментарии к issue.
+  const synthetic = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'assistant',
+      is_api_error_message: true,
+      message: {
+        id: 'msg-synthetic',
+        model: '<synthetic>',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'API Error: 500 Internal server error' }],
+      },
+    }),
+  );
+
+  assert.equal(synthetic.stepId, undefined);
+  assert.equal(synthetic.agentMessage, undefined);
+  // Оператору сообщение нужно, но как ошибка, а не как реплика агента.
+  assert.equal(synthetic.errorLog, 'API Error: 500 Internal server error');
+
+  // Обычный ответ ассистента шагом остаётся.
+  const genuine = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        id: 'msg-real',
+        model: 'claude-sonnet-5',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'COMMIT_MESSAGE: fix: real work' }],
+      },
+    }),
+  );
+  assert.equal(genuine.stepId, 'msg-real');
+  assert.equal(genuine.agentMessage, 'COMMIT_MESSAGE: fix: real work');
+});
+
+test('api_retry events reach the log instead of leaving it silent', () => {
+  // Без этой ветки run.log замолкал на всё время отката: события system
+  // отбрасывались целиком, и оператор не отличал ожидание от зависания.
+  const retry = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 2,
+      max_retries: 10,
+      retry_delay_ms: 1099,
+      error_status: 401,
+      error: 'authentication_failed',
+    }),
+  );
+
+  assert.match(retry.errorLog, /api_retry 2\/10/);
+  assert.match(retry.errorLog, /status=401/);
+  // Повтор — не шаг агента и не его реплика.
+  assert.equal(retry.stepId, undefined);
+  assert.equal(retry.agentMessage, undefined);
+
+  // Остальные system-события по-прежнему шумом не идут.
+  assert.deepEqual(
+    claudeBackend.readEvent(JSON.stringify({ type: 'system', subtype: 'init' })),
+    {},
+  );
+});
+
+test('a 401 from the real CLI is an auth failure even though its text matches no keyword', () => {
+  // Событие записано с живого claude.exe 2.1.229 при протухшем
+  // CLAUDE_CODE_OAUTH_TOKEN. Ни «not logged in», ни «invalid api key» в тексте
+  // нет, а subtype равен "success" — распознать отказ можно только по статусу.
+  const recorded = {
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    terminal_reason: 'api_error',
+    api_error_status: 401,
+    result: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.',
+  };
+
+  assert.equal(claudeBackend.readEvent(JSON.stringify(recorded)).error.code, 'RALPH_AGENT_AUTH');
+  // Цена промаха — не косметика: RALPH_AGENT_AUTH останавливает цикл, а без
+  // него итерация считается обычным сбоем сессии и Ralph повторяет её
+  // maxIterations раз, каждый раз получая тот же 401.
+  assert.equal(
+    claudeBackend.readEvent(
+      JSON.stringify({ ...recorded, api_error_status: 403, result: 'Forbidden' }),
+    ).error.code,
+    'RALPH_AGENT_AUTH',
+  );
+  // Текстовая ветка остаётся: статус приходит не при каждом виде отказа.
+  assert.equal(
+    claudeBackend.readEvent(
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        result: 'Not logged in · Please run /login',
+      }),
+    ).error.code,
+    'RALPH_AGENT_AUTH',
+  );
+  // Прочие отказы не должны выдавать себя за отказ авторизации: цикл на них
+  // обязан продолжиться, а не остановиться.
+  assert.equal(
+    claudeBackend.readEvent(
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        api_error_status: 500,
+        result: 'API Error: 500 Internal server error',
+      }),
+    ).error.code,
+    undefined,
+  );
+});
+
 test('the claude native turn limit is reported as RALPH_MAX_TURNS despite exit 0', async () => {
   await withFakeClaude(
     claudeStreamScript([
@@ -312,7 +464,7 @@ test('a claude review writes its verdict to the outputPath the orchestrator read
         // строки: pretty-printed схема доходила как «{», ревью падало всегда.
         const received = receivedArguments();
         const schemaArgument = received[received.indexOf('--json-schema') + 1];
-        assert.deepEqual(JSON.parse(schemaArgument), JSON.parse(readFileSync(schemaPath, 'utf8')));
+        assert.deepEqual(JSON.parse(schemaArgument), schemaWithoutDialect());
         assert.equal(received.at(-1), schemaArgument);
       },
     );

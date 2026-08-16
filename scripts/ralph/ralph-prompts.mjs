@@ -33,14 +33,37 @@ export function renderPrompt(config, issue, rules) {
 
 // Both review prompts carried these blocks verbatim, so editing one silently
 // left the other reviewer on an older contract. They live here once.
-const reviewShellGuidance =
+//
+// Подсказка про чтение зависит от того, какой CLI ведёт ревью, и это не
+// косметика. Codex-ревьюер работает в read-only песочнице с полноценной
+// оболочкой, а Claude-ревьюер запускается с `--tools Read,Glob,Grep` и Bash не
+// имеет вовсе: инструкция про `rg -n` и `-LiteralPath` для него неисполнима.
+// Важнее второе: единственная защита от того, что сегмент маршрута вида
+// `apps/web/app/meetings/[id]` будет прочитан как шаблон, была выражена флагом
+// PowerShell, поэтому у Claude-ревьюера защиты не оставалось совсем — его Glob
+// и `--glob` у Grep трактуют скобки как класс символов.
+const shellReviewGuidance =
   'Read efficiently on this Windows/PowerShell host: locate code with `rg -n` before opening a file, read bounded ranges rather than whole files, and pass every discovered path to file cmdlets with `-LiteralPath` so Next.js route segments such as `apps/web/app/meetings/[id]` are not treated as wildcard patterns. Do not dump full logs, lockfiles, or generated files.';
-const reviewDocumentationDiscovery =
-  'Discover documentation paths before reading them: use `rg --files docs` and repository file listings, then read only paths confirmed to exist. Never guess conventional paths such as `docs/README.md`. For public API work in this repository, treat `README.md`, `docs/api.md`, and `docs/api-architecture.md` as canonical entry points when those files exist, while still inspecting the scope-specific documents returned by discovery.';
+const toolReviewGuidance =
+  'Read efficiently with the only tools you have — Grep, Glob and Read: locate code with Grep before opening a file, and read bounded ranges with Read rather than whole files. Glob patterns and Grep `--glob` filters treat square brackets as a character class, so a Next.js route segment such as `apps/web/app/meetings/[id]` never matches literally: reach it with a wildcard segment like `apps/web/app/meetings/*/page.tsx`, then pass the exact path to Read. Do not dump full logs, lockfiles, or generated files.';
+
+function reviewShellGuidance(config) {
+  return config?.agentCli === 'claude' ? toolReviewGuidance : shellReviewGuidance;
+}
+// Тот же принцип, что и у подсказки про чтение: способ найти документ обязан
+// быть исполнимым тем набором инструментов, который получила роль.
+const documentationDiscoveryTail =
+  'Never guess conventional paths such as `docs/README.md`. For public API work in this repository, treat `README.md`, `docs/api.md`, and `docs/api-architecture.md` as canonical entry points when those files exist, while still inspecting the scope-specific documents returned by discovery.';
+const shellDocumentationDiscovery = `Discover documentation paths before reading them: use \`rg --files docs\` and repository file listings, then read only paths confirmed to exist. ${documentationDiscoveryTail}`;
+const toolDocumentationDiscovery = `Discover documentation paths before reading them: list them with Glob patterns such as \`docs/**/*.md\`, then read only paths confirmed to exist. ${documentationDiscoveryTail}`;
+
+function reviewDocumentationDiscovery(config) {
+  return config?.agentCli === 'claude' ? toolDocumentationDiscovery : shellDocumentationDiscovery;
+}
 const reviewVerdictContract =
   'Use verdict "fail" when at least one actionable finding exists; otherwise use "pass" with an empty findings array.';
 
-export function buildIndependentReviewPrompt(issue, commit) {
+export function buildIndependentReviewPrompt(config, issue, commit) {
   const issueBody = issue.body?.trim() || '(empty)';
 
   return `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; inspect it as evidence, but verify that the current HEAD still satisfies the issue and has not regressed it.
@@ -57,9 +80,9 @@ Audit all of these areas:
 - public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant;
 - whether tests assert the real externally observable behavior rather than only an implementation detail.
 
-${reviewShellGuidance}
+${reviewShellGuidance(config)}
 
-${reviewDocumentationDiscovery}
+${reviewDocumentationDiscovery(config)}
 
 Only report findings caused by the claimed implementation, regressions at current HEAD, or work required by the issue. Ignore unrelated pre-existing debt. ${reviewVerdictContract} Do not edit files.`;
 }
@@ -76,9 +99,9 @@ The branch and pull request may be cumulative and contain work from other milest
 
 Ralph's control plane is maintained manually outside the product loop. Never report findings for .agents/**, scripts/ralph/**, AGENTS.md, or nested **/AGENTS.md files. Those paths must never become milestone issues and must never be modified by an AFK implementation session.
 
-${reviewShellGuidance}
+${reviewShellGuidance(config)}
 
-Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. ${reviewDocumentationDiscovery} Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
+Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. ${reviewDocumentationDiscovery(config)} Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
 
 The Ralph orchestrator has already completed every configured preflight and validation script successfully for the exact reviewed head. Do not rerun npm, npx, builds, linters, type checks, tests, dev servers, or any command that writes caches or artifacts. Use read-only file and git inspection only.
 

@@ -142,7 +142,7 @@ async function runIndependentReview(config, repository, issue, commit) {
     unlinkSync(config.review.outputPath);
   }
 
-  const reviewPrompt = buildIndependentReviewPrompt(issue, commit);
+  const reviewPrompt = buildIndependentReviewPrompt(config, issue, commit);
 
   console.log(`\n=== Independent review for issue #${issue.number} ===\n`);
 

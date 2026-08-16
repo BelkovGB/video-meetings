@@ -50,6 +50,7 @@ test('implementation prompt delegates full validation to the outer orchestrator'
 
 test('issue review prompt requires one exhaustive in-scope audit', () => {
   const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
     {
       number: 62,
       title: 'Rate-limit authentication',
@@ -62,7 +63,10 @@ test('issue review prompt requires one exhaustive in-scope audit', () => {
   assert.match(prompt, /Return every distinct, actionable finding/);
   assert.match(prompt, /public API response contracts, documentation, configuration/);
   assert.match(prompt, /Discover documentation paths/i);
-  assert.match(prompt, /rg --files docs/);
+  // Роль запущена с `--tools Read,Glob,Grep`, поэтому поиск описан через Glob:
+  // `rg` этому ревьюеру недоступен так же, как и PowerShell.
+  assert.match(prompt, /docs\/\*\*\/\*\.md/);
+  assert.doesNotMatch(prompt, /rg --files/);
   assert.match(prompt, /guess conventional paths such as `docs\/README\.md`/i);
   assert.match(prompt, /`docs\/api\.md`.*`docs\/api-architecture\.md`/);
   assert.match(prompt, /Ignore unrelated pre-existing debt/);
@@ -258,27 +262,43 @@ test('the operator manual states that it is not the agent contract', () => {
   assert.match(operatorDoc, /\.agents\/ralph-rules\.md/);
 });
 
-test('every generated prompt teaches -LiteralPath for Next.js route segments', () => {
+test('every generated prompt protects Next.js route segments with the tools it actually has', () => {
   const rules = readFileSync(ralphRulesPath, 'utf8');
-  const reviewPrompt = buildIndependentReviewPrompt(
-    { number: 71, title: 'Issue', body: 'Body.' },
-    'a'.repeat(40),
-  );
-  const milestonePrompt = buildMilestoneReviewPrompt(
-    { baseBranch: 'master', branch: 'features/profile-phase-8' },
-    { title: 'Phase 8', description: 'Description.' },
-    { number: 61, url: 'https://example/61', headRefOid: 'b'.repeat(40) },
-  );
+  const prompts = (config) => [
+    [
+      'issue review',
+      buildIndependentReviewPrompt(
+        config,
+        { number: 71, title: 'Issue', body: 'Body.' },
+        'a'.repeat(40),
+      ),
+    ],
+    [
+      'milestone review',
+      buildMilestoneReviewPrompt(
+        { ...config, baseBranch: 'master', branch: 'features/profile-phase-8' },
+        { title: 'Phase 8', description: 'Description.' },
+        { number: 61, url: 'https://example/61', headRefOid: 'b'.repeat(40) },
+      ),
+    ],
+  ];
 
-  // The rule used to reach the implementation session only; both reviewers run
-  // the same PowerShell cmdlets against the same repository.
-  for (const [label, text] of [
-    ['rules', rules],
-    ['issue review', reviewPrompt],
-    ['milestone review', milestonePrompt],
-  ]) {
+  // Сегмент обязан быть назван везде: это единственное место, где его вообще
+  // объясняют. А вот способ его прочитать у ревьюеров разный, и подсказка
+  // обязана совпадать с тем набором инструментов, который роль получила.
+  for (const [label, text] of [['rules', rules], ...prompts({ agentCli: 'codex' })]) {
     assert.match(text, /-LiteralPath/, `${label} must require -LiteralPath`);
     assert.match(text, /\[id\]/, `${label} must name the wildcard-prone segment`);
+  }
+
+  // Claude-ревьюер запускается с `--tools Read,Glob,Grep` и Bash не имеет:
+  // инструкция про PowerShell была бы неисполнима, а защита от скобок —
+  // отсутствующей.
+  for (const [label, text] of prompts({ agentCli: 'claude' })) {
+    assert.match(text, /\[id\]/, `${label} must name the wildcard-prone segment`);
+    assert.doesNotMatch(text, /-LiteralPath|rg -n/, `${label} must not prescribe a shell`);
+    assert.match(text, /Grep, Glob and Read/, `${label} must name the available tools`);
+    assert.match(text, /character class/, `${label} must explain the bracket hazard`);
   }
 
   assert.match(rules, /Get-ChildItem/);
