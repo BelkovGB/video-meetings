@@ -9,7 +9,9 @@ import { retryDelayMs, terminateProcessTreeByPid, waitSync } from './ralph-runti
 import {
   commandSpec,
   credentialFreeEnvironment,
+  outputTail,
   runtimeSettings,
+  windowsSafeCommandEnvironment,
 } from './ralph-process-runner.mjs';
 
 /**
@@ -51,6 +53,9 @@ export function createSandboxRoot(source, prefix) {
     cleanup: () => rmSync(root, { recursive: true, force: true }),
     env: {
       ...credentialFreeEnvironment(source),
+      // cwd сессии — корень репозитория, куда сама же сессия пишет с полным
+      // доступом, поэтому cmd.exe нельзя оставлять с поиском в текущем каталоге.
+      ...windowsSafeCommandEnvironment,
       HOME: home,
       USERPROFILE: home,
       APPDATA: config,
@@ -156,7 +161,11 @@ export async function runAgentSession(backend, args, options) {
 
     const event = backend.readEvent(line);
     if (!event) {
-      console.log(line);
+      // Строка обрезается: единственный гарантированный источник неразобранной
+      // строки — обрыв процесса circuit breaker'ом посреди события, а событие с
+      // выводом инструмента бывает в сотни килобайт. Такой блок ложился в
+      // run.log сразу после сообщения breaker'а, ради которого журнал и читают.
+      console.log(`[${backend.label}] неразобранная строка: ${outputTail(line)}`);
       return;
     }
 
@@ -287,6 +296,20 @@ export function genericExitFailure(result, stderr, label) {
 
 // Ошибка с nonRetryable — это вердикт ревьюера, а не сбой запуска, и повторять
 // её нельзя.
+//
+// Коды ниже — тоже не сбой запуска: между попытками не меняются ни prompt, ни
+// состояние репозитория, поэтому повтор воспроизводит тот же результат и только
+// тратит время и квоту. Дороже всех RALPH_AGENT_TIMEOUT: при agentTimeoutMs в
+// 90 минут три попытки — это 4,5 часа до первого сообщения оператору. Путь
+// разработки уже считает RALPH_AGENT_AUTH фатальным (ralph-loop.mjs), и ревью
+// не должно расходиться с ним.
+const nonRetryableReviewCodes = new Set([
+  'RALPH_AGENT_AUTH',
+  'RALPH_AGENT_TIMEOUT',
+  'RALPH_MAX_TURNS',
+  'RALPH_COMMAND_NOT_FOUND',
+]);
+
 export async function runReviewWithRetries(config, operation, label) {
   let lastError;
   for (let attempt = 1; attempt <= config.runtime.reviewRetryAttempts; attempt += 1) {
@@ -294,7 +317,13 @@ export async function runReviewWithRetries(config, operation, label) {
       return await operation();
     } catch (error) {
       lastError = error;
-      if (error.nonRetryable || attempt === config.runtime.reviewRetryAttempts) throw error;
+      if (
+        error.nonRetryable ||
+        nonRetryableReviewCodes.has(error.code) ||
+        attempt === config.runtime.reviewRetryAttempts
+      ) {
+        throw error;
+      }
       const delay = retryDelayMs(config.runtime.networkRetryBaseDelayMs, attempt);
       console.error(
         `${label} технически не завершился (попытка ${attempt}): ${error.message}. ` +

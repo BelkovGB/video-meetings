@@ -4,5 +4,6 @@ dist
 coverage
 package-lock.json
 .agents
+.claude
 .playwright-mcp
 apps/web/next-env.d.ts

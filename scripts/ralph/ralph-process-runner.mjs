@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -50,14 +51,95 @@ export function executable(name) {
   return `${name}.exe`;
 }
 
-export function commandSpec(name, args) {
-  const useWindowsCommandShim =
-    process.platform === 'win32' && ['codex', 'claude', 'npm', 'npx'].includes(name);
-  const command = useWindowsCommandShim ? (process.env.ComSpec ?? 'cmd.exe') : executable(name);
-  const commandArgs = useWindowsCommandShim ? ['/d', '/s', '/c', `${name}.cmd`, ...args] : args;
+// Имена, которые на Windows могут оказаться батником, а не исполняемым файлом:
+// npm и npx поставляются только шимом .cmd, а у codex и claude есть и нативная
+// установка (.exe), и установка через npm (.cmd).
+export const windowsShimCandidates = ['codex', 'claude', 'npm', 'npx'];
 
-  return { command, commandArgs };
+// cmd.exe нужен только батнику: .exe и .com запускаются напрямую.
+const windowsShimExtensions = new Set(['.BAT', '.CMD']);
+
+/**
+ * Поиск команды по PATH и PATHEXT в том же порядке, что применяет сама Windows:
+ * внешний цикл — каталог, внутренний — расширение.
+ *
+ * Порядок важен и не является деталью: он даёт тот же файл, который получает
+ * оператор, набрав имя в своей оболочке. Прежний код вместо поиска подставлял
+ * `${name}.cmd` и тем самым выбирал npm-шим даже там, где рядом в более раннем
+ * каталоге PATH лежит рабочий .exe. На машине, где npm-установка Claude Code
+ * сломана, каждая сессия падала с «claude.exe не совместим с версией Windows»,
+ * хотя `claude --version` в оболочке работал.
+ */
+export function resolveWindowsExecutable(name, source = process.env) {
+  const directories = (source.PATH ?? source.Path ?? '')
+    .split(path.delimiter)
+    // Элемент PATH разрешено писать в кавычках — `"C:\Program Files\Foo"`, — и
+    // cmd.exe вместе с CreateProcess их снимают. Без этого шага такой каталог
+    // молча пропускался, а поскольку ниже отсутствие команды стало жёсткой
+    // ошибкой, установленный CLI превращался бы в RALPH_COMMAND_NOT_FOUND.
+    .map((directory) => directory.trim().replace(/^"(.*)"$/, '$1'))
+    .filter(Boolean);
+  const extensions = (source.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((extension) => extension.trim())
+    .filter(Boolean);
+
+  for (const directory of directories) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${name}${extension}`);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+
+  return null;
 }
+
+export function commandSpec(name, args) {
+  if (process.platform !== 'win32' || !windowsShimCandidates.includes(name)) {
+    return { command: executable(name), commandArgs: args };
+  }
+
+  const resolved = resolveWindowsExecutable(name);
+  if (resolved === null) {
+    const error = new Error(
+      `Команда ${name} не найдена в PATH. Ожидались ${name}.exe (нативная установка) ` +
+        `или ${name}.cmd (установка через npm).`,
+    );
+    error.code = 'RALPH_COMMAND_NOT_FOUND';
+    throw error;
+  }
+
+  if (!windowsShimExtensions.has(path.extname(resolved).toUpperCase())) {
+    return { command: resolved, commandArgs: args };
+  }
+
+  // Батнику передаётся имя, а не найденный путь, и это вынужденно: аргумент
+  // `cmd /d /s /c "C:\dir with space\x.cmd"` разбирается по пробелу и падает с
+  // «'C:\dir' is not recognized» — проверено. Голое имя, в свою очередь,
+  // безопасно только вместе с NoDefaultCurrentDirectoryInExePath: без неё
+  // cmd.exe ищет команду в текущем каталоге раньше PATH. Обе стороны обязаны
+  // сойтись, поэтому переменную ставят все, кто собирает окружение дочернего
+  // процесса, — см. windowsSafeCommandEnvironment.
+  return {
+    command: process.env.ComSpec ?? 'cmd.exe',
+    commandArgs: ['/d', '/s', '/c', path.basename(resolved), ...args],
+  };
+}
+
+/**
+ * Окружение, без которого запуск батника через cmd.exe небезопасен.
+ *
+ * cmd.exe ищет команду в текущем каталоге раньше, чем в PATH. Текущий каталог
+ * дочернего процесса — корень репозитория, куда development-сессия пишет с
+ * `--permission-mode bypassPermissions`. Без этой переменной подложенный в
+ * корень `codex.cmd` или `claude.cmd` подменял бы CLI на следующем же запуске,
+ * в том числе для review-сессии, которая обязана быть read-only.
+ *
+ * Проверено обеими сторонами: с переменной `cmd /d /s /c probe.cmd` выбирает
+ * файл из PATH, без неё — из текущего каталога.
+ */
+export const windowsSafeCommandEnvironment =
+  process.platform === 'win32' ? { NoDefaultCurrentDirectoryInExePath: '1' } : {};
 
 export function outputTail(value, maxLength = 20_000) {
   const text = String(value ?? '').trim();
@@ -119,6 +201,13 @@ export function run(name, args, options = {}) {
   const command = useCommandRunner ? process.execPath : commandTarget.command;
   const commandArgs = useCommandRunner ? [commandRunnerPath] : commandTarget.commandArgs;
   const stdio = options.inherit ? ['pipe', 'inherit', 'inherit'] : 'pipe';
+  // Когда окружение не задано, дочерний процесс наследует окружение вызывающего.
+  // Защита от подмены батника обязана попасть в оба случая, поэтому окружение
+  // здесь всегда выписывается явно.
+  const childEnvironment =
+    process.platform === 'win32'
+      ? { ...(options.env ?? process.env), ...windowsSafeCommandEnvironment }
+      : options.env;
   const timeoutMs = options.timeoutMs ?? settings.commandTimeoutMs;
   const startedAt = Date.now();
   console.log(`Команда: ${name} ${args[0] ?? ''}`.trim());
@@ -132,7 +221,7 @@ export function run(name, args, options = {}) {
           cwd: projectRoot,
           input: options.input,
           timeoutMs,
-          env: options.env,
+          env: childEnvironment,
         })
       : options.input,
     stdio,
@@ -140,7 +229,7 @@ export function run(name, args, options = {}) {
     killSignal: 'SIGTERM',
     maxBuffer: 50 * 1024 * 1024,
     windowsHide: true,
-    ...(options.env === undefined ? {} : { env: options.env }),
+    ...(childEnvironment === undefined ? {} : { env: childEnvironment }),
   });
 
   const commandRunnerTimedOut =
