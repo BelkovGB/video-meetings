@@ -140,6 +140,35 @@ function isSyntheticApiError(event) {
   return event.is_api_error_message === true || event.message?.model === '<synthetic>';
 }
 
+/**
+ * Событие `result` — единственное место, где CLI сообщает цену сессии, и оно
+ * приходит одинаково при успехе и при отказе. Поля берутся с проверкой типа:
+ * при ошибке до первого запроса `usage` приходит пустым, а `total_cost_usd`
+ * отсутствует, и ноль вместо «не сообщено» занизил бы сводку прогона.
+ *
+ * `reportedTurns` сохраняется рядом с собственным счётчиком, а не вместо него:
+ * Ralph не считает шагом синтетический ответ на ошибку API, CLI считает, и
+ * расхождение между двумя числами — признак транзиентных сбоев, а не дефекта.
+ */
+function claudeTelemetry(event) {
+  const usage = event.usage ?? {};
+  const numberOrNull = (value) => (typeof value === 'number' ? value : null);
+
+  return {
+    reportedTurns: numberOrNull(event.num_turns),
+    // Имя отличается от `wallMs` сессии намеренно: оркестратор меряет жизнь
+    // дочернего процесса, CLI — собственную работу, и это разные числа.
+    cliWallMs: numberOrNull(event.duration_ms),
+    apiMs: numberOrNull(event.duration_api_ms),
+    costUsd: numberOrNull(event.total_cost_usd),
+    inputTokens: numberOrNull(usage.input_tokens),
+    outputTokens: numberOrNull(usage.output_tokens),
+    cacheReadTokens: numberOrNull(usage.cache_read_input_tokens),
+    cacheCreationTokens: numberOrNull(usage.cache_creation_input_tokens),
+    models: Object.keys(event.modelUsage ?? {}),
+  };
+}
+
 function readClaudeEvent(line) {
   let event;
   try {
@@ -213,8 +242,11 @@ function readClaudeEvent(line) {
   if (event.type !== 'result') return {};
 
   const resultText = typeof event.result === 'string' ? event.result : '';
+  // Телеметрия отдаётся на всех трёх выходах: сессия, оборвавшаяся по лимиту
+  // шагов, стоит дороже успешной, и именно её цену нужно видеть.
+  const telemetry = claudeTelemetry(event);
   if (!event.is_error) {
-    return { agentMessage: resultText || undefined };
+    return { agentMessage: resultText || undefined, telemetry };
   }
 
   // Единственное место, где виден отказ: код завершения остаётся нулевым и при
@@ -222,14 +254,14 @@ function readClaudeEvent(line) {
   if (event.subtype === 'error_max_turns') {
     const error = new Error(`Claude завершил сессию по собственному лимиту шагов. ${resultText}`);
     error.code = 'RALPH_MAX_TURNS';
-    return { error };
+    return { error, telemetry };
   }
 
   const error = new Error(`Claude завершил сессию с ошибкой: ${resultText || event.subtype}`);
   if (isAuthenticationFailure(event, resultText)) {
     error.code = 'RALPH_AGENT_AUTH';
   }
-  return { error };
+  return { error, telemetry };
 }
 
 const authenticationStatuses = new Set([401, 403]);

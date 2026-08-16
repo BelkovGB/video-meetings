@@ -42,6 +42,13 @@ import {
 import { clearedFailure, recordedFailure, recoveryPrompt } from './ralph-failure-summary.mjs';
 
 import {
+  beginIssueMetrics,
+  finishIssueMetrics,
+  formatIssueMetrics,
+  startStage,
+} from './ralph-run-metrics.mjs';
+
+import {
   assertTrustedControlFilesUnchanged,
   runConfiguredValidation,
   runPreflight,
@@ -114,6 +121,42 @@ function assertCleanTree(message) {
 // означает, что коммит уже не соответствует проверенному состоянию.
 function assertValidationLeftTree(expected, message) {
   if (workingTreeStatus() !== expected) fail(message);
+}
+
+// Причина незавершённой issue берётся из результата, а не предполагается:
+// остановка после упавшей валидации сообщала об отказе ревью, до которого цикл
+// не дошёл, и отправляла оператора искать замечания, которых нет. Классификация
+// нужна и сообщению оператору, и записи метрик, поэтому живёт в одном месте.
+const incompleteIssueOutcomes = [
+  ['agentFailed', 'agent-failed', 'сессия агента не завершилась'],
+  ['validationFailed', 'validation-failed', 'валидация не прошла'],
+  ['reviewFailed', 'review-failed', 'независимое ревью вернуло замечания'],
+];
+
+export function incompleteIssueOutcome(result) {
+  const [flag, outcome, reason] =
+    incompleteIssueOutcomes.find(([field]) => result?.[field]) ?? incompleteIssueOutcomes.at(-1);
+
+  return { outcome, reason, runOutcome: { [flag]: true } };
+}
+
+function reportIssueMetrics(outcome) {
+  const record = finishIssueMetrics(outcome);
+  if (record) console.log(formatIssueMetrics(record));
+}
+
+// Валидация вызывается из трёх мест lifecycle, и замер, поставленный только в
+// одном, занизил бы стоимость issue молча. Обёртка одна на все три.
+function measuredValidation(runValidation) {
+  const endStage = startStage('validation');
+  try {
+    const outcome = runValidation();
+    endStage({ attested: outcome?.attested === true });
+    return outcome;
+  } catch (error) {
+    endStage({ failed: true });
+    throw error;
+  }
 }
 
 function verifyTools(config) {
@@ -228,13 +271,18 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
 
   activeStateStore()?.updateIssue({ phase: 'reviewing' });
   let review;
+  // Замер охватывает повторы: попытка ревью, упавшая технически, стоит полной
+  // сессии, а таких попыток допускается reviewRetryAttempts.
+  const endReview = startStage('review');
   try {
     review = await runReviewWithRetries(
       config,
       () => runIndependentReview(config, repository, issue, commit),
       `Review issue #${issue.number}`,
     );
+    endReview();
   } catch (error) {
+    endReview({ failed: true });
     activeStateStore()?.updateIssue({
       phase: 'pushed',
       ...recordedFailure(error),
@@ -293,7 +341,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     const commit = verifiedIssueCommit(alreadyFixedCommit, issue);
     activeStateStore()?.updateIssue({ phase: 'validating' });
     try {
-      runConfiguredValidation(config);
+      measuredValidation(() => runConfiguredValidation(config));
     } catch (error) {
       const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
       activeStateStore()?.updateIssue({
@@ -317,7 +365,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 
   activeStateStore()?.updateIssue({ phase: 'validating' });
   try {
-    runConfiguredValidation(config);
+    measuredValidation(() => runConfiguredValidation(config));
   } catch (error) {
     const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
     activeStateStore()?.updateIssue({
@@ -400,7 +448,7 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
     );
     const resumePhase = storedIssue.phase;
     try {
-      runConfiguredValidation(config);
+      measuredValidation(() => runConfiguredValidation(config));
     } catch (error) {
       activeStateStore().updateIssue({ phase: resumePhase, ...recordedFailure(error) });
       throw error;
@@ -435,6 +483,7 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
 
   let codexResult;
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
+  const endImplementation = startStage('implementation');
   try {
     codexResult = await runDevelopmentSession(config, {
       input: renderPrompt(config, issue, rules) + (continuation ? recoveryPrompt(storedIssue) : ''),
@@ -442,7 +491,9 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
       timeoutMs: config.runtime.agentTimeoutMs,
       label: `${config.agentCli} issue #${issue.number}`,
     });
+    endImplementation();
   } catch (error) {
+    endImplementation({ failed: true });
     activeStateStore()?.updateIssue({
       phase: 'working-tree',
       ...recordedFailure(error),
@@ -895,9 +946,20 @@ export async function runContinuousLoop(context, actions) {
         `осталось issues: ${issues.length}.`,
     );
     let result;
+    actions.beginIssueMetrics?.({
+      issue: currentIssue.number,
+      milestone: config.milestone,
+      branch: config.branch,
+      iteration,
+      agentCli: config.agentCli,
+    });
     try {
       result = await actions.runAgentOnIssue(config, repository, currentIssue, rules);
     } catch (error) {
+      actions.reportIssueMetrics?.({
+        outcome: error.code ?? 'aborted',
+        reason: error.message?.slice(0, 200) ?? null,
+      });
       if (
         needsDevelopmentIteration &&
         ['RALPH_AGENT_AUTH', 'RALPH_AGENT_WRITE_ACCESS', 'RALPH_UNTRUSTED_ISSUE'].includes(
@@ -910,6 +972,11 @@ export async function runContinuousLoop(context, actions) {
       }
       throw error;
     }
+    actions.reportIssueMetrics?.(
+      result?.completed === false
+        ? incompleteIssueOutcome(result)
+        : { outcome: 'completed', reason: 'issue закрыта' },
+    );
     if (result?.completed === false) {
       pendingIssues.set(currentIssue.number, currentIssue);
     } else {
@@ -918,19 +985,12 @@ export async function runContinuousLoop(context, actions) {
     }
     if (config.stopAfterFirstIssue) {
       if (result?.completed === false) {
-        // Причина берётся из результата, а не предполагается. Остановка после
-        // упавшей валидации сообщала об отказе ревью, до которого цикл не дошёл,
-        // и отправляла оператора искать замечания, которых нет.
-        const [reason, outcome] = result.agentFailed
-          ? ['сессия агента не завершилась', { agentFailed: true }]
-          : result.validationFailed
-            ? ['валидация не прошла', { validationFailed: true }]
-            : ['независимое ревью вернуло замечания', { reviewFailed: true }];
+        const { reason, runOutcome } = incompleteIssueOutcome(result);
         console.log(
           `Issue #${currentIssue.number} осталась открытой: ${reason}. ` +
             'Цикл остановлен после одной итерации.',
         );
-        return { mode: 'run', completed: 0, ...outcome };
+        return { mode: 'run', completed: 0, ...runOutcome };
       }
       stateStore?.finish();
       console.log(`Issue #${currentIssue.number} завершена. Цикл остановлен после одной итерации.`);
@@ -970,6 +1030,8 @@ function defaultActions() {
     linkedCommitForIssue,
     verifyReviewedPullRequestHead,
     workingTreeStatus,
+    beginIssueMetrics,
+    reportIssueMetrics,
   };
 }
 

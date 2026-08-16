@@ -18,7 +18,7 @@
     "lint:scripts": "eslint scripts",
     "test:e2e:api": "npm run test:e2e --workspace @video-meetings/api",
     "test:e2e:web": "npm run test:e2e --workspace @video-meetings/web",
-    "test:ralph": "node --test --test-concurrency=1 scripts/ralph/ralph-claude.test.mjs scripts/ralph/ralph-codex.test.mjs scripts/ralph/ralph-control-plane.test.mjs scripts/ralph/ralph-issues.test.mjs scripts/ralph/ralph-orchestration.test.mjs scripts/ralph/ralph-prompts.test.mjs scripts/ralph/ralph-runtime.test.mjs scripts/ralph/ralph-state.test.mjs scripts/ralph/ralph-validation.test.mjs",
+    "test:ralph": "node --test --test-concurrency=1 scripts/ralph/ralph-claude.test.mjs scripts/ralph/ralph-codex.test.mjs scripts/ralph/ralph-control-plane.test.mjs scripts/ralph/ralph-issues.test.mjs scripts/ralph/ralph-metrics.test.mjs scripts/ralph/ralph-orchestration.test.mjs scripts/ralph/ralph-prompts.test.mjs scripts/ralph/ralph-runtime.test.mjs scripts/ralph/ralph-state.test.mjs scripts/ralph/ralph-validation.test.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepare": "husky",

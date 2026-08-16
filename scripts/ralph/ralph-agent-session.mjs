@@ -112,11 +112,16 @@ async function waitForChildTermination(child, childResult, graceMs) {
  * - `createSandboxedEnvironment(source, options)` — песочница с учётными данными;
  * - `readEvent(line)` — разбор одной строки stdout. Возвращает `null`, если
  *   строка не разобрана (её печатают как есть), иначе объект с полями
- *   `stepId`, `log`, `agentMessage`, `error`;
+ *   `stepId`, `log`, `agentMessage`, `error`, `telemetry`;
  * - `exitFailure(result, stderr)` — Error по коду завершения, если backend
  *   умеет распознать причину точнее общего сообщения.
+ *
+ * `telemetry` — цена сессии по данным самого CLI: шаги, токены, стоимость.
+ * Backend волен её не присылать; тогда в сводке остаётся только измеренное
+ * оркестратором время и собственный счётчик шагов.
  */
 export async function runAgentSession(backend, args, options) {
+  const sessionStartedMs = Date.now();
   const { command, commandArgs } = commandSpec(backend.binary, args);
   const childEnvironment = backend.createSandboxedEnvironment(options.env ?? process.env, {
     authenticationFile: options.authenticationFile,
@@ -151,8 +156,18 @@ export async function runAgentSession(backend, args, options) {
   // Claude CLI завершается кодом 0 и при отказе авторизации, и при собственном
   // лимите шагов: единственный признак отказа приходит в потоке событий.
   let streamError = null;
+  let backendTelemetry = null;
   let resolveTurnLimit;
   const seenStepIds = new Set();
+
+  // Сводка снимается в момент выхода, а выходов у сессии шесть, включая четыре
+  // аварийных. Дороже всех именно они: оборванная по лимиту сессия успевает
+  // потратить весь бюджет, и без её цены сводка прогона занижена.
+  const sessionTelemetry = () => ({
+    turns,
+    wallMs: Date.now() - sessionStartedMs,
+    ...(backendTelemetry ?? {}),
+  });
 
   const handleLine = (line) => {
     if (line.trim() === '') {
@@ -171,6 +186,7 @@ export async function runAgentSession(backend, args, options) {
 
     if (event.agentMessage) lastAgentMessage = event.agentMessage;
     if (event.error) streamError ??= event.error;
+    if (event.telemetry) backendTelemetry = event.telemetry;
 
     let currentTurn = null;
     if (event.stepId !== undefined && event.stepId !== null && !seenStepIds.has(event.stepId)) {
@@ -252,6 +268,7 @@ export async function runAgentSession(backend, args, options) {
     const error = new Error(`${options.label} достиг лимита maxTurns=${options.maxTurns}.`);
     error.code = 'RALPH_MAX_TURNS';
     error.turns = turns;
+    error.telemetry = sessionTelemetry();
     throw error;
   }
 
@@ -260,6 +277,7 @@ export async function runAgentSession(backend, args, options) {
     error.code = 'RALPH_AGENT_TIMEOUT';
     error.turns = turns;
     error.timeoutMs = timeoutMs;
+    error.telemetry = sessionTelemetry();
     throw error;
   }
 
@@ -268,18 +286,21 @@ export async function runAgentSession(backend, args, options) {
   // поэтому опора на код завершения приняла бы такой прогон за успешный.
   if (streamError) {
     streamError.turns = turns;
+    streamError.telemetry = sessionTelemetry();
     throw streamError;
   }
 
   if (result.code !== 0) {
-    throw (
+    const error =
       backend.exitFailure?.(result, stderr, options.label) ??
-      genericExitFailure(result, stderr, options.label)
-    );
+      genericExitFailure(result, stderr, options.label);
+    error.turns = turns;
+    error.telemetry = sessionTelemetry();
+    throw error;
   }
 
   console.log(`${options.label}: использовано шагов ${turns}/${options.maxTurns}.`);
-  return { turns, lastAgentMessage };
+  return { turns, lastAgentMessage, telemetry: sessionTelemetry() };
 }
 
 export function genericExitFailure(result, stderr, label) {

@@ -1,6 +1,7 @@
 import { runAgentSession } from './ralph-agent-session.mjs';
 import { claudeBackend } from './ralph-claude-session.mjs';
 import { codexBackend } from './ralph-codex-session.mjs';
+import { withRecordedTelemetry } from './ralph-run-metrics.mjs';
 import { fail } from './ralph-scope.mjs';
 
 /**
@@ -41,7 +42,9 @@ export function verifyAgentAuthentication(config, dependencies = {}) {
 
 export async function runDevelopmentSession(config, options) {
   const backend = agentBackend(config);
-  return runAgentSession(backend, backend.developmentArguments(config), options);
+  return withRecordedTelemetry('development', () =>
+    runAgentSession(backend, backend.developmentArguments(config), options),
+  );
 }
 
 /**
@@ -54,7 +57,14 @@ export async function runDevelopmentSession(config, options) {
  */
 export async function runReviewSession(config, role, options) {
   const backend = agentBackend(config);
-  const session = await runAgentSession(backend, backend.reviewArguments(role), options);
+  // Роль различается по тождеству объекта конфигурации, а не по имени поля:
+  // обе роли приходят сюда одной и той же формой, и отдельного признака у них
+  // нет. Разделение нужно только метрикам — цена milestone-ревью на порядок
+  // отличается от цены ревью одной issue.
+  const metricsRole = role === config?.milestoneReview ? 'milestone-review' : 'review';
+  const session = await withRecordedTelemetry(metricsRole, () =>
+    runAgentSession(backend, backend.reviewArguments(role), options),
+  );
   backend.writeReviewOutput?.(role, session);
   return session;
 }

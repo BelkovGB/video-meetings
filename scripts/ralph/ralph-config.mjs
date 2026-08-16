@@ -584,6 +584,7 @@ function collectTrustedControlFileHashes(config) {
     path.join(scriptDirectory, 'ralph-milestone-review.mjs'),
     path.join(scriptDirectory, 'ralph-process-runner.mjs'),
     path.join(scriptDirectory, 'ralph-prompts.mjs'),
+    path.join(scriptDirectory, 'ralph-run-metrics.mjs'),
     path.join(scriptDirectory, 'ralph-runtime.mjs'),
     path.join(scriptDirectory, 'ralph-scope.mjs'),
     path.join(scriptDirectory, 'ralph-state-store.mjs'),

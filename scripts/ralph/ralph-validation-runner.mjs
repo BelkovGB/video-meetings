@@ -344,10 +344,16 @@ export function failedValidationScript(error) {
   return markers.at(-1)?.[1] ?? null;
 }
 
+/**
+ * Возвращает исход прогона: выполнялся ли контейнер или набор был признан
+ * проверенным по attestation. Без этого признака длительность стадии
+ * бимодальна — доли секунды против нескольких минут на том же наборе, — и
+ * усреднение по issues даёт число, которого не бывает ни в одном прогоне.
+ */
 export function runConfiguredScripts(config, scripts, label, options = {}) {
   const includePreflight = options.includePreflight ?? true;
   const execute = options.run ?? run;
-  if (scripts.length === 0) return;
+  if (scripts.length === 0) return { ran: false, attested: false, scripts: [] };
   assertTrustedControlFilesUnchanged(config);
   // Один контейнер на весь набор. Изоляция от хоста сохраняется, а workspace,
   // node_modules, PostgreSQL и migrations готовятся один раз вместо одного раза
@@ -380,7 +386,7 @@ export function runConfiguredScripts(config, scripts, label, options = {}) {
         `${label}: тот же source, тот же набор scripts и тот же образ уже прошли проверку ` +
           `(attestation ${attestationKey.slice(0, 12)}). Повторный прогон пропущен.`,
       );
-      return;
+      return { ran: false, attested: true, scripts: isolatedScripts, image };
     }
     execute(
       'docker',
@@ -402,6 +408,7 @@ export function runConfiguredScripts(config, scripts, label, options = {}) {
         attestationsPath,
       );
     }
+    return { ran: true, attested: false, scripts: isolatedScripts, image };
   } catch (error) {
     error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
     error.script = failedValidationScript(error) ?? isolatedScripts.join(', ');
@@ -413,7 +420,9 @@ export function runConfiguredScripts(config, scripts, label, options = {}) {
 }
 
 export function runPreflight(config) {
-  runConfiguredScripts(config, config.preflightScripts, 'Preflight', { includePreflight: false });
+  return runConfiguredScripts(config, config.preflightScripts, 'Preflight', {
+    includePreflight: false,
+  });
 }
 
 export function runConfiguredValidation(config) {
@@ -423,5 +432,5 @@ export function runConfiguredValidation(config) {
   // Каждый validation-запуск получает новый контейнер с новой изолированной БД и
   // выполняет preflight первым, чтобы migration текущей issue была применена
   // внутри того же контейнера, что и остальные scripts.
-  runConfiguredScripts(config, config.validationScripts, 'Validation');
+  return runConfiguredScripts(config, config.validationScripts, 'Validation');
 }
