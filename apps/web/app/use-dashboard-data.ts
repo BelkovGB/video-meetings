@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { apiUrl } from '../lib/api/config';
 import type { CurrentUserProfile, Meeting } from '../lib/api/contracts';
 import {
@@ -12,6 +12,7 @@ import {
   removeStoredDisplayName,
   writeDisplayName,
 } from '../lib/auth/session';
+import { useRestoredSessionGuard } from '../lib/auth/use-restored-session-guard';
 
 type DashboardData = {
   identity: string;
@@ -57,6 +58,12 @@ export function useDashboardData(): DashboardData {
   const [isLoading, setIsLoading] = useState(true);
   const [loadAttempts, setLoadAttempts] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const returnToLogin = useCallback(() => {
+    clearSessionAndRedirectToLogin(router);
+  }, [router]);
+
+  useRestoredSessionGuard(returnToLogin);
 
   useEffect(() => {
     const token = readAccessToken();
@@ -160,8 +167,6 @@ export function useDashboardData(): DashboardData {
       setIsLoading(true);
       setLoadAttempts((currentAttempt) => currentAttempt + 1);
     },
-    logout: () => {
-      clearSessionAndRedirectToLogin(router);
-    },
+    logout: returnToLogin,
   };
 }

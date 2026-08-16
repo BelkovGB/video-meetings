@@ -7,6 +7,7 @@ import { apiUrl } from '../../lib/api/config';
 import type { CurrentUserProfile } from '../../lib/api/contracts';
 import { passwordChangedLoginPath } from '../../lib/auth/login-notice';
 import { clearSession, readAccessToken } from '../../lib/auth/session';
+import { useRestoredSessionGuard } from '../../lib/auth/use-restored-session-guard';
 
 type CurrentProfile = {
   profile: CurrentUserProfile | null;
@@ -37,6 +38,8 @@ export function useCurrentProfile(): CurrentProfile {
     clearSession();
     router.replace(passwordChangedLoginPath);
   }, [router]);
+
+  useRestoredSessionGuard(handleUnauthorized);
 
   useEffect(() => {
     const token = readAccessToken();

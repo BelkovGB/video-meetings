@@ -690,6 +690,12 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
     window.sessionStorage.setItem('accessToken', accessToken);
     window.sessionStorage.setItem('userEmail', email);
   }, session);
+  // The dashboard is visited on the way so that Back has an authenticated page
+  // to return to once the session is gone.
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText(
+    session.email,
+  );
   await page.goto('/profile');
 
   await page.getByLabel('Текущий пароль', { exact: true }).focus();
@@ -711,6 +717,10 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
     page.evaluate(() => window.sessionStorage.getItem('accessToken')),
   ).resolves.toBeNull();
   await expect(page.evaluate(() => window.sessionStorage.getItem('userEmail'))).resolves.toBeNull();
+
+  await page.goBack();
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByText(session.email)).toHaveCount(0);
 
   await page.goto('/profile');
   await expect(page).toHaveURL('/login');
