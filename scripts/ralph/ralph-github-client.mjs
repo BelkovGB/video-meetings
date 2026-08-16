@@ -19,6 +19,27 @@ export function repositoryName() {
   return repository.nameWithOwner;
 }
 
+/**
+ * `gh auth status` завершается нулём при любом залогиненном аккаунте и ничего
+ * не говорит о правах на целевой репозиторий. Без этой проверки отказ приходит
+ * на push ветки или закрытии issue — то есть после того, как агент отработал,
+ * а commit уже создан.
+ */
+export function verifyRepositoryWriteAccess(repository, dependencies = {}) {
+  const execute = dependencies.runNetwork ?? runNetwork;
+  const permissions = parseJson(
+    execute('gh', ['api', `repos/${repository}`, '--jq', '.permissions']).stdout,
+    `gh api repos/${repository}`,
+  );
+  if (permissions?.push === true) return permissions;
+
+  const login = execute('gh', ['api', 'user', '--jq', '.login'], { allowFailure: true }).stdout;
+  fail(
+    `Активный аккаунт GitHub${login ? ` (${login})` : ''} не имеет права записи в ${repository}. ` +
+      'Ralph остановлен до запуска агента: push и закрытие issue отказали бы уже после его работы.',
+  );
+}
+
 export function githubPagedArray(repository, resource, fields, source, dependencies = {}) {
   const execute = dependencies.runNetwork ?? runNetwork;
   const maxPages = dependencies.maxPages ?? runtimeSettings().maxPages;

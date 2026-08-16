@@ -30,6 +30,7 @@ import {
   reviewFindingFingerprint,
   reviewFindingMarker,
 } from './ralph-milestone-review.mjs';
+import { verifyRepositoryWriteAccess } from './ralph-github-client.mjs';
 import { ralphConfigPath, withPatchedRalphConfig } from './ralph-test-support.mjs';
 
 test('finding fingerprint is stable for Unicode titles and changes with location', () => {
@@ -348,6 +349,33 @@ test('reasoning effort defaults to medium/medium/high when the config omits it',
     assert.equal(config.review.effort, 'medium');
     assert.equal(config.milestoneReview.effort, 'high');
   });
+});
+
+test('preflight stops when the active GitHub account cannot write to the repository', () => {
+  // `gh auth status` завершается нулём при любом залогиненном аккаунте, поэтому
+  // раньше отказ приходил на push — после работы агента и создания commit.
+  const calls = [];
+  const runNetwork = (command, args, options) => {
+    calls.push(args.join(' '));
+    if (args.includes('user')) return { status: 0, stdout: 'read-only-bot' };
+    void options;
+    return { status: 0, stdout: '{"admin":false,"pull":true,"push":false}' };
+  };
+
+  assert.throws(
+    () => verifyRepositoryWriteAccess('owner/repository', { runNetwork }),
+    (error) => {
+      assert.match(error.message, /read-only-bot/);
+      assert.match(error.message, /не имеет права записи в owner\/repository/);
+      return true;
+    },
+  );
+  assert.equal(calls[0], 'api repos/owner/repository --jq .permissions');
+
+  const writable = verifyRepositoryWriteAccess('owner/repository', {
+    runNetwork: () => ({ status: 0, stdout: '{"push":true}' }),
+  });
+  assert.equal(writable.push, true);
 });
 
 test('a runtime field the code does not read is rejected, not ignored', () => {

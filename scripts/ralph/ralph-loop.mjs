@@ -69,6 +69,7 @@ import {
   reopenIssueWithComment,
   repositoryName,
   verifyMilestone,
+  verifyRepositoryWriteAccess,
 } from './ralph-github-client.mjs';
 
 import {
@@ -1048,6 +1049,7 @@ async function main() {
       run('git', ['check-ref-format', '--branch', phase.baseBranch]);
     }
     const repository = repositoryName();
+    verifyRepositoryWriteAccess(repository);
     const milestones = config.phases.map((phase) => verifyMilestone(repository, phase.milestone));
     const actions = defaultActions();
     const runPhase = async (phaseConfig) => {
