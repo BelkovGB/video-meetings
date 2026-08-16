@@ -11,7 +11,6 @@ import {
   failedValidationScript,
   hasValidationAttestation,
   loadConfig,
-  purgeValidationAttestations,
   readValidationAttestations,
   recordValidationAttestation,
   run,
@@ -116,29 +115,21 @@ test('validation image cache hit returns the existing image without rebuilding i
   }
 });
 
-test('validation image build uses frozen trusted inputs and ignores injected lifecycle hooks', () => {
+test('validation image build takes package.json from HEAD and ignores injected lifecycle hooks', () => {
   const packagePath = new URL('../../package.json', import.meta.url);
   const dockerfilePath = new URL('./Dockerfile.validation', import.meta.url);
   const originalPackage = readFileSync(packagePath, 'utf8');
-  const originalDockerfile = readFileSync(dockerfilePath, 'utf8');
   const directory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-frozen-inputs-'));
-  const frozenDockerfilePath = path.join(directory, 'Dockerfile.validation');
   const lifecycleMarkerPath = path.join(directory, 'lifecycle-ran');
   let snapshot;
 
   try {
-    writeFileSync(frozenDockerfilePath, originalDockerfile, 'utf8');
     const packageJson = JSON.parse(originalPackage);
     packageJson.scripts = {
       ...packageJson.scripts,
       postinstall: `write ${lifecycleMarkerPath}`,
     };
     writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
-    writeFileSync(
-      dockerfilePath,
-      `${originalDockerfile}\nRUN touch /tmp/attacker-controlled\n`,
-      'utf8',
-    );
     snapshot = createTrustedValidationDependencySnapshot();
 
     const image = ensureValidationImage(
@@ -147,7 +138,6 @@ test('validation image build uses frozen trusted inputs and ignores injected lif
         validationContainer: {
           image: `ralph-validation:frozen-${Date.now()}`,
           dockerfilePath: fileURLToPath(dockerfilePath),
-          frozenDockerfilePath,
         },
       },
       snapshot,
@@ -157,8 +147,7 @@ test('validation image build uses frozen trusted inputs and ignores injected lif
           if (args[0] === 'image') return { status: 1, stdout: '' };
 
           assert.equal(args[0], 'build');
-          assert.equal(args[args.indexOf('--file') + 1], frozenDockerfilePath);
-          assert.equal(readFileSync(frozenDockerfilePath, 'utf8'), originalDockerfile);
+          assert.equal(args[args.indexOf('--file') + 1], fileURLToPath(dockerfilePath));
           const buildPackage = JSON.parse(
             readFileSync(path.join(snapshot, 'package.json'), 'utf8'),
           );
@@ -175,7 +164,6 @@ test('validation image build uses frozen trusted inputs and ignores injected lif
   } finally {
     if (snapshot) rmSync(snapshot, { recursive: true, force: true });
     writeFileSync(packagePath, originalPackage, 'utf8');
-    writeFileSync(dockerfilePath, originalDockerfile, 'utf8');
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -562,33 +550,26 @@ test('an unresolvable image digest disables attestation instead of trusting a mu
   });
 });
 
-test('a tampered trusted control file purges every stored attestation', () => {
-  withAttestationHarness(({ attestationsPath, validate }) => {
+test('a tampered trusted control file stops validation before it runs', () => {
+  withAttestationHarness(({ validate }) => {
     const orchestratorPath = fileURLToPath(new URL('./ralph-loop.mjs', import.meta.url));
     const tamperedHashes = new Map(validationConfig().trustedControlFileHashes);
     assert.equal(tamperedHashes.has(orchestratorPath), true);
     tamperedHashes.set(orchestratorPath, 'not-the-real-hash');
 
-    recordValidationAttestation('deadbeef', { label: 'Validation' }, attestationsPath);
-    assert.equal(hasValidationAttestation('deadbeef', attestationsPath), true);
-
     assert.throws(
       () => validate(['lint'], { config: { trustedControlFileHashes: tamperedHashes } }),
       /изменила доверенный файл/,
     );
-    assert.equal(hasValidationAttestation('deadbeef', attestationsPath), false);
   });
 });
 
-test('a changed AGENTS.md set also purges every stored attestation', () => {
-  withAttestationHarness(({ attestationsPath, validate }) => {
-    recordValidationAttestation('deadbeef', { label: 'Validation' }, attestationsPath);
-
+test('a changed AGENTS.md set also stops validation before it runs', () => {
+  withAttestationHarness(({ validate }) => {
     assert.throws(
       () => validate(['lint'], { config: { trustedControlFileHashes: new Map() } }),
       /изменила набор доверенных файлов AGENTS\.md/,
     );
-    assert.equal(hasValidationAttestation('deadbeef', attestationsPath), false);
   });
 });
 
@@ -602,9 +583,6 @@ test('the attestation store is bounded and keeps the newest entries', () => {
     assert.equal(entries[0].key, 'key-39');
     assert.equal(hasValidationAttestation('key-0', attestationsPath), false);
     assert.equal(hasValidationAttestation('key-39', attestationsPath), true);
-
-    purgeValidationAttestations(attestationsPath);
-    assert.deepEqual(readValidationAttestations(attestationsPath), []);
   });
 });
 

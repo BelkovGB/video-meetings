@@ -102,9 +102,9 @@ test('phase config supports an ordered plan and legacy single-phase fields', () 
     { milestone: 'API', branch: 'feature/api', baseBranch: 'master' },
     { milestone: 'Web', branch: 'feature/web', baseBranch: 'develop' },
   ]);
-  assert.deepEqual(
-    normalizePhases({ milestone: 'Legacy', branch: 'feature/legacy', baseBranch: 'master' }),
-    [{ milestone: 'Legacy', branch: 'feature/legacy', baseBranch: 'master' }],
+  assert.throws(
+    () => normalizePhases({ milestone: 'Legacy', branch: 'feature/legacy', baseBranch: 'master' }),
+    /Добавьте непустой массив "phases"/,
   );
   assert.throws(
     () =>
@@ -150,7 +150,7 @@ test('persistent state advances a phase atomically and resets its iteration budg
   }
 });
 
-test('legacy active state migrates into the first phase without losing its issue', () => {
+test('active state from an older Ralph version stops the run instead of migrating', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'ralph-phases-legacy-'));
   const statePath = path.join(directory, 'state.json');
   const plan = {
@@ -175,11 +175,10 @@ test('legacy active state migrates into the first phase without losing its issue
   );
 
   try {
-    const migrated = createStateStore(configForPhase(plan, 0), '--run', statePath);
-    assert.equal(migrated.state.version, 2);
-    assert.equal(migrated.phaseIndex, 0);
-    assert.equal(migrated.issue.number, 42);
-    assert.equal(migrated.iterationsUsed, 1);
+    assert.throws(
+      () => createStateStore(configForPhase(plan, 0), '--run', statePath),
+      /относится к другой ветке, базе или milestone/,
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

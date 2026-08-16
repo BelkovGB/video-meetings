@@ -214,37 +214,30 @@ const ralphOperatorDocPath = fileURLToPath(new URL('../../.agents/RALPH.md', imp
 
 test('the implementation prompt carries the full contract without the operator manual', () => {
   const config = loadConfig();
-  try {
-    const rules = readFileSync(ralphRulesPath, 'utf8');
-    const prompt = renderPrompt(
-      { ...config, milestone: 'Phase 8', branch: 'features/profile-phase-8' },
-      {
-        number: 71,
-        title: 'Deliver the password change screen',
-        url: 'https://example/71',
-        body: 'Body.',
-      },
-      rules,
-    );
+  const rules = readFileSync(ralphRulesPath, 'utf8');
+  const prompt = renderPrompt(
+    { ...config, milestone: 'Phase 8', branch: 'features/profile-phase-8' },
+    {
+      number: 71,
+      title: 'Deliver the password change screen',
+      url: 'https://example/71',
+      body: 'Body.',
+    },
+    rules,
+  );
 
-    // The contract is inlined, so reading the 268-line operator document would be
-    // hundreds of lines of input tokens per issue for no requirement.
-    assert.match(prompt, /Не читай \.agents\/RALPH\.md/);
-    assert.equal(/Прочитай \.agents\/RALPH\.md/.test(prompt), false);
-    assert.match(prompt, /правила Ralph Loop, переданные ниже/);
-    assert.match(prompt, /# Ralph Loop — правила автономной сессии/);
-    assert.match(prompt, /Не изменяй `\.agents\/\*\*`/);
-    assert.match(prompt, /COMMIT_MESSAGE/);
-    assert.match(prompt, /ALREADY_FIXED/);
-    // Placeholders are still substituted.
-    assert.match(prompt, /Работай только над issue #71\./);
-    assert.equal(prompt.includes('{issue_number}'), false);
-  } finally {
-    rmSync(config.validationContainer.frozenDockerfileDirectory, {
-      recursive: true,
-      force: true,
-    });
-  }
+  // The contract is inlined, so reading the 268-line operator document would be
+  // hundreds of lines of input tokens per issue for no requirement.
+  assert.match(prompt, /Не читай \.agents\/RALPH\.md/);
+  assert.equal(/Прочитай \.agents\/RALPH\.md/.test(prompt), false);
+  assert.match(prompt, /правила Ralph Loop, переданные ниже/);
+  assert.match(prompt, /# Ralph Loop — правила автономной сессии/);
+  assert.match(prompt, /Не изменяй `\.agents\/\*\*`/);
+  assert.match(prompt, /COMMIT_MESSAGE/);
+  assert.match(prompt, /ALREADY_FIXED/);
+  // Placeholders are still substituted.
+  assert.match(prompt, /Работай только над issue #71\./);
+  assert.equal(prompt.includes('{issue_number}'), false);
 });
 
 test('the operator manual states that it is not the agent contract', () => {

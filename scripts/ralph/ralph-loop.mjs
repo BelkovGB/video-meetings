@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -66,7 +66,6 @@ import {
   ensureValidationImage,
   failedValidationScript,
   hasValidationAttestation,
-  purgeValidationAttestations,
   readValidationAttestations,
   recordValidationAttestation,
   runConfiguredScripts,
@@ -1154,84 +1153,75 @@ async function main() {
   }
 
   const config = loadConfig();
+  // Проверяем, включён ли Ralph Loop.
+  if (!config.active) {
+    console.log('Ralph Loop выключен: active=false.');
+    return;
+  }
+
+  const firstPhaseIndex = initialPhaseIndex(config);
+  const firstPhaseConfig = configForPhase(config, firstPhaseIndex);
+  const restoreConsole = initializePersistentLog(runtimeLogPath, {
+    mode,
+    branch: firstPhaseConfig.branch,
+    milestone: firstPhaseConfig.milestone,
+    phase: `${firstPhaseIndex + 1}/${config.phases.length}`,
+  });
+  let releaseLock;
   try {
-    // Проверяем, включён ли Ralph Loop.
-    if (!config.active) {
-      console.log('Ralph Loop выключен: active=false.');
-      return;
-    }
-
-    const firstPhaseIndex = initialPhaseIndex(config);
-    const firstPhaseConfig = configForPhase(config, firstPhaseIndex);
-    const restoreConsole = initializePersistentLog(runtimeLogPath, {
+    releaseLock = acquireRunLock(runtimeLockPath, {
       mode,
+      projectRoot,
       branch: firstPhaseConfig.branch,
-      milestone: firstPhaseConfig.milestone,
-      phase: `${firstPhaseIndex + 1}/${config.phases.length}`,
     });
-    let releaseLock;
-    try {
-      releaseLock = acquireRunLock(runtimeLockPath, {
-        mode,
-        projectRoot,
-        branch: firstPhaseConfig.branch,
-      });
-      setActiveStateStore(createStateStore(firstPhaseConfig, mode));
-      Object.assign(config.approvedIssueSnapshots, activeStateStore().approvedIssueSnapshots);
-      const rules = loadRalphRules(config);
-      verifyTools();
-      verifyAgentSkills();
-      if (mode !== '--check') {
-        verifyCodexAuthentication();
-      }
-      for (const phase of config.phases) {
-        run('git', ['check-ref-format', '--branch', phase.branch]);
-        run('git', ['check-ref-format', '--branch', phase.baseBranch]);
-      }
-      const repository = repositoryName();
-      const milestones = config.phases.map((phase) => verifyMilestone(repository, phase.milestone));
-      const actions = defaultActions();
-      const runPhase = async (phaseConfig) => {
-        const repositoryState = verifyRepository(phaseConfig, mode !== '--check');
-        if (mode !== '--check') {
-          reconcileStateAfterCrash(phaseConfig, activeStateStore());
-        }
-        verifyBaseHistory(phaseConfig);
-        const milestone = milestones[phaseConfig.phaseIndex];
-        return executeMode(
-          {
-            mode,
-            config: phaseConfig,
-            repository,
-            milestone,
-            repositoryState,
-            rules,
-            stateStore: activeStateStore(),
-          },
-          actions,
-        );
-      };
-
-      if (mode === '--run') {
-        return await runPhasePlan(config, activeStateStore(), runPhase);
-      }
-      return await runPhase(firstPhaseConfig);
-    } catch (error) {
-      console.error(`AFK pipeline error: ${error.message}`);
-      throw error;
-    } finally {
-      try {
-        releaseLock?.();
-      } finally {
-        restoreConsole();
-      }
+    setActiveStateStore(createStateStore(firstPhaseConfig, mode));
+    Object.assign(config.approvedIssueSnapshots, activeStateStore().approvedIssueSnapshots);
+    const rules = loadRalphRules(config);
+    verifyTools();
+    verifyAgentSkills();
+    if (mode !== '--check') {
+      verifyCodexAuthentication();
     }
+    for (const phase of config.phases) {
+      run('git', ['check-ref-format', '--branch', phase.branch]);
+      run('git', ['check-ref-format', '--branch', phase.baseBranch]);
+    }
+    const repository = repositoryName();
+    const milestones = config.phases.map((phase) => verifyMilestone(repository, phase.milestone));
+    const actions = defaultActions();
+    const runPhase = async (phaseConfig) => {
+      const repositoryState = verifyRepository(phaseConfig, mode !== '--check');
+      if (mode !== '--check') {
+        reconcileStateAfterCrash(phaseConfig, activeStateStore());
+      }
+      verifyBaseHistory(phaseConfig);
+      const milestone = milestones[phaseConfig.phaseIndex];
+      return executeMode(
+        {
+          mode,
+          config: phaseConfig,
+          repository,
+          milestone,
+          repositoryState,
+          rules,
+          stateStore: activeStateStore(),
+        },
+        actions,
+      );
+    };
+
+    if (mode === '--run') {
+      return await runPhasePlan(config, activeStateStore(), runPhase);
+    }
+    return await runPhase(firstPhaseConfig);
+  } catch (error) {
+    console.error(`AFK pipeline error: ${error.message}`);
+    throw error;
   } finally {
-    if (config.validationContainer.frozenDockerfileDirectory) {
-      rmSync(config.validationContainer.frozenDockerfileDirectory, {
-        recursive: true,
-        force: true,
-      });
+    try {
+      releaseLock?.();
+    } finally {
+      restoreConsole();
     }
   }
 }
@@ -1307,7 +1297,6 @@ export {
   failedValidationScript,
   formatFailureSummary,
   hasValidationAttestation,
-  purgeValidationAttestations,
   readValidationAttestations,
   recordValidationAttestation,
   validationAttestationKey,

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, rmSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -333,16 +333,9 @@ test('development codex arguments carry an explicit reasoning effort', () => {
 
 test('the committed configuration pins an explicit reasoning effort per role', () => {
   const config = loadConfig();
-  try {
-    assert.equal(config.developmentEffort, 'medium');
-    assert.equal(config.review.effort, 'medium');
-    assert.equal(config.milestoneReview.effort, 'high');
-  } finally {
-    rmSync(config.validationContainer.frozenDockerfileDirectory, {
-      recursive: true,
-      force: true,
-    });
-  }
+  assert.equal(config.developmentEffort, 'medium');
+  assert.equal(config.review.effort, 'medium');
+  assert.equal(config.milestoneReview.effort, 'high');
 });
 
 test('reasoning effort defaults to medium/medium/high when the config omits it', () => {
@@ -398,27 +391,20 @@ test('an unsupported reasoning effort is rejected before a run starts', () => {
 
 test('the milestone review marker records the effective model and effort', () => {
   const config = loadConfig();
-  try {
-    const marker = milestoneReviewMarker(
-      config,
-      { number: 8, title: 'Phase 8', description: '' },
-      { number: 61, headRefOid: 'a'.repeat(40) },
-    );
-    assert.match(marker, /model:gpt-5\.6-sol effort:high -->$/);
-    // A different effort is a different review, so the cached PASS must not match.
-    const lowEffortMarker = milestoneReviewMarker(
-      { ...config, milestoneReview: { ...config.milestoneReview, effort: 'low' } },
-      { number: 8, title: 'Phase 8', description: '' },
-      { number: 61, headRefOid: 'a'.repeat(40) },
-    );
-    assert.notEqual(lowEffortMarker, marker);
-    assert.equal(milestonePassReviewIsClean(`${marker}\nirrelevant body`, lowEffortMarker), false);
-  } finally {
-    rmSync(config.validationContainer.frozenDockerfileDirectory, {
-      recursive: true,
-      force: true,
-    });
-  }
+  const marker = milestoneReviewMarker(
+    config,
+    { number: 8, title: 'Phase 8', description: '' },
+    { number: 61, headRefOid: 'a'.repeat(40) },
+  );
+  assert.match(marker, /model:gpt-5\.6-sol effort:high -->$/);
+  // A different effort is a different review, so the cached PASS must not match.
+  const lowEffortMarker = milestoneReviewMarker(
+    { ...config, milestoneReview: { ...config.milestoneReview, effort: 'low' } },
+    { number: 8, title: 'Phase 8', description: '' },
+    { number: 61, headRefOid: 'a'.repeat(40) },
+  );
+  assert.notEqual(lowEffortMarker, marker);
+  assert.equal(milestonePassReviewIsClean(`${marker}\nirrelevant body`, lowEffortMarker), false);
 });
 
 const escape = String.fromCharCode(27);

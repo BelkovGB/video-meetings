@@ -3,7 +3,6 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -61,12 +60,6 @@ export function createSandboxedCodexEnvironment(source = process.env, options = 
         const error = new Error(
           'Codex auth.json не найден. Выполните `codex login`, затем повторите запуск Ralph.',
         );
-        error.code = 'RALPH_CODEX_AUTH';
-        throw error;
-      }
-      const authenticationFileStat = lstatSync(authenticationFile);
-      if (!authenticationFileStat.isFile() || authenticationFileStat.isSymbolicLink()) {
-        const error = new Error('Codex auth.json должен быть обычным файлом, а не ссылкой.');
         error.code = 'RALPH_CODEX_AUTH';
         throw error;
       }

@@ -1,14 +1,5 @@
 import { createHash } from 'node:crypto';
-import {
-  copyFileSync,
-  existsSync,
-  lstatSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -175,18 +166,6 @@ export function verifyAgentSkills(dependencies = {}) {
   return files;
 }
 
-function freezeValidationDockerfile(dockerfilePath) {
-  const snapshotDirectory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-dockerfile-'));
-  const snapshotPath = path.join(snapshotDirectory, 'Dockerfile.validation');
-  try {
-    copyFileSync(dockerfilePath, snapshotPath);
-    return { snapshotDirectory, snapshotPath };
-  } catch (error) {
-    rmSync(snapshotDirectory, { recursive: true, force: true });
-    throw error;
-  }
-}
-
 export function phasePlanId(phases) {
   return createHash('sha256')
     .update(
@@ -198,26 +177,10 @@ export function phasePlanId(phases) {
 }
 
 export function normalizePhases(config) {
-  const hasPhaseArray = Object.hasOwn(config, 'phases');
-  const hasAnyLegacyPhaseField =
-    Object.hasOwn(config, 'milestone') || Object.hasOwn(config, 'branch');
-  if (hasPhaseArray && hasAnyLegacyPhaseField) {
-    fail('Не используйте одновременно "phases" и верхнеуровневые "milestone"/"branch".');
-  }
-  const hasLegacyPhase =
-    typeof config.milestone === 'string' &&
-    config.milestone.trim() !== '' &&
-    typeof config.branch === 'string' &&
-    config.branch.trim() !== '';
-  const source =
-    config.phases ??
-    (hasLegacyPhase ? [{ milestone: config.milestone, branch: config.branch }] : null);
+  const source = config.phases ?? null;
 
   if (!Array.isArray(source) || source.length === 0) {
-    fail(
-      `Добавьте непустой массив "phases" в ${configPath} ` +
-        'или заполните совместимые поля "milestone" и "branch".',
-    );
+    fail(`Добавьте непустой массив "phases" в ${configPath}.`);
   }
 
   const phases = source.map((phase, index) => {
@@ -321,9 +284,6 @@ function readApprovedIssueSnapshots(config) {
   );
   if (!existsSync(approvedIssueSnapshotsPath)) {
     fail(`Файл одобренных snapshots issue не найден: ${approvedIssueSnapshotsPath}`);
-  }
-  if (lstatSync(approvedIssueSnapshotsPath).isSymbolicLink()) {
-    fail('Файл одобренных snapshots issue не должен быть symbolic link.');
   }
   if (trustedFileHash(approvedIssueSnapshotsPath) !== approvedIssueSnapshotsHash) {
     fail(
@@ -448,12 +408,6 @@ function prepareValidationContainer(config) {
   if (!existsSync(config.validationContainer.dockerfilePath)) {
     fail(`Dockerfile изоляции валидации не найден: ${config.validationContainer.dockerfilePath}`);
   }
-  if (lstatSync(config.validationContainer.dockerfilePath).isSymbolicLink()) {
-    fail('Dockerfile изоляции валидации не должен быть symbolic link.');
-  }
-  const frozenDockerfile = freezeValidationDockerfile(config.validationContainer.dockerfilePath);
-  config.validationContainer.frozenDockerfilePath = frozenDockerfile.snapshotPath;
-  config.validationContainer.frozenDockerfileDirectory = frozenDockerfile.snapshotDirectory;
 }
 
 function validateScriptNames(config) {
@@ -622,8 +576,8 @@ function collectTrustedControlFileHashes(config) {
   if (config.milestoneReview.enabled) trustedControlFiles.push(config.milestoneReview.schemaPath);
   return new Map(
     [...new Set(trustedControlFiles)].map((file) => {
-      if (!existsSync(file) || lstatSync(file).isSymbolicLink()) {
-        fail(`Доверенный control-plane файл недоступен или является symbolic link: ${file}`);
+      if (!existsSync(file)) {
+        fail(`Доверенный control-plane файл недоступен: ${file}`);
       }
       return [file, trustedFileHash(file)];
     }),

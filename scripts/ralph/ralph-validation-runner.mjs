@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readJsonFile, removeFileIfExists, writeJsonAtomic } from './ralph-runtime.mjs';
+import { readJsonFile, writeJsonAtomic } from './ralph-runtime.mjs';
 import { fail } from './ralph-scope.mjs';
 import { credentialFreeEnvironment, run } from './ralph-process-runner.mjs';
 import { agentInstructionFiles, trustedFileHash } from './ralph-config.mjs';
@@ -23,9 +23,8 @@ import { stripAnsi } from './ralph-failure-summary.mjs';
 /**
  * Изолированный прогон npm scripts в контейнере и attestation результата.
  *
- * Проверка неизменности control plane живёт здесь же: она вызывается перед
- * каждым прогоном и при обнаружении подделки должна стереть ранее выданные
- * attestation, то есть эти две части нельзя разделить без обратного импорта.
+ * Проверка неизменности control plane живёт здесь же, потому что вызывается
+ * перед каждым прогоном.
  */
 
 // Пути выводятся здесь заново, как в `ralph-process-runner.mjs`.
@@ -43,15 +42,12 @@ const preparedValidationImages = new Set();
 // Проверка неизменности доверенного control plane
 // -----------------------------------------------------------------------------
 
-export function assertTrustedControlFilesUnchanged(config, options = {}) {
-  const attestationsPath = options.attestationsPath ?? runtimeAttestationsPath;
-  // Доверенный control plane входит в ключ attestation косвенно, через snapshot.
-  // Явная очистка нужна на случай, когда подделка обнаружена до нового хеша:
-  // ни одна ранее выданная запись не должна пережить обнаруженный tamper.
-  const rejectTamper = (message) => {
-    purgeValidationAttestations(attestationsPath);
-    fail(message);
-  };
+// Очистка attestation при обнаруженной подделке не нужна: все доверенные файлы
+// отслеживаются Git и потому входят в snapshot, а значит и в workspaceHash —
+// ключ attestation. Подделанный файл даёт другой ключ и не совпадает ни с одной
+// выданной записью; откат правки возвращает исходный ключ, и переиспользовать
+// его PASS правильно, потому что дерево действительно проходило проверки.
+export function assertTrustedControlFilesUnchanged(config) {
   const trustedAgentInstructionFiles = new Set(
     [...(config.trustedControlFileHashes?.keys() ?? [])].filter(
       (file) => path.basename(file) === 'AGENTS.md',
@@ -62,14 +58,14 @@ export function assertTrustedControlFilesUnchanged(config, options = {}) {
     trustedAgentInstructionFiles.size !== currentAgentInstructionFiles.size ||
     [...currentAgentInstructionFiles].some((file) => !trustedAgentInstructionFiles.has(file))
   ) {
-    rejectTamper(
+    fail(
       'AFK-сессия изменила набор доверенных файлов AGENTS.md. ' +
         'Изменение отклонено до валидации, commit и push.',
     );
   }
   for (const [file, expectedHash] of config.trustedControlFileHashes ?? []) {
     if (!existsSync(file) || trustedFileHash(file) !== expectedHash) {
-      rejectTamper(
+      fail(
         `AFK-сессия изменила доверенный файл ${file}. ` +
           'Изменение отклонено до валидации, commit и push.',
       );
@@ -198,8 +194,7 @@ function validationInputHash(snapshotPath, hash = createHash('sha256'), relative
 
 export function validationImageForSnapshot(config, snapshotPath) {
   const inputsHash = validationInputHash(snapshotPath);
-  const dockerfilePath =
-    config.validationContainer.frozenDockerfilePath ?? config.validationContainer.dockerfilePath;
+  const dockerfilePath = config.validationContainer.dockerfilePath;
   if (dockerfilePath) {
     inputsHash.update('Dockerfile.validation\0').update(readFileSync(dockerfilePath));
   }
@@ -210,8 +205,7 @@ export function validationImageForSnapshot(config, snapshotPath) {
 
 export function ensureValidationImage(config, snapshotPath, dependencies = {}) {
   const execute = dependencies.run ?? run;
-  const dockerfilePath =
-    config.validationContainer.frozenDockerfilePath ?? config.validationContainer.dockerfilePath;
+  const dockerfilePath = config.validationContainer.dockerfilePath;
   const image = validationImageForSnapshot(config, snapshotPath);
   if (preparedValidationImages.has(image)) return image;
   const existingImage = execute('docker', ['image', 'inspect', image], {
@@ -286,10 +280,6 @@ export function recordValidationAttestation(
   writeJsonAtomic(attestationsPath, { version: VALIDATION_CONTRACT_VERSION, entries });
 }
 
-export function purgeValidationAttestations(attestationsPath = runtimeAttestationsPath) {
-  removeFileIfExists(attestationsPath);
-}
-
 function validationImageDigest(image, execute) {
   const inspected = execute('docker', ['image', 'inspect', '--format', '{{.Id}}', image], {
     allowFailure: true,
@@ -316,9 +306,7 @@ export function runConfiguredScripts(config, scripts, label, options = {}) {
   const includePreflight = options.includePreflight ?? true;
   const execute = options.run ?? run;
   if (scripts.length === 0) return;
-  assertTrustedControlFilesUnchanged(config, {
-    attestationsPath: options.attestationsPath ?? runtimeAttestationsPath,
-  });
+  assertTrustedControlFilesUnchanged(config);
   // Один контейнер на весь набор. Изоляция от хоста сохраняется, а workspace,
   // node_modules, PostgreSQL и migrations готовятся один раз вместо одного раза
   // на каждый script. Entrypoint выполняет scripts последовательно и

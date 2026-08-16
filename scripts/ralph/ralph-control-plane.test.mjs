@@ -286,15 +286,6 @@ test('Ralph configuration pins approved AFK inputs before starting an agent sess
     /[\\/]scripts[\\/]ralph[\\/]Dockerfile\.validation$/,
   );
   assert.equal(existsSync(config.validationContainer.dockerfilePath), true);
-  assert.match(config.validationContainer.frozenDockerfilePath, /ralph-validation-dockerfile-/);
-  assert.notEqual(
-    config.validationContainer.frozenDockerfilePath,
-    config.validationContainer.dockerfilePath,
-  );
-  assert.equal(
-    readFileSync(config.validationContainer.frozenDockerfilePath, 'utf8'),
-    readFileSync(config.validationContainer.dockerfilePath, 'utf8'),
-  );
   for (const relativePath of [
     '.agents/ralph.config.json',
     '.agents/ralph-rules.md',

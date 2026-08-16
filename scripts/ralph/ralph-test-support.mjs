@@ -106,14 +106,10 @@ export function withPatchedRalphConfig(patch, assertConfig) {
   const original = readFileSync(ralphConfigPath, 'utf8');
   const candidate = { ...JSON.parse(original), ...patch };
   writeFileSync(ralphConfigPath, `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
-  let config = null;
   try {
-    config = loadConfig();
-    assertConfig(config);
+    assertConfig(loadConfig());
   } finally {
     writeFileSync(ralphConfigPath, original, 'utf8');
-    const frozen = config?.validationContainer?.frozenDockerfileDirectory;
-    if (frozen) rmSync(frozen, { recursive: true, force: true });
   }
 }
 
@@ -121,9 +117,7 @@ export let cachedTrustedControlFileHashes = null;
 
 export function trustedControlFileHashes() {
   if (!cachedTrustedControlFileHashes) {
-    const loaded = loadConfig();
-    rmSync(loaded.validationContainer.frozenDockerfileDirectory, { recursive: true, force: true });
-    cachedTrustedControlFileHashes = loaded.trustedControlFileHashes;
+    cachedTrustedControlFileHashes = loadConfig().trustedControlFileHashes;
   }
   return cachedTrustedControlFileHashes;
 }

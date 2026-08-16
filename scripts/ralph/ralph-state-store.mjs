@@ -39,20 +39,6 @@ export function createStateStore(config, selectedMode, statePath = runtimeStateP
       { milestone: config.milestone, branch: config.branch, baseBranch: config.baseBranch },
     ]);
   if (state) {
-    // Состояние version=1 создано однофазным Ralph. Если его идентичность
-    // совпадает с текущей фазой, безопасно дополняем его индексом плана.
-    if (
-      state.version === 1 &&
-      state.branch === config.branch &&
-      state.baseBranch === config.baseBranch &&
-      state.milestone === config.milestone
-    ) {
-      state.version = 2;
-      state.phaseIndex = configuredPhaseIndex;
-      state.phaseCount = configuredPhaseCount;
-      state.phasePlanId = configuredPlanId;
-      if (selectedMode !== '--check') writeJsonAtomic(statePath, state);
-    }
     const identityMismatch =
       state.version !== 2 ||
       state.phaseIndex !== configuredPhaseIndex ||
