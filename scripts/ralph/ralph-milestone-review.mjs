@@ -3,11 +3,8 @@ import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 
 import { fail, isRalphInfrastructurePath, scopeMilestoneReviewToProduct } from './ralph-scope.mjs';
 import { run } from './ralph-process-runner.mjs';
-import {
-  reasoningEffortArguments,
-  runCodexWithTurnLimit,
-  runReviewWithRetries,
-} from './ralph-codex-session.mjs';
+import { runReviewWithRetries } from './ralph-agent-session.mjs';
+import { runReviewSession } from './ralph-agent-backends.mjs';
 import { parseJson } from './ralph-config.mjs';
 import {
   githubPagedArray,
@@ -173,28 +170,12 @@ export async function runMilestoneReview(config, repository, milestone, pullRequ
           unlinkSync(config.milestoneReview.outputPath);
         }
 
-        await runCodexWithTurnLimit(
-          [
-            'exec',
-            '--sandbox',
-            'read-only',
-            '--json',
-            '--model',
-            config.milestoneReview.model,
-            ...reasoningEffortArguments(config.milestoneReview.effort),
-            '--output-schema',
-            config.milestoneReview.schemaPath,
-            '--output-last-message',
-            config.milestoneReview.outputPath,
-            '-',
-          ],
-          {
-            input: reviewPrompt,
-            maxTurns: config.milestoneReview.maxTurns,
-            timeoutMs: config.runtime.codexTimeoutMs,
-            label: `Milestone review PR #${pullRequest.number}`,
-          },
-        );
+        await runReviewSession(config, config.milestoneReview, {
+          input: reviewPrompt,
+          maxTurns: config.milestoneReview.maxTurns,
+          timeoutMs: config.runtime.agentTimeoutMs,
+          label: `Milestone review PR #${pullRequest.number}`,
+        });
         if (!existsSync(config.milestoneReview.outputPath)) {
           fail(`Milestone review PR #${pullRequest.number} не создал файл результата.`);
         }

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { fail } from './ralph-scope.mjs';
 import { applyRuntimeSettings, defaultRuntimeSettings } from './ralph-process-runner.mjs';
-import { reasoningEfforts } from './ralph-codex-session.mjs';
+import { agentClis, reasoningEffortsFor } from './ralph-agent-backends.mjs';
 
 /**
  * Чтение `ralph.config.json`, его проверка и сбор доверенного control plane.
@@ -248,6 +248,7 @@ function applyLoopDefaults(config) {
   } = config.phases[0]);
   config.draftPullRequest ??= true;
   config.stopAfterFirstIssue ??= false;
+  config.agentCli ??= 'codex';
   config.maxIterations ??= 20;
   config.maxTurns ??= 50;
   config.maxTestFixAttempts ??= 5;
@@ -322,6 +323,9 @@ function validateLoopFields(config) {
   }
   if (typeof config.stopAfterFirstIssue !== 'boolean') {
     fail('Поле "stopAfterFirstIssue" должно быть true или false.');
+  }
+  if (!agentClis.includes(config.agentCli)) {
+    fail(`Поле "agentCli" должно быть одним из: ${agentClis.join(', ')}.`);
   }
   if (typeof config.autoApproveConfiguredIssues !== 'boolean') {
     fail('Поле "autoApproveConfiguredIssues" должно быть true или false.');
@@ -419,7 +423,7 @@ function validateRuntimeSettings(config) {
     'commandTimeoutMs',
     'validationTimeoutMs',
     'validationRunTimeoutMs',
-    'codexTimeoutMs',
+    'agentTimeoutMs',
     'networkRetryBaseDelayMs',
   ]) {
     if (!Number.isInteger(config.runtime[field]) || config.runtime[field] < 1) {
@@ -472,8 +476,11 @@ function validateAgentRoles(config) {
     ['review.effort', config.review.effort],
     ['milestoneReview.effort', config.milestoneReview.effort],
   ]) {
-    if (typeof value !== 'string' || !reasoningEfforts.includes(value)) {
-      fail(`Поле "${field}" должно быть одним из: ${reasoningEfforts.join(', ')}.`);
+    const efforts = reasoningEffortsFor(config.agentCli);
+    if (typeof value !== 'string' || !efforts.includes(value)) {
+      fail(
+        `Поле "${field}" при agentCli=${config.agentCli} должно быть одним из: ${efforts.join(', ')}.`,
+      );
     }
   }
   if (
@@ -538,6 +545,9 @@ function collectTrustedControlFileHashes(config) {
     // Модули перечислены поимённо, а не сканированием каталога: сканирование
     // приняло бы в доверенный набор любой подложенный файл. Тест требует, чтобы
     // каждый .mjs из scripts/ralph был в этом списке.
+    path.join(scriptDirectory, 'ralph-agent-backends.mjs'),
+    path.join(scriptDirectory, 'ralph-agent-session.mjs'),
+    path.join(scriptDirectory, 'ralph-claude-session.mjs'),
     path.join(scriptDirectory, 'ralph-codex-session.mjs'),
     path.join(scriptDirectory, 'ralph-command-runner.mjs'),
     path.join(scriptDirectory, 'ralph-config.mjs'),

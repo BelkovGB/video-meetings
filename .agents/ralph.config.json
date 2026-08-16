@@ -1,5 +1,6 @@
 {
   "active": true,
+  "agentCli": "codex",
   "baseBranch": "master",
   "draftPullRequest": true,
   "stopAfterFirstIssue": false,

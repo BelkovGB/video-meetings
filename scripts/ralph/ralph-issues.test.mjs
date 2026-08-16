@@ -356,7 +356,10 @@ test('reasoning effort defaults to medium/medium/high when the config omits it',
 
 test('an unsupported reasoning effort is rejected before a run starts', () => {
   for (const [patch, expected] of [
-    [{ developmentEffort: 'extreme' }, /Поле "developmentEffort" должно быть одним из/],
+    [
+      { developmentEffort: 'extreme' },
+      /Поле "developmentEffort" при agentCli=codex должно быть одним из/,
+    ],
     [
       { review: { enabled: false, model: 'gpt-5.6-terra', effort: 'nope' } },
       /Поле "review\.effort"/,
@@ -530,16 +533,16 @@ test('jest and node:test failures are recognized alongside Playwright output', (
 test('a failure without command output degrades to the error message', () => {
   const summary = summarizeCommandFailure(
     Object.assign(new Error('Изолированный Codex не авторизован.'), {
-      code: 'RALPH_CODEX_AUTH',
+      code: 'RALPH_AGENT_AUTH',
     }),
   );
 
   assert.equal(summary.command, null);
   assert.equal(summary.exitCode, null);
-  assert.equal(summary.code, 'RALPH_CODEX_AUTH');
+  assert.equal(summary.code, 'RALPH_AGENT_AUTH');
   assert.equal(summary.error, 'Изолированный Codex не авторизован.');
   assert.deepEqual(summary.failedTests, []);
-  assert.match(formatFailureSummary(summary), /Код ошибки: RALPH_CODEX_AUTH/);
+  assert.match(formatFailureSummary(summary), /Код ошибки: RALPH_AGENT_AUTH/);
 });
 
 test('the recovery prompt carries the summary and tells the agent to rerun only what failed', () => {

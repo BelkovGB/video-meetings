@@ -107,7 +107,7 @@ test(
           authenticationFile: null,
         }),
         (error) => {
-          assert.equal(error.code, 'RALPH_CODEX_TIMEOUT');
+          assert.equal(error.code, 'RALPH_AGENT_TIMEOUT');
           assert.equal(error.timeoutMs, timeoutMs);
           assert.equal(error.turns, 0);
           assert.match(error.message, /wall-clock timeout 100 ms/);
@@ -136,7 +136,7 @@ process.exit(1);
           authenticationFile: null,
         }),
         (error) => {
-          assert.equal(error.code, 'RALPH_CODEX_AUTH');
+          assert.equal(error.code, 'RALPH_AGENT_AUTH');
           assert.match(error.message, /401 Unauthorized/);
           return true;
         },
@@ -546,7 +546,7 @@ test('continuous loop stops immediately and refunds an iteration on Codex authen
   const stateStore = persistentState();
   let codexRuns = 0;
   const authenticationError = new Error('401 Unauthorized');
-  authenticationError.code = 'RALPH_CODEX_AUTH';
+  authenticationError.code = 'RALPH_AGENT_AUTH';
 
   await assert.rejects(
     runContinuousLoop(
@@ -559,7 +559,7 @@ test('continuous loop stops immediately and refunds an iteration on Codex authen
         },
       }),
     ),
-    (error) => error.code === 'RALPH_CODEX_AUTH',
+    (error) => error.code === 'RALPH_AGENT_AUTH',
   );
 
   assert.equal(codexRuns, 1);

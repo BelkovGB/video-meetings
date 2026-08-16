@@ -60,6 +60,52 @@ export async function withFakeCodex(source, operation) {
   }
 }
 
+export function fakeClaudeScript(source) {
+  const directory = mkdtempSync(path.join(executableTempDirectory, '.ralph-fake-claude-'));
+  const scriptPath = path.join(directory, 'fake-claude.mjs');
+  writeFileSync(scriptPath, source, 'utf8');
+
+  if (process.platform === 'win32') {
+    // commandSpec направляет claude через cmd.exe /c claude.cmd, как и codex:
+    // npm-установка Claude Code кладёт именно .cmd.
+    writeFileSync(
+      path.join(directory, 'claude.cmd'),
+      '@echo off\r\nnode "%~dp0fake-claude.mjs" %*\r\n',
+      'utf8',
+    );
+  } else {
+    const executablePath = path.join(directory, 'claude');
+    writeFileSync(executablePath, `#!/bin/sh\nexec node "${scriptPath}" "$@"\n`, 'utf8');
+    chmodSync(executablePath, 0o755);
+  }
+
+  return directory;
+}
+
+export async function withFakeClaude(source, operation) {
+  const directory = fakeClaudeScript(source);
+  const originalPath = process.env.PATH;
+  const originalApiKey = process.env.ANTHROPIC_API_KEY;
+  process.env.PATH = `${directory}${path.delimiter}${originalPath ?? ''}`;
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+
+  try {
+    return await operation();
+  } finally {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+    if (originalApiKey === undefined) {
+      delete process.env.ANTHROPIC_API_KEY;
+    } else {
+      process.env.ANTHROPIC_API_KEY = originalApiKey;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 export function context(overrides = {}) {
   const { config: configOverrides, ...rest } = overrides;
   return {

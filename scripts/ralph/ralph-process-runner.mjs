@@ -25,7 +25,7 @@ export const defaultRuntimeSettings = Object.freeze({
   commandTimeoutMs: 300_000,
   validationTimeoutMs: 1_800_000,
   validationRunTimeoutMs: 3_600_000,
-  codexTimeoutMs: 5_400_000,
+  agentTimeoutMs: 5_400_000,
   networkRetryAttempts: 3,
   networkRetryBaseDelayMs: 2_000,
   maxPages: 20,
@@ -52,7 +52,7 @@ export function executable(name) {
 
 export function commandSpec(name, args) {
   const useWindowsCommandShim =
-    process.platform === 'win32' && ['codex', 'npm', 'npx'].includes(name);
+    process.platform === 'win32' && ['codex', 'claude', 'npm', 'npx'].includes(name);
   const command = useWindowsCommandShim ? (process.env.ComSpec ?? 'cmd.exe') : executable(name);
   const commandArgs = useWindowsCommandShim ? ['/d', '/s', '/c', `${name}.cmd`, ...args] : args;
 
@@ -86,6 +86,7 @@ export const inheritableEnvironmentVariables = [
   'XDG_CONFIG_HOME',
   'XDG_CACHE_HOME',
   'CODEX_HOME',
+  'CLAUDE_CONFIG_DIR',
 ];
 
 export const credentialFreeEnvironmentVariables = inheritableEnvironmentVariables.filter(
@@ -98,6 +99,7 @@ export const credentialFreeEnvironmentVariables = inheritableEnvironmentVariable
       'XDG_CONFIG_HOME',
       'XDG_CACHE_HOME',
       'CODEX_HOME',
+      'CLAUDE_CONFIG_DIR',
     ].includes(name),
 );
 

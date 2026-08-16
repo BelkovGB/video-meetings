@@ -26,11 +26,18 @@ import {
   agentReportedWriteAccessFailure,
   createSandboxedCodexEnvironment,
   developmentCodexArguments,
-  reasoningEffortArguments,
-  runReviewWithRetries,
   runCodexWithTurnLimit,
   verifyCodexAuthentication,
 } from './ralph-codex-session.mjs';
+
+import { runReviewWithRetries } from './ralph-agent-session.mjs';
+
+import {
+  agentBinary,
+  runDevelopmentSession,
+  runReviewSession,
+  verifyAgentAuthentication,
+} from './ralph-agent-backends.mjs';
 
 import {
   agentSkillFiles,
@@ -148,10 +155,10 @@ const runtimeLogPath = path.join(runtimeDirectory, 'run.log');
 // Проверка инструментов, Git-репозитория и рабочей ветки
 // -----------------------------------------------------------------------------
 
-function verifyTools() {
+function verifyTools(config) {
   run('git', ['--version']);
   run('gh', ['--version']);
-  run('codex', ['--version']);
+  run(agentBinary(config), ['--version']);
   run('docker', ['version']);
   runNetwork('gh', ['auth', 'status']);
 }
@@ -177,30 +184,14 @@ async function runIndependentReview(config, repository, issue, commit) {
 
   const reviewPrompt = buildIndependentReviewPrompt(issue, commit);
 
-  console.log(`\n=== Independent Codex review for issue #${issue.number} ===\n`);
+  console.log(`\n=== Independent review for issue #${issue.number} ===\n`);
 
-  await runCodexWithTurnLimit(
-    [
-      'exec',
-      '--sandbox',
-      'read-only',
-      '--json',
-      '--model',
-      config.review.model,
-      ...reasoningEffortArguments(config.review.effort),
-      '--output-schema',
-      config.review.schemaPath,
-      '--output-last-message',
-      config.review.outputPath,
-      '-',
-    ],
-    {
-      input: reviewPrompt,
-      maxTurns: config.maxTurns,
-      timeoutMs: config.runtime.codexTimeoutMs,
-      label: `Review issue #${issue.number}`,
-    },
-  );
+  await runReviewSession(config, config.review, {
+    input: reviewPrompt,
+    maxTurns: config.maxTurns,
+    timeoutMs: config.runtime.agentTimeoutMs,
+    label: `Review issue #${issue.number}`,
+  });
 
   if (!existsSync(config.review.outputPath)) {
     fail(`Review issue #${issue.number} не создал файл результата.`);
@@ -534,21 +525,21 @@ async function runCodex(config, repository, issue, rules) {
   let codexResult;
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
   try {
-    codexResult = await runCodexWithTurnLimit(developmentCodexArguments(config), {
+    codexResult = await runDevelopmentSession(config, {
       input: renderPrompt(config, issue, rules) + (continuation ? recoveryPrompt(storedIssue) : ''),
       maxTurns: config.maxTurns,
-      timeoutMs: config.runtime.codexTimeoutMs,
-      label: `Codex issue #${issue.number}`,
+      timeoutMs: config.runtime.agentTimeoutMs,
+      label: `${config.agentCli} issue #${issue.number}`,
     });
   } catch (error) {
     activeStateStore()?.updateIssue({
       phase: 'working-tree',
       ...recordedFailure(error),
     });
-    if (error.code === 'RALPH_CODEX_AUTH') {
+    if (error.code === 'RALPH_AGENT_AUTH') {
       throw error;
     }
-    if (['RALPH_MAX_TURNS', 'RALPH_CODEX_TIMEOUT'].includes(error.code)) {
+    if (['RALPH_MAX_TURNS', 'RALPH_AGENT_TIMEOUT'].includes(error.code)) {
       reopenIssueWithComment(
         repository,
         issue,
@@ -1000,7 +991,7 @@ async function runContinuousLoop(context, actions) {
     } catch (error) {
       if (
         needsDevelopmentIteration &&
-        ['RALPH_CODEX_AUTH', 'RALPH_AGENT_WRITE_ACCESS', 'RALPH_UNTRUSTED_ISSUE'].includes(
+        ['RALPH_AGENT_AUTH', 'RALPH_AGENT_WRITE_ACCESS', 'RALPH_UNTRUSTED_ISSUE'].includes(
           error.code,
         )
       ) {
@@ -1140,10 +1131,10 @@ async function main() {
     setActiveStateStore(createStateStore(firstPhaseConfig, mode));
     Object.assign(config.approvedIssueSnapshots, activeStateStore().approvedIssueSnapshots);
     const rules = loadRalphRules(config);
-    verifyTools();
+    verifyTools(config);
     verifyAgentSkills();
     if (mode !== '--check') {
-      verifyCodexAuthentication();
+      verifyAgentAuthentication(config);
     }
     for (const phase of config.phases) {
       run('git', ['check-ref-format', '--branch', phase.branch]);
