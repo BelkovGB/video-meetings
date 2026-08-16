@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { runAgentOnIssue } from './ralph-loop.mjs';
 import { agentInstructionFiles, loadConfig } from './ralph-config.mjs';
@@ -596,4 +597,25 @@ test('a file planted in .claude enters the trusted instruction set', () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('the ralph suite stays serialized, because its own tests rewrite trusted files', () => {
+  // Требование сформулировано в комментарии наверху этого файла, но до сих пор
+  // его ничто не удерживало: флаг живёт единственной строкой в package.json, а
+  // сам package.json намеренно не входит в набор доверенных хешей — его
+  // перезаписывает ralph-validation.test.mjs, проверяя защиту от postinstall.
+  //
+  // Цена потери флага известна: прогон 2026-08-16 упал на «изменила доверенный
+  // файл /workspace/AGENTS.md», потому что девять файлов набора шли
+  // параллельно и чужой loadConfig() хешировал AGENTS.md ровно в момент
+  // подмены. Локально планировщик разводил их почти всегда, в контейнере — нет.
+  const manifest = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8'),
+  );
+  const script = manifest.scripts['test:ralph'];
+
+  assert.match(script, /--test-concurrency=1/);
+  // Файлы перечислены явно, поэтому новый тестовый файл обязан попасть в набор
+  // осознанно, а не потеряться из-за подстановки каталога.
+  assert.ok(script.includes('scripts/ralph/ralph-control-plane.test.mjs'));
 });
