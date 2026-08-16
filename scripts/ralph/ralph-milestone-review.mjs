@@ -262,12 +262,7 @@ ${finding.body}
 
 ## Definition of done
 
-- Fix the root cause without weakening existing behavior or tests.
-- Add or update regression coverage for the failure path.
-- Run the relevant checks from AGENTS.md and the Ralph configuration.
-- Keep the change focused on this finding; do not create a pull request.
-
-The existing draft PR will be updated and reviewed again after all review findings are resolved.`;
+- Fix the root cause and add regression coverage for the failure path, without weakening existing tests.`;
 }
 
 function createReviewFindingIssue(config, repository, milestone, pullRequest, finding) {

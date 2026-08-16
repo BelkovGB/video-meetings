@@ -51,7 +51,10 @@ export function uniqueFailedTests(text, limit = 10) {
         .replace(/[\s\-─━]+$/, '')
         .replace(/\s+\(\d+(?:\.\d+)?ms\)$/, '')
         .trim();
-      if (title === '' || /^console$/i.test(title)) break;
+      // `failing tests:` — заголовок сводки node:test, а не имя теста. Он
+      // попадал в список упавших и приводил к указанию «перезапусти» на строке,
+      // которой не существует.
+      if (title === '' || /^(?:console|failing tests:)$/i.test(title)) break;
       if (!seen.has(title)) {
         seen.add(title);
         all.push(title);

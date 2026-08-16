@@ -171,7 +171,11 @@ test('milestone review stays within milestone scope and trusts completed validat
   assert.match(prompt, /diff against master as evidence, not as the definition of scope/);
   assert.match(prompt, /Do not rerun npm, npx, builds, linters, type checks, tests/);
   assert.match(prompt, /every configured preflight and validation script successfully/);
-  assert.match(prompt, /Never report findings for \.agents\/\*\*, scripts\/ralph\/\*\*/);
+  // Запрет читать, а не только сообщать: control plane занимает бо́льшую часть
+  // диффа ветки, и открытый файл оплачивается независимо от того, что ревьюер
+  // потом отбросит. AGENTS.md при этом читать нужно — там конвенции продукта.
+  assert.match(prompt, /Do not open \.agents\/\*\* or scripts\/ralph\/\*\*, and never report/);
+  assert.match(prompt, /Do read AGENTS\.md/);
   assert.match(prompt, /Discover documentation paths/i);
   assert.match(prompt, /rg --files docs/);
   assert.match(prompt, /guess conventional paths such as `docs\/README\.md`/i);

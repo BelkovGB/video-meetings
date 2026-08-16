@@ -5,9 +5,11 @@
 - Never expose server secrets; only `NEXT_PUBLIC_` variables may reach the client.
 - For user-visible changes, verify affected interactions, keyboard accessibility,
   and the configured desktop, mobile, and mobile-landscape Playwright projects.
-- Use the Playwright tooling available in the execution environment. Interactive
-  agents may use Playwright MCP; Ralph sessions treat orchestrator validation as
-  authoritative.
+- A Ralph session runs with a substituted `HOME` and `LOCALAPPDATA`, so it
+  usually has no browsers: the launch fails with `Executable doesn't exist at
+...\ms-playwright\...`. On that error do not reinstall browsers and do not
+  retry — check the change by reading the code and by types, and let the
+  orchestrator run E2E. Interactive agents may use Playwright MCP.
 - Run focused checks during implementation. Do not reinstall browsers or rerun
   the complete validation suite from an isolated Ralph agent session.
 - Never create or update Playwright visual snapshots. A screenshot is only valid

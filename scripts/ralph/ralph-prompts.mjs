@@ -150,7 +150,7 @@ ${milestoneDescription}
 
 The branch and pull request may be cumulative and contain work from other milestones. Scope the review exclusively to the requirements in the milestone title and description, plus integrations strictly required for those requirements. Use the branch diff against ${config.baseBranch} as evidence, not as the definition of scope. Do not report defects in unrelated features, infrastructure, or files merely because they are present or changed in the pull request.
 
-Ralph's control plane is maintained manually outside the product loop. Never report findings for .agents/**, scripts/ralph/**, AGENTS.md, or nested **/AGENTS.md files. Those paths must never become milestone issues and must never be modified by an AFK implementation session.
+Ralph's control plane is maintained manually outside the product loop. Do not open .agents/** or scripts/ralph/**, and never report findings for those paths, for AGENTS.md, or for nested **/AGENTS.md files: they must never become milestone issues and must never be modified by an AFK implementation session. Do read AGENTS.md and the nested ones — they carry the conventions the product code is judged against.
 
 ${reviewShellGuidance(config)}
 
