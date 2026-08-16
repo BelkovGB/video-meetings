@@ -3,40 +3,17 @@
   "agentCli": "codex",
   "baseBranch": "master",
   "draftPullRequest": true,
-  "stopAfterFirstIssue": false,
-
+  "stopAfterFirstIssue": true,
   "phases": [
-  {
-    "milestone": "Phase 2: Profile Screen and Display Name",
-    "branch": "features/profile-phase-2",
-    "baseBranch": "master"
-  },
-  {
-    "milestone": "Phase 3: Avatar Management API",
-    "branch": "features/profile-phase-3",
-    "baseBranch": "features/profile-phase-2"
-  },
-  {
-    "milestone": "Phase 4: Avatar Controls and Account Identity",
-    "branch": "features/profile-phase-4",
-    "baseBranch": "features/profile-phase-3"
-  },
-  {
-    "milestone": "Phase 7: Password Change and Current-Session Revocation API",
-    "branch": "features/profile-phase-7",
-    "baseBranch": "features/profile-phase-4"
-  },
-  {
-    "milestone": "Phase 8: Password Change Screen",
-    "branch": "features/profile-phase-8",
-    "baseBranch": "features/profile-phase-7"
-  }
-],
-
+    {
+      "milestone": "Phase 8: Password Change Screen",
+      "branch": "features/profile-phase-8",
+      "baseBranch": "master"
+    }
+  ],
   "maxIterations": 20,
   "maxTurns": 100,
   "maxTestFixAttempts": 5,
-
   "runtime": {
     "commandTimeoutMs": 300000,
     "validationTimeoutMs": 1800000,
@@ -47,15 +24,18 @@
     "maxPages": 20,
     "reviewRetryAttempts": 3
   },
-
   "developmentModel": "gpt-5.6-terra",
   "developmentEffort": "medium",
   "autoApproveConfiguredIssues": true,
-  "trustedIssueAuthors": ["codex-ai-Goo"],
+  "trustedIssueAuthors": [
+    "codex-ai-Goo"
+  ],
   "rulesFile": ".agents/ralph-rules.md",
   "prompt": "Возьми issue #{issue_number} «{issue_title}» из milestone «{milestone}» и реализуй её. Твой полный контракт — правила Ralph Loop, переданные ниже в этом же prompt, и AGENTS.md. Не читай .agents/RALPH.md: это операторская документация, она не нужна для реализации.",
-
-  "preflightScripts": ["db:ready", "db:migrate"],
+  "preflightScripts": [
+    "db:ready",
+    "db:migrate"
+  ],
   "validationScripts": [
     "format:check",
     "lint",
@@ -64,7 +44,6 @@
     "test:e2e:api",
     "test:e2e:web"
   ],
-
   "review": {
     "enabled": true,
     "model": "gpt-5.6-terra",
@@ -72,7 +51,6 @@
     "schemaFile": ".agents/review.schema.json",
     "outputFile": ".agents/last-review.json"
   },
-
   "milestoneReview": {
     "enabled": true,
     "model": "gpt-5.6-sol",
