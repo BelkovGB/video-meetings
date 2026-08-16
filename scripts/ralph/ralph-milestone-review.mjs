@@ -1,13 +1,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 
-import {
-  fail,
-  isRalphInfrastructurePath,
-  ralphInfrastructureLabel,
-  scopeMilestoneReviewToProduct,
-} from './ralph-scope.mjs';
-import { run, runtimeSettings } from './ralph-process-runner.mjs';
+import { fail, isRalphInfrastructurePath, scopeMilestoneReviewToProduct } from './ralph-scope.mjs';
+import { run } from './ralph-process-runner.mjs';
 import {
   reasoningEffortArguments,
   runCodexWithTurnLimit,
@@ -20,7 +15,6 @@ import {
   patchIssue,
   postIssueCommentOnce,
   postPullRequestReview,
-  reopenIssueWithComment,
 } from './ralph-github-client.mjs';
 import { normalizeReviewResult } from './ralph-issue-contract.mjs';
 import { buildMilestoneReviewPrompt } from './ralph-prompts.mjs';

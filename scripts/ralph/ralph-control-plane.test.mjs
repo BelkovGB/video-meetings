@@ -3,7 +3,6 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -23,10 +22,9 @@ import {
   issueContentHash,
   issueCompletionState,
   loadConfig,
-  run,
   runCodex,
 } from './ralph-loop.mjs';
-import { trustedControlFileHashes, withFakeCodex } from './ralph-test-support.mjs';
+import { withFakeCodex } from './ralph-test-support.mjs';
 
 test('orchestrated commits bypass host hooks after canonical validation', () => {
   let hooksDirectory;

@@ -17,7 +17,7 @@ import {
   validationContainerRunArgs,
   verifyCodexAuthentication,
 } from './ralph-loop.mjs';
-import { actions, withFakeCodex } from './ralph-test-support.mjs';
+import { withFakeCodex } from './ralph-test-support.mjs';
 
 test('runCodex rejects freshly fetched mutable content before a fake Codex executable starts', async () => {
   const approvedIssue = {

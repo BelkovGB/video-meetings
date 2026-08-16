@@ -131,7 +131,7 @@ export function verifyRepository(config, requireClean) {
   if (currentBranch !== config.branch) {
     if (!requireClean) {
       fail(
-        `Текущая ветка \"${currentBranch}\", а в конфиге указана \"${config.branch}\". ` +
+        `Текущая ветка "${currentBranch}", а в конфиге указана "${config.branch}". ` +
           'Режим --check не переключает ветки.',
       );
     }
@@ -167,7 +167,7 @@ export function verifyRepository(config, requireClean) {
 
     currentBranch = run('git', ['branch', '--show-current']).stdout;
     if (currentBranch !== config.branch) {
-      fail(`Не удалось перейти на ветку \"${config.branch}\".`);
+      fail(`Не удалось перейти на ветку "${config.branch}".`);
     }
   }
 

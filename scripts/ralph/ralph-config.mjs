@@ -92,7 +92,9 @@ export function parseSkillFrontmatter(content) {
   const errors = [];
   const fields = new Map();
   const lines = String(content ?? '')
-    .replace(/^﻿/, '')
+    // BOM записан escape-последовательностью: литеральный символ невидим в
+    // редакторе и в diff, и его легко потерять при правке регулярного выражения.
+    .replace(/^\uFEFF/, '')
     .split(/\r?\n/);
 
   if (lines[0]?.trim() !== '---') {
@@ -269,7 +271,7 @@ export function configForPhase(config, phaseIndex) {
 function requirePromptTemplate(config) {
   for (const field of ['prompt']) {
     if (typeof config[field] !== 'string' || config[field].trim() === '') {
-      fail(`Заполните строковое поле \"${field}\" в ${configPath}.`);
+      fail(`Заполните строковое поле "${field}" в ${configPath}.`);
     }
   }
 }

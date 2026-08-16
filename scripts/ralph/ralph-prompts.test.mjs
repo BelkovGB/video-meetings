@@ -14,7 +14,6 @@ import {
   loadConfig,
   milestonePassReviewIsClean,
   renderPrompt,
-  run,
   scopeMilestoneReviewToProduct,
 } from './ralph-loop.mjs';
 

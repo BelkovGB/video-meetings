@@ -107,6 +107,7 @@ function acquireRunLock(lockPath, metadata = {}, dependencies = {}) {
       if (alive(existing.pid)) {
         throw new Error(
           `Ralph Loop уже запущен (PID ${existing.pid}, с ${existing.startedAt ?? 'неизвестно'}).`,
+          { cause: error },
         );
       }
       unlinkSync(lockPath);

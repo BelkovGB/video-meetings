@@ -2,13 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  createOrReopenReviewIssues,
   executeMode,
   iterationBudget,
   printCheck,
-  linkedCommitForIssue,
   run,
-  runCodex,
   runCodexWithTurnLimit,
   runContinuousLoop,
 } from './ralph-loop.mjs';

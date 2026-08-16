@@ -58,10 +58,10 @@ export function verifyMilestone(repository, title) {
   const matches = milestones.filter((milestone) => milestone.title === title);
 
   if (matches.length === 0) {
-    fail(`Milestone с точным названием \"${title}\" не найден в ${repository}.`);
+    fail(`Milestone с точным названием "${title}" не найден в ${repository}.`);
   }
   if (matches.length > 1) {
-    fail(`В ${repository} найдено несколько milestones с названием \"${title}\".`);
+    fail(`В ${repository} найдено несколько milestones с названием "${title}".`);
   }
 
   return matches[0];

@@ -22,12 +22,11 @@ import {
   recoveryPrompt,
   reviewFindingFingerprint,
   reviewFindingMarker,
-  run,
   summarizeCommandFailure,
   uniqueFailedTests,
   verifyAgentSkills,
 } from './ralph-loop.mjs';
-import { context, ralphConfigPath, withPatchedRalphConfig } from './ralph-test-support.mjs';
+import { ralphConfigPath, withPatchedRalphConfig } from './ralph-test-support.mjs';
 
 test('finding fingerprint is stable for Unicode titles and changes with location', () => {
   const pullRequest = { number: 61 };

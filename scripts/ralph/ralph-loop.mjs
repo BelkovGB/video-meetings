@@ -1,17 +1,11 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import {
-  acquireRunLock,
-  initializePersistentLog,
-  readJsonFile,
-  waitSync,
-} from './ralph-runtime.mjs';
+import { acquireRunLock, initializePersistentLog, readJsonFile } from './ralph-runtime.mjs';
 
 import {
   fail,
@@ -21,7 +15,6 @@ import {
 } from './ralph-scope.mjs';
 
 import {
-  applyRuntimeSettings,
   credentialFreeEnvironment,
   credentialFreeEnvironmentVariables,
   inheritableEnvironmentVariables,
@@ -35,7 +28,6 @@ import {
   developmentCodexArguments,
   reasoningEffortArguments,
   runReviewWithRetries,
-  reasoningEfforts,
   runCodexWithTurnLimit,
   verifyCodexAuthentication,
 } from './ralph-codex-session.mjs';
@@ -49,7 +41,6 @@ import {
   normalizePhases,
   parseJson,
   parseSkillFrontmatter,
-  phasePlanId,
   verifyAgentSkills,
 } from './ralph-config.mjs';
 
@@ -102,13 +93,10 @@ import {
 
 import {
   githubPagedArray,
-  issueDetails,
   issueState,
-  milestoneIssues,
   openIssues,
   patchIssue,
   postIssueCommentOnce,
-  postPullRequestReview,
   refreshIssue,
   reopenIssueWithComment,
   repositoryName,
@@ -122,7 +110,6 @@ import {
   formatReviewComment,
   issueBodyWithCompletionState,
   issueBodyWithReviewContext,
-  issueBodyWithoutCompletionState,
   issueCompletionState,
   issueContentHash,
   normalizeReviewResult,
@@ -1019,7 +1006,9 @@ async function runContinuousLoop(context, actions) {
           error.code,
         )
       ) {
-        iteration = stateStore?.releaseIteration() ?? Math.max(0, iteration - 1);
+        // Возврат итерации в состояние — единственный нужный эффект: следом
+        // идёт throw, и локальная `iteration` уже никем не читается.
+        stateStore?.releaseIteration();
       }
       throw error;
     }

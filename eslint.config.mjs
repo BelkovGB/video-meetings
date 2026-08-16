@@ -18,5 +18,28 @@ export default tseslint.config(
       },
     },
   },
+  {
+    // Оркестратор Ralph. Без этого блока `scripts/**` не покрыт линтом, и
+    // мёртвые импорты вместе с необъявленными кросс-модульными вызовами
+    // приходится считать вручную.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2024,
+      sourceType: 'module',
+      globals: globals.node,
+    },
+    rules: {
+      // tseslint.configs.recommended применяется ко всем файлам и уже включает
+      // свою версию правила. Базовое выключено, иначе каждая находка
+      // отчитывается дважды.
+      'no-unused-vars': 'off',
+      // ignoreRestSiblings разрешает идиому «выбросить ключ»:
+      // `const { a, ...rest } = obj` в тестах конфигурации.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', ignoreRestSiblings: true },
+      ],
+    },
+  },
   eslintConfigPrettier,
 );

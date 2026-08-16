@@ -9,7 +9,6 @@ import {
   createStateStore,
   githubPagedArray,
   normalizePhases,
-  run,
   runPhasePlan,
 } from './ralph-loop.mjs';
 
