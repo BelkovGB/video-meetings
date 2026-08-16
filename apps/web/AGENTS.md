@@ -10,8 +10,13 @@
   authoritative.
 - Run focused checks during implementation. Do not reinstall browsers or rerun
   the complete validation suite from an isolated Ralph agent session.
-- Update visual snapshots only for intentional rendered changes and inspect the
-  resulting images before accepting them.
+- Never create or update Playwright visual snapshots. A screenshot is only valid
+  in the environment that rendered it, and baselines here come from the
+  validation image, not from a session's own browser. Ralph's validation set
+  runs `playwright test --ignore-snapshots`, so a baseline written by an agent
+  is never compared against anything and only misleads the next reader. Write
+  the visual test; the operator regenerates baselines with
+  `npm run test:e2e:web:visual`.
 - Save manual screenshots under the repository-relative `screenshot/` directory;
   keep Playwright snapshots and failure artifacts in their configured locations.
 

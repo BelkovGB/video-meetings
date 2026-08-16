@@ -619,6 +619,12 @@ export function loadConfig() {
   validateRuntimeSettings(config);
   validateAgentRoles(config);
   resolveControlPlanePaths(config);
+  // Набор инструкций сохраняется целиком, а не восстанавливается по имени
+  // файла. Пока проверка выводила его фильтром `basename === 'AGENTS.md'`,
+  // правило «что считается инструкцией» жило в двух местах, и расширение набора
+  // на `.claude/**` рассогласовало их: файл попадал в текущий набор и не попадал
+  // в ожидаемый, из-за чего любой прогон падал до валидации.
+  config.agentInstructionFiles = agentInstructionFiles();
   config.trustedControlFileHashes = collectTrustedControlFileHashes(config);
 
   applyRuntimeSettings(config.runtime);

@@ -48,18 +48,17 @@ const preparedValidationImages = new Set();
 // выданной записью; откат правки возвращает исходный ключ, и переиспользовать
 // его PASS правильно, потому что дерево действительно проходило проверки.
 export function assertTrustedControlFilesUnchanged(config) {
-  const trustedAgentInstructionFiles = new Set(
-    [...(config.trustedControlFileHashes?.keys() ?? [])].filter(
-      (file) => path.basename(file) === 'AGENTS.md',
-    ),
-  );
+  // Ожидаемый набор берётся из конфигурации, а не выводится из имён файлов:
+  // выводить его здесь значило бы держать правило «что считается инструкцией»
+  // в двух местах, и они уже расходились.
+  const trustedAgentInstructionFiles = new Set(config.agentInstructionFiles ?? []);
   const currentAgentInstructionFiles = new Set(agentInstructionFiles());
   if (
     trustedAgentInstructionFiles.size !== currentAgentInstructionFiles.size ||
     [...currentAgentInstructionFiles].some((file) => !trustedAgentInstructionFiles.has(file))
   ) {
     fail(
-      'AFK-сессия изменила набор доверенных файлов AGENTS.md. ' +
+      'AFK-сессия изменила набор доверенных файлов инструкций. ' +
         'Изменение отклонено до валидации, commit и push.',
     );
   }

@@ -171,11 +171,20 @@ export function withPatchedRalphConfig(patch, assertConfig) {
   }
 }
 
-export let cachedTrustedControlFileHashes = null;
+let cachedControlPlane = null;
+
+// Доверенный control plane — это пара: карта хешей и набор файлов инструкций.
+// Фикстура обязана нести обе части, иначе проверка неизменности видит
+// несуществующее расхождение набора.
+function controlPlane() {
+  cachedControlPlane ??= loadConfig();
+  return cachedControlPlane;
+}
 
 export function trustedControlFileHashes() {
-  if (!cachedTrustedControlFileHashes) {
-    cachedTrustedControlFileHashes = loadConfig().trustedControlFileHashes;
-  }
-  return cachedTrustedControlFileHashes;
+  return controlPlane().trustedControlFileHashes;
+}
+
+export function trustedAgentInstructionFiles() {
+  return controlPlane().agentInstructionFiles;
 }

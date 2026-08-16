@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test --ignore-snapshots",
+    "test:e2e:visual": "playwright test"
   },
   "dependencies": {
     "@heroui/react": "^3.2.3",

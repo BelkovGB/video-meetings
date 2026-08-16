@@ -21,7 +21,8 @@
     "test:ralph": "node --test scripts/ralph/ralph-claude.test.mjs scripts/ralph/ralph-codex.test.mjs scripts/ralph/ralph-control-plane.test.mjs scripts/ralph/ralph-issues.test.mjs scripts/ralph/ralph-orchestration.test.mjs scripts/ralph/ralph-prompts.test.mjs scripts/ralph/ralph-runtime.test.mjs scripts/ralph/ralph-state.test.mjs scripts/ralph/ralph-validation.test.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "prepare": "husky"
+    "prepare": "husky",
+    "test:e2e:web:visual": "npm run test:e2e:visual --workspace @video-meetings/web"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

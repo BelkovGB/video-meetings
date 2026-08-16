@@ -21,6 +21,7 @@ import {
 } from './ralph-validation-runner.mjs';
 import {
   ralphConfigPath,
+  trustedAgentInstructionFiles,
   trustedControlFileHashes,
   withPatchedRalphConfig,
 } from './ralph-test-support.mjs';
@@ -169,7 +170,7 @@ test('validation image build takes package.json from HEAD and ignores injected l
 });
 
 test('validation orchestration builds from trusted inputs and never runs injected lifecycle hooks', () => {
-  const trustedControlFileHashes = loadConfig().trustedControlFileHashes;
+  const { trustedControlFileHashes, agentInstructionFiles } = loadConfig();
   const packagePath = new URL('../../package.json', import.meta.url);
   const originalPackage = readFileSync(packagePath, 'utf8');
   const directory = mkdtempSync(path.join(tmpdir(), 'ralph-validation-orchestration-'));
@@ -189,6 +190,7 @@ test('validation orchestration builds from trusted inputs and never runs injecte
         preflightScripts: [],
         runtime: { validationTimeoutMs: 5_000 },
         trustedControlFileHashes,
+        agentInstructionFiles,
         validationContainer: {
           image: `ralph-validation:orchestration-${Date.now()}`,
           dockerfilePath: fileURLToPath(new URL('./Dockerfile.validation', import.meta.url)),
@@ -249,6 +251,7 @@ function validationConfig(overrides = {}) {
     validationScripts: ['format:check', 'lint', 'build', 'test:ralph'],
     runtime: { validationTimeoutMs: 5_000, validationRunTimeoutMs: 9_000 },
     trustedControlFileHashes: trustedControlFileHashes(),
+    agentInstructionFiles: trustedAgentInstructionFiles(),
     validationContainer: {
       image: 'ralph-validation:single',
       dockerfilePath: fileURLToPath(new URL('./Dockerfile.validation', import.meta.url)),
@@ -564,11 +567,13 @@ test('a tampered trusted control file stops validation before it runs', () => {
   });
 });
 
-test('a changed AGENTS.md set also stops validation before it runs', () => {
+test('a changed instruction-file set stops validation before it runs', () => {
   withAttestationHarness(({ validate }) => {
+    // Пустой ожидаемый набор против непустого текущего — так выглядит файл
+    // инструкций, добавленный во время сессии: хеш-карта его не видит.
     assert.throws(
-      () => validate(['lint'], { config: { trustedControlFileHashes: new Map() } }),
-      /изменила набор доверенных файлов AGENTS\.md/,
+      () => validate(['lint'], { config: { agentInstructionFiles: [] } }),
+      /изменила набор доверенных файлов инструкций/,
     );
   });
 });

@@ -97,7 +97,7 @@ test('Ralph infrastructure is never treated as product work', () => {
     'AGENTS.md',
     'apps/api/AGENTS.md',
     // Claude Code читает `.claude/**`: положенный туда файл управляет будущей
-    // сессией. Первый прогон показал, что агент создаёт там файлы сам.
+    // сессией, поэтому каталог принадлежит оператору, как и `.agents/**`.
     '.claude/security-reviewer.md',
     '.claude/settings.json',
     '.claude/agents/reviewer.md',
@@ -239,7 +239,12 @@ test('the implementation prompt carries the full contract without the operator m
   assert.equal(/Прочитай \.agents\/RALPH\.md/.test(prompt), false);
   assert.match(prompt, /правила Ralph Loop, переданные ниже/);
   assert.match(prompt, /# Ralph Loop — правила автономной сессии/);
-  assert.match(prompt, /Не изменяй `\.agents\/\*\*`/);
+  // Проверяется, что запрет на control plane дошёл до prompt и называет все
+  // защищённые каталоги, а не точная формулировка: правила переписываются, и
+  // тест, приколоченный к фразе, ловил бы редактуру вместо потери правила.
+  for (const guarded of ['`.agents/**`', '`.claude/**`', '`scripts/ralph/**`']) {
+    assert.equal(prompt.includes(guarded), true, guarded);
+  }
   assert.match(prompt, /COMMIT_MESSAGE/);
   assert.match(prompt, /ALREADY_FIXED/);
   // Placeholders are still substituted.

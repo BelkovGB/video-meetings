@@ -537,7 +537,7 @@ process.stdout.write(JSON.stringify({
               },
               'trusted rules',
             ),
-          /изменила набор доверенных файлов AGENTS\.md/u,
+          /изменила набор доверенных файлов инструкций/u,
         );
       },
     );
@@ -547,11 +547,10 @@ process.stdout.write(JSON.stringify({
 });
 
 test('a file planted in .claude enters the trusted instruction set', () => {
-  // Первый наблюдаемый прогон закончился тем, что агент создал
-  // `.claude/security-reviewer.md`. Claude Code читает `.claude/**` как
-  // определения агентов, скиллы, настройки и хуки, поэтому такой файл управляет
-  // будущей сессией. Хеш-карта добавленный файл не видит — его ловит именно
-  // пересбор набора инструкций.
+  // Claude Code читает `.claude/**` как определения агентов, скиллы, настройки
+  // и хуки, поэтому файл там управляет будущей сессией. Хеш-карта добавленный
+  // файл структурно не видит — его ловит именно пересбор набора инструкций,
+  // ровно как для добавленного AGENTS.md.
   const directory = mkdtempSync(path.join(tmpdir(), 'ralph-instructions-'));
   try {
     mkdirSync(path.join(directory, '.claude', 'agents'), { recursive: true });
