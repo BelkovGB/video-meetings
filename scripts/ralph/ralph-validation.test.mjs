@@ -9,6 +9,7 @@ import { loadConfig } from './ralph-config.mjs';
 import { summarizeCommandFailure } from './ralph-failure-summary.mjs';
 import { run } from './ralph-process-runner.mjs';
 import {
+  assertValidationDependenciesCommitted,
   createTrustedValidationDependencySnapshot,
   ensureValidationImage,
   failedValidationScript,
@@ -610,4 +611,37 @@ test('the attestation key covers every declared input', () => {
     assert.notEqual(validationAttestationKey(changed), base);
   }
   assert.equal(validationAttestationKey({ ...inputs }), base);
+});
+
+test('a dependency changed only in the working tree stops the run before the container', () => {
+  // Образ ставит зависимости по HEAD — намеренно, потому что сборка образа
+  // единственный шаг с сетью. Значит добавленный агентом пакет физически не
+  // окажется в node_modules контейнера, и `build` упадёт на «модуль не найден».
+  // Агент это не чинит: коммитить ему нельзя, HEAD не двигается, тег образа
+  // считается по тем же HEAD-байтам, поэтому все maxTestFixAttempts уходят на
+  // один и тот же отказ. Причина обязана называться до контейнера.
+  const calls = [];
+  const driftedRun = (name, args) => {
+    calls.push([name, args[0], args[1]]);
+    return { status: 0, stdout: 'package.json\npackage-lock.json\n', stderr: '' };
+  };
+
+  assert.throws(
+    () => assertValidationDependenciesCommitted({ run: driftedRun }),
+    (error) => {
+      assert.match(error.message, /package\.json/);
+      assert.match(error.message, /package-lock\.json/);
+      // Сообщение обязано назвать и причину, и выход, иначе оператор увидит
+      // только «модуль не найден» пять раз подряд.
+      assert.match(error.message, /HEAD/);
+      assert.match(error.message, /Закоммитьте/);
+      return true;
+    },
+  );
+  assert.deepEqual(calls, [['git', 'diff', '--name-only']]);
+
+  // Совпадающее дерево проходит молча.
+  assertValidationDependenciesCommitted({
+    run: () => ({ status: 0, stdout: '', stderr: '' }),
+  });
 });

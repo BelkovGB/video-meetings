@@ -147,6 +147,48 @@ const validationDependencyFiles = [
   'scripts/ralph/ralph-validation-entrypoint.sh',
 ];
 
+/**
+ * Образ валидации ставит зависимости по HEAD, а не по рабочему дереву, и это
+ * намеренно: сборка образа — единственный шаг с сетью, поэтому брать
+ * `package.json` из дерева значило бы выполнить lifecycle-хуки, которые туда
+ * только что мог записать агент. Ровно это закрывают тесты «built from
+ * committed inputs, not the mutable workspace» и «takes package.json from HEAD
+ * and ignores injected lifecycle hooks».
+ *
+ * Плата — дрейф. Стоит агенту добавить пакет, и контейнер собирает дерево,
+ * объявляющее одну зависимость, против node_modules предыдущего коммита. Молча
+ * это выглядит как ошибка компиляции «модуль не найден», а починить её агент не
+ * может: коммитить ему запрещено, HEAD не двигается, тег образа считается по
+ * тем же HEAD-байтам, поэтому и пересборки не будет — все maxTestFixAttempts
+ * уходят на один и тот же отказ. Обратный случай тише и опаснее: поднятая в
+ * дереве версия проверяется против ранее установленной, даёт зелёный прогон и
+ * уходит в push.
+ *
+ * Поэтому расхождение называется вслух и до контейнера. Файлы схемы Prisma сюда
+ * не входят: `prisma:generate` выполняется внутри `build` и `test:e2e` по
+ * рабочему дереву, так что схема не дрейфует.
+ */
+export function assertValidationDependenciesCommitted(dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const drifted = execute('git', [
+    'diff',
+    '--name-only',
+    'HEAD',
+    '--',
+    ...validationDependencyFiles,
+  ])
+    .stdout.split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (drifted.length === 0) return;
+
+  fail(
+    `Образ валидации ставит зависимости по HEAD, а в рабочем дереве изменены: ${drifted.join(', ')}. ` +
+      'Контейнер проверял бы это дерево против node_modules предыдущего коммита, ' +
+      'поэтому прогон остановлен. Закоммитьте эти файлы и запустите Ralph заново.',
+  );
+}
+
 export function createTrustedValidationDependencySnapshot() {
   const snapshotPath = mkdtempSync(path.join(tmpdir(), 'ralph-validation-dependencies-'));
   try {
@@ -375,6 +417,9 @@ export function runPreflight(config) {
 }
 
 export function runConfiguredValidation(config) {
+  // Проверка стоит здесь, а не в runConfiguredScripts: дрейф вносит только
+  // сессия агента, а preflight выполняется по заведомо чистому дереву.
+  assertValidationDependenciesCommitted();
   // Каждый validation-запуск получает новый контейнер с новой изолированной БД и
   // выполняет preflight первым, чтобы migration текущей issue была применена
   // внутри того же контейнера, что и остальные scripts.
