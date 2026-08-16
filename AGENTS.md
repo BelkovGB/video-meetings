@@ -23,8 +23,17 @@
 - For TypeScript diagnostics, use `npx tsc --noEmit --pretty false` and initially
   show only the last five lines. Preserve the compiler exit code when piping;
   use `Select-Object -Last 5` in PowerShell and `tail -5` with `pipefail` in POSIX.
-- Prefer `rg` and targeted file ranges. Do not dump complete logs, generated
-  files, lockfiles, or large JSON documents when a focused query is sufficient.
+- Prefer targeted file ranges. Do not dump complete logs, generated files,
+  lockfiles, or large JSON documents when a focused query is sufficient.
+- Search with the Grep tool rather than a shell `rg`: isolated sessions have no
+  `rg`, and the failed command costs a step plus its error output.
+- Run repo-wide commands from the repository root. A path resolved against the
+  wrong working directory costs a step and reports a misleading "not found".
+- A non-interactive `claude` run pays for every tool schema in its cached
+  prefix. Deny the tools the task cannot use and pass
+  `--exclude-dynamic-system-prompt-sections` so per-machine text stays out of
+  that prefix: measured here, 43 442 input tokens per session became 25 741, and
+  a repeat session reads the cache instead of rewriting it.
 
 ## Writing instructions and documentation
 
