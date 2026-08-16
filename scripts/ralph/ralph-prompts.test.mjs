@@ -96,6 +96,11 @@ test('Ralph infrastructure is never treated as product work', () => {
     'scripts/ralph/ralph-loop.mjs:975',
     'AGENTS.md',
     'apps/api/AGENTS.md',
+    // Claude Code читает `.claude/**`: положенный туда файл управляет будущей
+    // сессией. Первый прогон показал, что агент создаёт там файлы сам.
+    '.claude/security-reviewer.md',
+    '.claude/settings.json',
+    '.claude/agents/reviewer.md',
   ]) {
     assert.equal(isRalphInfrastructurePath(file), true, file);
   }

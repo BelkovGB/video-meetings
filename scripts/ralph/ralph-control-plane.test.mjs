@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -14,7 +15,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { runAgentOnIssue } from './ralph-loop.mjs';
-import { loadConfig } from './ralph-config.mjs';
+import { agentInstructionFiles, loadConfig } from './ralph-config.mjs';
 import { commitStagedChanges } from './ralph-git.mjs';
 import {
   approveConfiguredIssue,
@@ -542,5 +543,39 @@ process.stdout.write(JSON.stringify({
     );
   } finally {
     rmSync(agentInstructionsDirectory, { recursive: true, force: true });
+  }
+});
+
+test('a file planted in .claude enters the trusted instruction set', () => {
+  // Первый наблюдаемый прогон закончился тем, что агент создал
+  // `.claude/security-reviewer.md`. Claude Code читает `.claude/**` как
+  // определения агентов, скиллы, настройки и хуки, поэтому такой файл управляет
+  // будущей сессией. Хеш-карта добавленный файл не видит — его ловит именно
+  // пересбор набора инструкций.
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-instructions-'));
+  try {
+    mkdirSync(path.join(directory, '.claude', 'agents'), { recursive: true });
+    mkdirSync(path.join(directory, 'apps', 'web'), { recursive: true });
+    writeFileSync(path.join(directory, 'AGENTS.md'), '# root\n', 'utf8');
+    writeFileSync(path.join(directory, 'apps', 'web', 'AGENTS.md'), '# web\n', 'utf8');
+    writeFileSync(path.join(directory, '.claude', 'security-reviewer.md'), '', 'utf8');
+    writeFileSync(path.join(directory, '.claude', 'settings.json'), '{}\n', 'utf8');
+    writeFileSync(path.join(directory, '.claude', 'agents', 'reviewer.md'), '# a\n', 'utf8');
+    // Продуктовый файл рядом в набор попадать не должен.
+    writeFileSync(path.join(directory, 'apps', 'web', 'page.tsx'), 'export {}\n', 'utf8');
+
+    const collected = agentInstructionFiles(directory).map((file) =>
+      path.relative(directory, file).split(path.sep).join('/'),
+    );
+
+    assert.deepEqual(collected.sort(), [
+      '.claude/agents/reviewer.md',
+      '.claude/security-reviewer.md',
+      '.claude/settings.json',
+      'AGENTS.md',
+      'apps/web/AGENTS.md',
+    ]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });

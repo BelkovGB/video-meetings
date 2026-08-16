@@ -60,20 +60,29 @@ const ignoredAgentInstructionDirectories = new Set([
   'node_modules',
 ]);
 
-export function agentInstructionFiles(directory = projectRoot) {
+export function agentInstructionFiles(directory = projectRoot, root = directory) {
   const files = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       if (!ignoredAgentInstructionDirectories.has(entry.name)) {
-        files.push(...agentInstructionFiles(path.join(directory, entry.name)));
+        files.push(...agentInstructionFiles(path.join(directory, entry.name), root));
       }
       continue;
     }
-    if (entry.name === 'AGENTS.md') {
+    // Хеш-карта доверенных файлов структурно не видит добавленный файл, поэтому
+    // набор инструкций собирается заново. `.claude/**` входит целиком: Claude
+    // Code читает оттуда агентов, скиллы, настройки и хуки, то есть любой файл
+    // там меняет поведение будущей сессии, а не только файл с известным именем.
+    if (entry.name === 'AGENTS.md' || isClaudeInstructionDirectory(directory, root)) {
       files.push(path.join(directory, entry.name));
     }
   }
   return files.sort();
+}
+
+function isClaudeInstructionDirectory(directory, root) {
+  const relative = path.relative(root, directory).replaceAll('\\', '/');
+  return relative === '.claude' || relative.startsWith('.claude/');
 }
 
 // Codex загружает project-local skills по YAML frontmatter. Невалидный
