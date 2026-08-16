@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { fail } from './ralph-scope.mjs';
+import { controlPlaneExcludePathspec, fail } from './ralph-scope.mjs';
 import { run, runNetwork } from './ralph-process-runner.mjs';
 import { activeStateStore } from './ralph-state-store.mjs';
 import { clearedFailure } from './ralph-failure-summary.mjs';
@@ -83,6 +83,45 @@ export function issueChangeInventory(issue, commit, dependencies = {}) {
     // Обрезанный diff полезнее отсутствующего: ревьюер видит начало изменений и
     // знает, что остаток надо дочитать сам.
     diff: truncated ? patch.slice(0, reviewDiffCharacterBudget) : patch,
+    truncated,
+  };
+}
+
+/**
+ * Изменения всей ветки против базы — то же, что видит milestone-ревью.
+ *
+ * Диапазон с тремя точками: сравнивать нужно с точкой расхождения, иначе в diff
+ * попадёт всё, что уехало в базовую ветку после ответвления, и ревьюер получит
+ * чужую работу под видом своей области.
+ *
+ * Control plane исключён pathspec'ом: milestone-ревью и так запрещено сообщать
+ * о нём замечания, но в diff этой ветки он занимает бо́льшую часть — 108 583
+ * символа из 138 394 на момент замера.
+ */
+export function branchChangeInventory(baseRef, head, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const range = `${baseRef}...${head}`;
+  const inspect = (flags) =>
+    execute('git', ['diff', ...flags, range, '--', '.', ...controlPlaneExcludePathspec], {
+      allowFailure: true,
+    });
+  const commits = execute(
+    'git',
+    ['log', '--format=%h %s', range, '--', '.', ...controlPlaneExcludePathspec],
+    { allowFailure: true },
+  );
+  const patch = inspect(['--patch', '--unified=3']);
+  // Отсутствие базы — не повод ронять ревью: оно останется таким же, каким было
+  // до появления инвентаря.
+  if (patch.status !== 0) return null;
+  const truncated = patch.stdout.length > reviewDiffCharacterBudget;
+
+  return {
+    range,
+    commits: commits.status === 0 ? commits.stdout : '',
+    nameStatus: inspect(['--name-status']).stdout,
+    stat: inspect(['--stat']).stdout,
+    diff: truncated ? patch.stdout.slice(0, reviewDiffCharacterBudget) : patch.stdout,
     truncated,
   };
 }

@@ -38,6 +38,21 @@ export function isRalphInfrastructurePath(file) {
   );
 }
 
+/**
+ * Тот же список путей в виде pathspec для git.
+ *
+ * Выводится здесь, а не пишется вторым списком рядом с git-командами: два
+ * перечисления одного и того же расходятся при первом же добавлении каталога, и
+ * расхождение будет тихим — diff просто покажет лишнее.
+ */
+export const controlPlaneExcludePathspec = [
+  ':(exclude).agents',
+  ':(exclude).claude',
+  ':(exclude)scripts/ralph',
+  ':(exclude)AGENTS.md',
+  ':(exclude,glob)**/AGENTS.md',
+];
+
 export function issueLabels(issue) {
   return (issue?.labels ?? []).map((label) =>
     typeof label === 'string' ? label : String(label?.name ?? ''),

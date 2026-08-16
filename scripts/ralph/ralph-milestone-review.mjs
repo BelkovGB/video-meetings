@@ -13,6 +13,7 @@ import {
   postIssueCommentOnce,
   postPullRequestReview,
 } from './ralph-github-client.mjs';
+import { branchChangeInventory } from './ralph-git.mjs';
 import { assertReviewPayloadShape, normalizeReviewResult } from './ralph-issue-contract.mjs';
 import { buildMilestoneReviewPrompt } from './ralph-prompts.mjs';
 
@@ -148,7 +149,11 @@ export async function runMilestoneReview(config, repository, milestone, pullRequ
     };
   }
 
-  const reviewPrompt = buildMilestoneReviewPrompt(config, milestone, pullRequest);
+  // База берётся с origin, а не с локальной ветки: локальная может отставать, и
+  // тогда в diff попадёт чужая работа, которую ревьюер обязан игнорировать.
+  const reviewPrompt = buildMilestoneReviewPrompt(config, milestone, pullRequest, {
+    changes: branchChangeInventory(`origin/${config.baseBranch}`, pullRequest.headRefOid),
+  });
 
   console.log(
     `\n=== Milestone review for PR #${pullRequest.number} (${config.milestoneReview.model}) ===\n`,

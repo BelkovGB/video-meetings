@@ -68,22 +68,15 @@ const reviewVerdictContract =
  * добывает сам. Claude-ревьюер запускается без оболочки и `git` вызвать не
  * может: без этого блока «изменения для issue» для него — догадка по тексту.
  */
-function reviewChangeInventory(changes) {
+function reviewChangeInventory(heading, changes) {
   if (!changes) return '';
   const truncationNote = changes.truncated
     ? '\n\nThe diff above is truncated. Read the remaining changed files from the list yourself.'
     : '';
-  // Со второй итерации у issue больше одного commit, и назвать только
-  // последний значило бы выдать доработку за всю реализацию.
-  const commits = changes.commits ?? [changes.commit];
-  const range =
-    commits.length > 1
-      ? `across the ${commits.length} commits of this issue (${commits.join(', ')})`
-      : `in commit ${changes.commit}`;
 
   return `
 
-Changes ${range}. This is the complete set of changes made for this issue.
+${heading}
 
 ${changes.stat}
 
@@ -92,6 +85,18 @@ ${changes.nameStatus}
 \`\`\`diff
 ${changes.diff}
 \`\`\`${truncationNote}`;
+}
+
+function issueChangeHeading(changes) {
+  // Со второй итерации у issue больше одного commit, и назвать только
+  // последний значило бы выдать доработку за всю реализацию.
+  const commits = changes.commits ?? [changes.commit];
+  const range =
+    commits.length > 1
+      ? `across the ${commits.length} commits of this issue (${commits.join(', ')})`
+      : `in commit ${changes.commit}`;
+
+  return `Changes ${range}. This is the complete set of changes made for this issue.`;
 }
 
 // Ревьюер, которому не сказали, что проверки уже прошли, тратит шаги на их
@@ -122,7 +127,7 @@ export function buildIndependentReviewPrompt(config, issue, commit, context = {}
   return `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; verify that the current HEAD still satisfies the issue and has not regressed it.
 
 Issue body:
-${issueBody}${reviewPreviousFindings(context.previousFindings)}${reviewChangeInventory(context.changes)}${reviewValidationEvidence(config)}
+${issueBody}${reviewPreviousFindings(context.previousFindings)}${context.changes ? reviewChangeInventory(issueChangeHeading(context.changes), context.changes) : ''}${reviewValidationEvidence(config)}
 
 Complete the entire audit before deciding the verdict. Do not stop after the first problem. Return every distinct, actionable finding you can substantiate in this single response, without duplicates and without inventing findings to fill a quota.
 
@@ -140,13 +145,20 @@ ${reviewDocumentationDiscovery(config)}
 Only report findings caused by the claimed implementation, regressions at current HEAD, or work required by the issue. Ignore unrelated pre-existing debt. ${reviewVerdictContract} Do not edit files.`;
 }
 
-export function buildMilestoneReviewPrompt(config, milestone, pullRequest) {
+function branchChangeHeading(changes) {
+  return (
+    `Changes on this branch (${changes.range}), with Ralph's control plane excluded. ` +
+    `Commits:\n${changes.commits || '(none listed)'}`
+  );
+}
+
+export function buildMilestoneReviewPrompt(config, milestone, pullRequest, context = {}) {
   const milestoneDescription = milestone.description?.trim() || '(Milestone description is empty.)';
 
   return `Perform a read-only architectural review of pull request #${pullRequest.number} (${pullRequest.url}) for milestone "${milestone.title}".
 
 Milestone description:
-${milestoneDescription}
+${milestoneDescription}${context.changes ? reviewChangeInventory(branchChangeHeading(context.changes), context.changes) : ''}
 
 The branch and pull request may be cumulative and contain work from other milestones. Scope the review exclusively to the requirements in the milestone title and description, plus integrations strictly required for those requirements. Use the branch diff against ${config.baseBranch} as evidence, not as the definition of scope. Do not report defects in unrelated features, infrastructure, or files merely because they are present or changed in the pull request.
 

@@ -176,10 +176,38 @@ test('milestone review stays within milestone scope and trusts completed validat
   // потом отбросит. AGENTS.md при этом читать нужно — там конвенции продукта.
   assert.match(prompt, /Do not open \.agents\/\*\* or scripts\/ralph\/\*\*, and never report/);
   assert.match(prompt, /Do read AGENTS\.md/);
+  // Без инвентаря prompt обязан остаться прежним: ревью milestone может идти по
+  // ветке, базу которой git не разрешил, и тогда инвентаря просто нет.
+  assert.doesNotMatch(prompt, /```diff/);
   assert.match(prompt, /Discover documentation paths/i);
   assert.match(prompt, /rg --files docs/);
   assert.match(prompt, /guess conventional paths such as `docs\/README\.md`/i);
   assert.match(prompt, /`docs\/api\.md`.*`docs\/api-architecture\.md`/);
+});
+
+test('the milestone reviewer is shown the branch diff without the control plane', () => {
+  const prompt = buildMilestoneReviewPrompt(
+    { agentCli: 'claude', baseBranch: 'master' },
+    { title: 'Phase 8', description: 'Password change screen.' },
+    { number: 61, url: 'https://example.test/pull/61', headRefOid: 'a'.repeat(40) },
+    {
+      changes: {
+        range: 'origin/master...' + 'a'.repeat(40),
+        commits: 'abc1234 feat: end the browser session',
+        stat: ' apps/api/src/profile.service.ts | 8 ++++',
+        nameStatus: 'M\tapps/api/src/profile.service.ts',
+        diff: '--- a/apps/api/src/profile.service.ts',
+        truncated: false,
+      },
+    },
+  );
+
+  // Диапазон с тремя точками: сравнение идёт с точкой расхождения, иначе в diff
+  // попадёт всё, что уехало в базовую ветку после ответвления.
+  assert.match(prompt, /origin\/master\.\.\.a{40}/);
+  assert.match(prompt, /abc1234 feat: end the browser session/);
+  assert.match(prompt, /```diff/);
+  assert.match(prompt, /control plane excluded/);
 });
 
 test('Ralph infrastructure is never treated as product work', () => {
