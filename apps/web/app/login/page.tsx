@@ -3,10 +3,11 @@
 import { Alert, Button, FieldError, Input, Label, Spinner, TextField } from '@heroui/react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { FormEvent, useRef, useState } from 'react';
+import { FormEvent, Suspense, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
 import { startSession } from '../../lib/auth/session';
+import { SessionNotice } from './session-notice';
 
 function validateEmail(value: string) {
   const normalizedEmail = value.trim();
@@ -84,6 +85,11 @@ export default function LoginPage() {
         <p className="mt-3 text-sm leading-6 text-slate-600">
           Войдите, чтобы продолжить работу со встречами.
         </p>
+
+        {/* The reason lives in the URL, so reading it suspends a prerendered route. */}
+        <Suspense fallback={null}>
+          <SessionNotice />
+        </Suspense>
 
         <form className="mt-8 space-y-5" noValidate onSubmit={submitLogin}>
           {emailError || passwordError ? (

@@ -9,8 +9,15 @@ import { ProfileOverview } from './profile-overview';
 import { useCurrentProfile } from './use-current-profile';
 
 export default function ProfilePage() {
-  const { profile, setProfile, isLoading, loadError, handleUnauthorized, retryLoad } =
-    useCurrentProfile();
+  const {
+    profile,
+    setProfile,
+    isLoading,
+    loadError,
+    handleUnauthorized,
+    handlePasswordChanged,
+    retryLoad,
+  } = useCurrentProfile();
 
   if (isLoading) {
     return (
@@ -99,7 +106,7 @@ export default function ProfilePage() {
             />
             <PasswordChangeForm
               onUnauthorized={handleUnauthorized}
-              onPasswordChanged={handleUnauthorized}
+              onPasswordChanged={handlePasswordChanged}
             />
             <div className="grid gap-2 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center">
               <p className="text-sm font-medium text-slate-600">Email</p>

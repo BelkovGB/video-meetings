@@ -676,26 +676,49 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page).toHaveURL('/profile');
 });
 
-test('changes the password against the real API, ends the session, and requires the new password to sign in', async ({
+test('changes the password by keyboard, signs out, blocks protected routes, and requires the new password', async ({
   page,
   request,
 }) => {
   const session = await register(request, 'profile-password-success');
   const newPassword = 'brand-new-secure-password-789';
 
-  await authenticate(page, session);
+  // Seeded once instead of through `authenticate`: an init script would restore
+  // the token on every later navigation and hide a session that failed to end.
+  await page.goto('/login');
+  await page.evaluate(({ accessToken, email }) => {
+    window.sessionStorage.setItem('accessToken', accessToken);
+    window.sessionStorage.setItem('userEmail', email);
+  }, session);
   await page.goto('/profile');
 
-  await page.getByLabel('Текущий пароль', { exact: true }).fill(password);
-  await page.getByLabel('Новый пароль', { exact: true }).fill(newPassword);
-  await page.getByLabel('Подтвердите новый пароль', { exact: true }).fill(newPassword);
-  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await page.getByLabel('Текущий пароль', { exact: true }).focus();
+  await page.keyboard.type(password);
+  await page.keyboard.press('Tab');
+  await page.keyboard.type(newPassword);
+  await page.keyboard.press('Tab');
+  await page.keyboard.type(newPassword);
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Изменить пароль' })).toBeFocused();
+  await page.keyboard.press('Enter');
 
-  await expect(page).toHaveURL('/login');
+  await expect(page).toHaveURL('/login?reason=password-changed');
   await expect(page.getByRole('heading', { name: 'С возвращением' })).toBeVisible();
+  await expect(page.getByRole('status')).toHaveText(
+    'Пароль изменён. Войдите заново с новым паролем.',
+  );
   await expect(
     page.evaluate(() => window.sessionStorage.getItem('accessToken')),
   ).resolves.toBeNull();
+  await expect(page.evaluate(() => window.sessionStorage.getItem('userEmail'))).resolves.toBeNull();
+
+  await page.goto('/profile');
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByText(session.email)).toHaveCount(0);
+
+  await page.goto('/');
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByText(session.email)).toHaveCount(0);
 
   const oldPasswordLogin = await request.post(`${apiUrl}/auth/login`, {
     data: { email: session.email, password },

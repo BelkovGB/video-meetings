@@ -5,6 +5,7 @@ import { Dispatch, SetStateAction, useCallback, useEffect, useState } from 'reac
 
 import { apiUrl } from '../../lib/api/config';
 import type { CurrentUserProfile } from '../../lib/api/contracts';
+import { passwordChangedLoginPath } from '../../lib/auth/login-notice';
 import { clearSession, readAccessToken } from '../../lib/auth/session';
 
 type CurrentProfile = {
@@ -14,6 +15,8 @@ type CurrentProfile = {
   loadError: string | null;
   /** Clears the session and returns to the login screen. */
   handleUnauthorized: () => void;
+  /** Clears the session and returns to the login screen explaining the new sign-in. */
+  handlePasswordChanged: () => void;
   retryLoad: () => void;
 };
 
@@ -28,6 +31,11 @@ export function useCurrentProfile(): CurrentProfile {
   const handleUnauthorized = useCallback(() => {
     clearSession();
     router.replace('/login');
+  }, [router]);
+
+  const handlePasswordChanged = useCallback(() => {
+    clearSession();
+    router.replace(passwordChangedLoginPath);
   }, [router]);
 
   useEffect(() => {
@@ -83,5 +91,13 @@ export function useCurrentProfile(): CurrentProfile {
     setLoadAttempt((attempt) => attempt + 1);
   };
 
-  return { profile, setProfile, isLoading, loadError, handleUnauthorized, retryLoad };
+  return {
+    profile,
+    setProfile,
+    isLoading,
+    loadError,
+    handleUnauthorized,
+    handlePasswordChanged,
+    retryLoad,
+  };
 }
