@@ -25,6 +25,7 @@ import {
 import {
   configForPhase,
   configPath,
+  controlPlaneSnapshot,
   loadConfig,
   loadRalphRules,
   parseJson,
@@ -1062,6 +1063,15 @@ async function main() {
     const actions = defaultActions();
     const runPhase = async (phaseConfig) => {
       const repositoryState = verifyRepository(phaseConfig, mode !== '--check');
+      // Слепок пересчитывается сразу после переключения ветки и до сессии
+      // агента. `verifyRepository` — единственное место, где рабочее дерево
+      // меняет сам цикл, а `.claude/**` и `AGENTS.md` есть не на каждой ветке:
+      // старт с ветки, где их нет, приводил к остановке с «AFK-сессия изменила
+      // набор доверенных файлов инструкций» ещё до валидации. Обвинялась сессия,
+      // которая не начиналась, а принёс файлы чекаут по команде самого цикла.
+      const snapshot = controlPlaneSnapshot(phaseConfig);
+      Object.assign(config, snapshot);
+      Object.assign(phaseConfig, snapshot);
       if (mode !== '--check') {
         reconcileStateAfterCrash(phaseConfig, activeStateStore());
       }

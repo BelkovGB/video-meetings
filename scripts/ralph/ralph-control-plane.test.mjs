@@ -16,7 +16,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { runAgentOnIssue } from './ralph-loop.mjs';
-import { agentInstructionFiles, loadConfig } from './ralph-config.mjs';
+import { agentInstructionFiles, controlPlaneSnapshot, loadConfig } from './ralph-config.mjs';
 
 /**
  * Часть тестов здесь перезаписывает настоящие `AGENTS.md` репозитория, чтобы
@@ -618,4 +618,38 @@ test('the ralph suite stays serialized, because its own tests rewrite trusted fi
   // Файлы перечислены явно, поэтому новый тестовый файл обязан попасть в набор
   // осознанно, а не потеряться из-за подстановки каталога.
   assert.ok(script.includes('scripts/ralph/ralph-control-plane.test.mjs'));
+});
+
+test('the control-plane snapshot is re-derived from disk, not carried over from load time', () => {
+  // Цикл снимает слепок дважды: при загрузке конфигурации и заново сразу после
+  // того, как verifyRepository переключил ветку фазы. Второй снимок нужен
+  // потому, что `.claude/**` и `AGENTS.md` есть не на каждой ветке: старт с
+  // ветки, где их нет, останавливал прогон на «изменила набор доверенных файлов
+  // инструкций», хотя файлы принёс чекаут по команде самого цикла, а сессия
+  // агента ещё не начиналась. Свойство, которое это чинит, — пересчёт с диска.
+  const config = loadConfig();
+  const probePath = path.join(process.cwd(), '.claude', 'ralph-snapshot-probe.md');
+
+  assert.equal(config.agentInstructionFiles.includes(probePath), false);
+
+  try {
+    // Появление файла имитирует то, что делает чекаут ветки фазы.
+    writeFileSync(probePath, 'Probe instruction file.\n', 'utf8');
+    const refreshed = controlPlaneSnapshot(config);
+
+    assert.equal(refreshed.agentInstructionFiles.includes(probePath), true);
+    // Хеши обязаны обновиться вместе с набором, иначе следующая же сверка
+    // упала бы уже на пофайловой проверке.
+    assert.equal(refreshed.trustedControlFileHashes.has(probePath), true);
+    // Слепок, снятый при загрузке, остаётся прежним — он описывает другой момент.
+    assert.equal(config.agentInstructionFiles.includes(probePath), false);
+  } finally {
+    rmSync(probePath, { force: true });
+  }
+
+  // После уборки набор возвращается к исходному: слепок именно от диска.
+  assert.deepEqual(
+    controlPlaneSnapshot(config).agentInstructionFiles,
+    config.agentInstructionFiles,
+  );
 });
