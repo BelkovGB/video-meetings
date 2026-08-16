@@ -13,6 +13,7 @@ import {
 } from './ralph-agent-backends.mjs';
 import {
   claudeBackend,
+  claudeCredentialVariables,
   createSandboxedClaudeEnvironment,
   developmentClaudeArguments,
   reviewClaudeArguments,
@@ -74,37 +75,47 @@ test('the claude review role gets a read-only tool set and an inline schema', ()
   );
 });
 
-test('the claude sandbox isolates HOME and carries only the API key', () => {
-  const source = {
-    PATH: process.env.PATH,
-    ANTHROPIC_API_KEY: 'secret-key',
-    GH_TOKEN: 'must-not-leak',
-    HOME: 'C:/Users/operator',
-    CLAUDE_CONFIG_DIR: 'C:/Users/operator/.claude',
-  };
-  const sandbox = createSandboxedClaudeEnvironment(source);
+test('the claude sandbox isolates HOME and carries only the credentials', () => {
+  // Обе переменные годятся, и это не одно и то же: токен из `claude
+  // setup-token` работает по подписке, API-ключ тарифицируется отдельно.
+  for (const variable of claudeCredentialVariables) {
+    const source = {
+      PATH: process.env.PATH,
+      [variable]: 'secret-credential',
+      GH_TOKEN: 'must-not-leak',
+      HOME: 'C:/Users/operator',
+      CLAUDE_CONFIG_DIR: 'C:/Users/operator/.claude',
+    };
+    const sandbox = createSandboxedClaudeEnvironment(source);
 
-  try {
-    assert.equal(sandbox.env.ANTHROPIC_API_KEY, 'secret-key');
-    assert.equal(sandbox.env.GH_TOKEN, undefined);
-    assert.notEqual(sandbox.env.HOME, source.HOME);
-    assert.notEqual(sandbox.env.CLAUDE_CONFIG_DIR, source.CLAUDE_CONFIG_DIR);
-    assert.match(sandbox.env.CLAUDE_CONFIG_DIR, /ralph-claude-/);
-  } finally {
-    rmSync(sandbox.root, { recursive: true, force: true });
+    try {
+      assert.equal(sandbox.env[variable], 'secret-credential', variable);
+      assert.equal(sandbox.env.GH_TOKEN, undefined);
+      assert.notEqual(sandbox.env.HOME, source.HOME);
+      assert.notEqual(sandbox.env.CLAUDE_CONFIG_DIR, source.CLAUDE_CONFIG_DIR);
+      assert.match(sandbox.env.CLAUDE_CONFIG_DIR, /ralph-claude-/);
+    } finally {
+      rmSync(sandbox.root, { recursive: true, force: true });
+    }
   }
 });
 
-test('a claude session without an API key stops before the process starts', () => {
+test('a claude session without credentials stops before the process starts', () => {
   assert.throws(
     () => createSandboxedClaudeEnvironment({ PATH: process.env.PATH }),
     (error) => {
       assert.equal(error.code, 'RALPH_AGENT_AUTH');
+      // Сообщение обязано назвать оба пути и подсказать дешёвый.
+      assert.match(error.message, /CLAUDE_CODE_OAUTH_TOKEN/);
       assert.match(error.message, /ANTHROPIC_API_KEY/);
+      assert.match(error.message, /claude setup-token/);
       return true;
     },
   );
-  assert.throws(() => verifyClaudeAuthentication({ env: {} }), /ANTHROPIC_API_KEY/);
+  assert.throws(() => verifyClaudeAuthentication({ env: {} }), /CLAUDE_CODE_OAUTH_TOKEN/);
+  // Достаточно любой одной переменной.
+  verifyClaudeAuthentication({ env: { CLAUDE_CODE_OAUTH_TOKEN: 'token' } });
+  verifyClaudeAuthentication({ env: { ANTHROPIC_API_KEY: 'key' } });
 });
 
 // Поддельный CLI записывает полученный argv: аргумент, обрезанный cmd.exe,

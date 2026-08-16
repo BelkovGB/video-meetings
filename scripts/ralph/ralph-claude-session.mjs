@@ -24,35 +24,47 @@ export const reasoningEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
  * Приём Codex — скопировать auth.json в песочницу — для Claude не переносится:
  * на Windows живой токен лежит не в `~/.claude/.credentials.json`, и
  * изолированный CLAUDE_CONFIG_DIR с копией этого файла даёт "Not logged in".
- * Документированный путь для headless-запуска — ANTHROPIC_API_KEY, поэтому
- * ключ явно пропускается в песочницу, а остальное окружение остаётся
- * очищенным.
+ *
+ * Годятся обе переменные, и это не equivalent: `CLAUDE_CODE_OAUTH_TOKEN` от
+ * `claude setup-token` работает по уже оплаченной подписке, а
+ * `ANTHROPIC_API_KEY` тарифицируется отдельно. Порядок предпочтения не
+ * навязывается: если заданы обе, решает CLI.
  */
+export const claudeCredentialVariables = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+
+function claudeCredentials(source) {
+  return Object.fromEntries(
+    claudeCredentialVariables
+      .map((name) => [name, source[name]?.trim()])
+      .filter(([, value]) => Boolean(value)),
+  );
+}
+
+function missingClaudeCredentials() {
+  const error = new Error(
+    `Не задана ни одна из переменных ${claudeCredentialVariables.join(' / ')}. ` +
+      'Claude-сессия Ralph запускается с изолированным HOME, где OAuth-состояние CLI ' +
+      'недоступно. Токен по подписке выдаёт `claude setup-token`; API-ключ ' +
+      'тарифицируется отдельно.',
+  );
+  error.code = 'RALPH_AGENT_AUTH';
+  return error;
+}
+
 export function createSandboxedClaudeEnvironment(source = process.env, options = {}) {
   const sandbox = createSandboxRoot(source, 'ralph-claude-');
   const configDir = path.join(sandbox.root, 'claude');
   mkdirSync(configDir, { recursive: true });
 
-  const apiKey = options.apiKey === undefined ? source.ANTHROPIC_API_KEY?.trim() : options.apiKey;
-  if (options.apiKey !== null) {
-    if (!apiKey) {
-      sandbox.cleanup();
-      const error = new Error(
-        'ANTHROPIC_API_KEY не задан. Claude-сессия Ralph запускается с изолированным ' +
-          'HOME, где OAuth-токен CLI недоступен; задайте ключ в окружении оператора.',
-      );
-      error.code = 'RALPH_AGENT_AUTH';
-      throw error;
-    }
+  const credentials = options.credentials ?? claudeCredentials(source);
+  if (Object.keys(credentials).length === 0) {
+    sandbox.cleanup();
+    throw missingClaudeCredentials();
   }
 
   return {
     root: sandbox.root,
-    env: {
-      ...sandbox.env,
-      CLAUDE_CONFIG_DIR: configDir,
-      ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}),
-    },
+    env: { ...sandbox.env, CLAUDE_CONFIG_DIR: configDir, ...credentials },
   };
 }
 
@@ -200,18 +212,15 @@ export async function runClaudeWithTurnLimit(args, options) {
 }
 
 /**
- * Проверяется наличие ключа, а не ответ CLI: `claude auth status` завершается
- * кодом 0 и когда пользователь не авторизован, а его OAuth-состояние всё равно
- * не попадёт в изолированный CLAUDE_CONFIG_DIR сессии.
+ * Проверяется наличие учётных данных в окружении, а не ответ CLI:
+ * `claude auth status` завершается кодом 0 и когда пользователь не авторизован,
+ * а его OAuth-состояние всё равно не попадёт в изолированный CLAUDE_CONFIG_DIR
+ * сессии.
  */
 export function verifyClaudeAuthentication(dependencies = {}) {
-  const source = dependencies.env ?? process.env;
-  if (!(dependencies.apiKey ?? source.ANTHROPIC_API_KEY?.trim())) {
-    const error = new Error(
-      'ANTHROPIC_API_KEY не задан. Claude-сессия Ralph запускается с изолированным HOME, ' +
-        'где OAuth-токен CLI недоступен; задайте ключ в окружении оператора.',
-    );
-    error.code = 'RALPH_AGENT_AUTH';
-    throw error;
+  const credentials =
+    dependencies.credentials ?? claudeCredentials(dependencies.env ?? process.env);
+  if (Object.keys(credentials).length === 0) {
+    throw missingClaudeCredentials();
   }
 }
