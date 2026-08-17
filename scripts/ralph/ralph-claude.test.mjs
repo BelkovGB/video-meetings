@@ -151,9 +151,13 @@ test('the sandbox keeps the host browser cache reachable', () => {
   // Песочница подменяет LOCALAPPDATA, и Playwright переставал находить
   // браузеры: агент, чинящий браузерный тест, оставался без обратной связи и
   // упирался в лимит шагов, подменяя проверку разбором diff.
-  const source = { PATH: process.env.PATH, LOCALAPPDATA: 'C:/Users/op/AppData/Local' };
+  // Обе переменные заданы намеренно: `test:ralph` выполняется внутри
+  // Linux-контейнера, а разработка идёт на Windows, и путь выводится из разных
+  // переменных. Тест, знающий только про win32, зеленел локально и ронял
+  // валидацию.
+  const source = { PATH: '', LOCALAPPDATA: 'C:/Users/op/AppData/Local', HOME: '/home/op' };
   const found = hostPlaywrightBrowsersPath(source, () => true);
-  assert.match(found.replaceAll('\\', '/'), /AppData\/Local\/ms-playwright$/);
+  assert.match(found.replaceAll('\\', '/'), /ms-playwright$/);
 
   // Явно заданный путь важнее выведенного.
   assert.equal(
@@ -166,8 +170,9 @@ test('the sandbox keeps the host browser cache reachable', () => {
     hostPlaywrightBrowsersPath(source, () => false),
     null,
   );
+  // Ни одной базовой переменной — выводить не из чего на любой платформе.
   assert.equal(
-    hostPlaywrightBrowsersPath({ PATH: '' }, () => true),
+    hostPlaywrightBrowsersPath({}, () => true),
     null,
   );
 });
