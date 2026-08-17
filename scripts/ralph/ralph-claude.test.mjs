@@ -20,6 +20,7 @@ import {
   runClaudeWithTurnLimit,
   verifyClaudeAuthentication,
 } from './ralph-claude-session.mjs';
+import { hostPlaywrightBrowsersPath } from './ralph-agent-session.mjs';
 import { withFakeClaude } from './ralph-test-support.mjs';
 
 const schemaPath = fileURLToPath(new URL('../../.agents/review.schema.json', import.meta.url));
@@ -144,6 +145,31 @@ test('reasoning is measured in tokens, not guessed from the log', () => {
   assert.equal(result.telemetry.thinkingTokens, 780);
   assert.equal(result.telemetry.outputTokens, 900);
   assert.equal(result.telemetry.costUsd, 1.25);
+});
+
+test('the sandbox keeps the host browser cache reachable', () => {
+  // Песочница подменяет LOCALAPPDATA, и Playwright переставал находить
+  // браузеры: агент, чинящий браузерный тест, оставался без обратной связи и
+  // упирался в лимит шагов, подменяя проверку разбором diff.
+  const source = { PATH: process.env.PATH, LOCALAPPDATA: 'C:/Users/op/AppData/Local' };
+  const found = hostPlaywrightBrowsersPath(source, () => true);
+  assert.match(found.replaceAll('\\', '/'), /AppData\/Local\/ms-playwright$/);
+
+  // Явно заданный путь важнее выведенного.
+  assert.equal(
+    hostPlaywrightBrowsersPath({ ...source, PLAYWRIGHT_BROWSERS_PATH: 'D:/cache' }, () => true),
+    'D:/cache',
+  );
+  // Каталога нет — переменная не выставляется вовсе: пустой путь хуже, чем его
+  // отсутствие, потому что скрывает причину отказа.
+  assert.equal(
+    hostPlaywrightBrowsersPath(source, () => false),
+    null,
+  );
+  assert.equal(
+    hostPlaywrightBrowsersPath({ PATH: '' }, () => true),
+    null,
+  );
 });
 
 test('a closed quota window is reported instead of being swallowed', () => {

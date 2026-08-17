@@ -17,12 +17,13 @@
   commit, or the next visual run silently compares against nothing.
 - For user-visible changes, verify affected interactions, keyboard accessibility,
   and the configured desktop, mobile, and mobile-landscape Playwright projects.
-- A Ralph session runs with a substituted `HOME` and `LOCALAPPDATA`, so it
-  usually has no browsers and the launch fails with an `Executable doesn't
-exist` error naming an `ms-playwright` path. On that error do not reinstall
-  browsers and do not retry — check the change by reading the code and by
-  types, and let the orchestrator run E2E. Interactive agents may use
-  Playwright MCP.
+- A Ralph session substitutes `HOME` and `LOCALAPPDATA` but keeps
+  `PLAYWRIGHT_BROWSERS_PATH` pointing at the host browser cache, so run the one
+  spec you are fixing: `npx playwright test <file> -g "<title>"` from
+  `apps/web`. Run that spec, not the suite — the suite belongs to the
+  orchestrator. If the launch still reports a missing executable under
+  `ms-playwright`, the cache is absent: do not reinstall browsers and do not
+  retry, verify by reading the code and by types instead.
 - Run focused checks during implementation. Do not reinstall browsers or rerun
   the complete validation suite from an isolated Ralph agent session.
 - Never create or update Playwright visual snapshots. A screenshot is only valid
