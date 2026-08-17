@@ -29,7 +29,12 @@ function validatePasswordChange(
 ): PasswordErrors {
   const errors: PasswordErrors = {};
 
-  if (passwordByteLength(currentPassword) > maximumPasswordBytes) {
+  // An empty field is caught here and never sent: the API counts a rate-limit
+  // attempt in a guard, before the DTO is validated, so an accidental blank
+  // submit would spend one of five attempts per fifteen minutes.
+  if (!currentPassword) {
+    errors.currentPassword = 'Введите текущий пароль.';
+  } else if (passwordByteLength(currentPassword) > maximumPasswordBytes) {
     errors.currentPassword = `Пароль не должен превышать ${maximumPasswordBytes} байта UTF-8.`;
   }
 
@@ -41,7 +46,9 @@ function validatePasswordChange(
     errors.newPassword = 'Новый пароль должен отличаться от текущего.';
   }
 
-  if (confirmation !== newPassword) {
+  if (!confirmation) {
+    errors.confirmation = 'Подтвердите новый пароль.';
+  } else if (confirmation !== newPassword) {
     errors.confirmation = 'Пароли не совпадают.';
   }
 

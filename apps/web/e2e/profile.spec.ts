@@ -635,6 +635,16 @@ test('validates and recovers from password-change failures without clearing the 
     'password-change-form.png',
   );
 
+  // An untouched form reports every blank field itself and sends nothing.
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#current-password-error')).toHaveText('Введите текущий пароль.');
+  await expect(page.locator('#password-confirmation-error')).toHaveText(
+    'Подтвердите новый пароль.',
+  );
+  await expect(currentPassword).toBeFocused();
+  expect(submittedPasswordChange).toBeUndefined();
+
+  await currentPassword.fill(password);
   await newPassword.fill('short');
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
   await expect(page.locator('#new-password-error')).toHaveText('Используйте не менее 9 символов.');
@@ -707,6 +717,26 @@ test('validates and recovers from password-change failures without clearing the 
     'Новый пароль должен отличаться от текущего.',
   );
   await expect(newPassword).toBeFocused();
+
+  // A blank field must never reach the API: the rate-limit guard runs before the
+  // DTO is validated, so an empty submit would spend one of five attempts per
+  // fifteen minutes and answer with the DTO's own English message.
+  await currentPassword.fill('');
+  await newPassword.fill('new-secure-password-456');
+  await confirmation.fill('new-secure-password-456');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#current-password-error')).toHaveText('Введите текущий пароль.');
+  await expect(currentPassword).toBeFocused();
+  expect(submittedPasswordChange).toBeUndefined();
+
+  await currentPassword.fill(password);
+  await confirmation.fill('');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-confirmation-error')).toHaveText(
+    'Подтвердите новый пароль.',
+  );
+  await expect(confirmation).toBeFocused();
+  expect(submittedPasswordChange).toBeUndefined();
 
   await currentPassword.fill('wrong-password');
   await newPassword.fill('new-secure-password-456');
