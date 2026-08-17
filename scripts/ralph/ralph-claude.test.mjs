@@ -20,7 +20,7 @@ import {
   runClaudeWithTurnLimit,
   verifyClaudeAuthentication,
 } from './ralph-claude-session.mjs';
-import { hostPlaywrightBrowsersPath } from './ralph-agent-session.mjs';
+import { addUsage, hostPlaywrightBrowsersPath } from './ralph-agent-session.mjs';
 import { withFakeClaude } from './ralph-test-support.mjs';
 
 const schemaPath = fileURLToPath(new URL('../../.agents/review.schema.json', import.meta.url));
@@ -145,6 +145,35 @@ test('reasoning is measured in tokens, not guessed from the log', () => {
   assert.equal(result.telemetry.thinkingTokens, 780);
   assert.equal(result.telemetry.outputTokens, 900);
   assert.equal(result.telemetry.costUsd, 1.25);
+});
+
+test('a session killed by the step limit still reports what it spent', () => {
+  // При обрыве по лимиту CLI не успевает прислать итоговое событие, и раньше
+  // самая дорогая сессия — сто шагов, тридцать четыре минуты — оставалась
+  // единственной без чисел.
+  const first = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        id: 'msg_1',
+        content: [{ type: 'text', text: 'иду' }],
+        usage: { input_tokens: 5, output_tokens: 100, cache_read_input_tokens: 1_000 },
+      },
+    }),
+  );
+  assert.deepEqual(first.usage.outputTokens, 100);
+  assert.equal(first.usage.thinkingTokens, null);
+
+  const second = { outputTokens: 40, cacheReadTokens: 2_000, thinkingTokens: 30 };
+  const total = addUsage(addUsage(null, first.usage), second);
+
+  assert.equal(total.outputTokens, 140);
+  assert.equal(total.cacheReadTokens, 3_000);
+  // Поле, пришедшее только во втором ответе, начинает считаться с него.
+  assert.equal(total.thinkingTokens, 30);
+  // Ни разу не сообщённое поле остаётся null, а не нулём: ноль в сводке
+  // читается как измеренная величина.
+  assert.equal(total.cacheCreationTokens, null);
 });
 
 test('the sandbox keeps the host browser cache reachable', () => {

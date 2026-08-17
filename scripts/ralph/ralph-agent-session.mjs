@@ -132,6 +132,26 @@ async function waitForChildTermination(child, childResult, graceMs) {
   ]);
 }
 
+/**
+ * Складывает счётчики токенов, сохраняя различие между нулём и «не сообщено».
+ * Поле, которого backend не присылает ни разу, обязано остаться null: ноль в
+ * сводке читается как измеренная величина.
+ */
+export function addUsage(total, usage) {
+  const sum = { ...(total ?? {}) };
+  for (const [field, value] of Object.entries(usage)) {
+    if (typeof value === 'number') {
+      sum[field] = (typeof sum[field] === 'number' ? sum[field] : 0) + value;
+    } else if (!(field in sum)) {
+      // Поле остаётся в записи как null, а не исчезает: форма сводки не должна
+      // зависеть от того, что backend прислал в конкретном ответе.
+      sum[field] = null;
+    }
+  }
+
+  return sum;
+}
+
 // -----------------------------------------------------------------------------
 // Circuit breaker: лимит шагов и wall-clock timeout
 // -----------------------------------------------------------------------------
@@ -188,18 +208,30 @@ export async function runAgentSession(backend, args, options) {
   // лимите шагов: единственный признак отказа приходит в потоке событий.
   let streamError = null;
   let backendTelemetry = null;
+  let accumulatedUsage = null;
   let toolResults = 0;
   let resolveTurnLimit;
   const seenStepIds = new Set();
+  // Считается один раз на сообщение: одно сообщение — один запрос к API, и
+  // повторное событие с тем же id удвоило бы его расход.
+  const countedUsageIds = new Set();
 
   // Сводка снимается в момент выхода, а выходов у сессии шесть, включая четыре
   // аварийных. Дороже всех именно они: оборванная по лимиту сессия успевает
   // потратить весь бюджет, и без её цены сводка прогона занижена.
+  //
+  // Итоговое событие CLI точнее, но при обрыве по лимиту шагов процесс убивают
+  // до него: на issue #57 сессия из ста шагов и тридцати четырёх минут осталась
+  // единственной без чисел. Поэтому суммы накапливаются по ходу, а итоговые
+  // перекрывают их — но только теми полями, которые в них действительно есть.
+  const reportedFields = (telemetry) =>
+    Object.fromEntries(Object.entries(telemetry ?? {}).filter(([, value]) => value !== null));
   const sessionTelemetry = () => ({
     turns,
     toolResults,
     wallMs: Date.now() - sessionStartedMs,
-    ...(backendTelemetry ?? {}),
+    ...(accumulatedUsage ?? {}),
+    ...reportedFields(backendTelemetry),
   });
 
   const handleLine = (line) => {
@@ -221,6 +253,10 @@ export async function runAgentSession(backend, args, options) {
     if (event.error) streamError ??= event.error;
     if (event.telemetry) backendTelemetry = event.telemetry;
     if (event.toolResults) toolResults += event.toolResults;
+    if (event.usage && event.stepId != null && !countedUsageIds.has(event.stepId)) {
+      countedUsageIds.add(event.stepId);
+      accumulatedUsage = addUsage(accumulatedUsage, event.usage);
+    }
 
     let currentTurn = null;
     if (event.stepId !== undefined && event.stepId !== null && !seenStepIds.has(event.stepId)) {

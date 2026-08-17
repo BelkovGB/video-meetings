@@ -204,11 +204,31 @@ function isSyntheticApiError(event) {
  * Ralph не считает шагом синтетический ответ на ошибку API, CLI считает, и
  * расхождение между двумя числами — признак транзиентных сбоев, а не дефекта.
  */
+/**
+ * Счётчики токенов из `usage`, под именами, которыми их знает сводка.
+ *
+ * Одна и та же форма приходит и в итоговом событии, и в каждом ответе
+ * ассистента, поэтому разбор общий: по ответам сумма собирается на случай, если
+ * итогового события не будет.
+ */
+function usageTokens(usage = {}) {
+  const numberOrNull = (value) => (typeof value === 'number' ? value : null);
+
+  return {
+    uncachedInputTokens: numberOrNull(usage.input_tokens),
+    outputTokens: numberOrNull(usage.output_tokens),
+    cacheReadTokens: numberOrNull(usage.cache_read_input_tokens),
+    cacheCreationTokens: numberOrNull(usage.cache_creation_input_tokens),
+    thinkingTokens: numberOrNull(usage.output_tokens_details?.thinking_tokens),
+  };
+}
+
 function claudeTelemetry(event) {
   const usage = event.usage ?? {};
   const numberOrNull = (value) => (typeof value === 'number' ? value : null);
 
   return {
+    ...usageTokens(usage),
     reportedTurns: numberOrNull(event.num_turns),
     // Рассуждения тарифицируются как выход. Без отдельного числа «дорого ли
     // обходится effort» остаётся мнением: метка шага в логе для этого не
@@ -290,6 +310,9 @@ function readClaudeEvent(line) {
       stepLabel: tools ? `tool_use ${tools}` : 'assistant_message',
       log: text || undefined,
       agentMessage: text || undefined,
+      // Счётчики за этот запрос. Итоговое событие точнее и перекроет их, но
+      // при обрыве по лимиту шагов оно не приходит вовсе.
+      usage: event.message?.usage ? usageTokens(event.message.usage) : undefined,
     };
   }
 
