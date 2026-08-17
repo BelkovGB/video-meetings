@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
 import type { ApiError, Meeting, MeetingFile } from '../../../lib/api/contracts';
@@ -27,12 +27,7 @@ export function useMeetingFiles(meetingId: string) {
   const shouldFocusStatusRef = useRef(false);
   const statusMessageRef = useRef<HTMLDivElement>(null);
 
-  const returnToLogin = useCallback(() => {
-    clearSessionIdentity();
-    router.replace('/login');
-  }, [router]);
-
-  useRestoredSessionGuard(returnToLogin);
+  useRestoredSessionGuard(clearSessionIdentity);
 
   useEffect(() => {
     if (statusMessage && shouldFocusStatusRef.current) {

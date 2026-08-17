@@ -632,12 +632,14 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page.locator('#new-password-error')).toHaveText(
     'Пароль не должен превышать 72 байта UTF-8.',
   );
+  await expect(newPassword).toBeFocused();
 
   await currentPassword.fill(password);
   await newPassword.fill('new-secure-password-456');
   await confirmation.fill('different-password');
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
   await expect(page.locator('#password-confirmation-error')).toHaveText('Пароли не совпадают.');
+  await expect(confirmation).toBeFocused();
 
   await newPassword.fill(password);
   await confirmation.fill(password);
@@ -645,6 +647,7 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page.locator('#new-password-error')).toHaveText(
     'Новый пароль должен отличаться от текущего.',
   );
+  await expect(newPassword).toBeFocused();
 
   await currentPassword.fill('passe\u0301word');
   await newPassword.fill('passéword');
@@ -653,6 +656,7 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page.locator('#new-password-error')).toHaveText(
     'Новый пароль должен отличаться от текущего.',
   );
+  await expect(newPassword).toBeFocused();
 
   await currentPassword.fill('wrong-password');
   await newPassword.fill('new-secure-password-456');
@@ -711,7 +715,9 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
     window.sessionStorage.setItem('userEmail', email);
   }, session);
   // The dashboard is visited on the way so that Back has an authenticated page
-  // to return to once the session is gone.
+  // to return to once the session is gone. Whichever way the browser serves that
+  // Back — a fresh mount or a back/forward-cache hit — the dashboard must not
+  // come back; the restored-page half is pinned on its own further below.
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText(
     session.email,
@@ -809,7 +815,7 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
   );
 });
 
-test('sends a meeting page restored by Back to sign-in after the password change', async ({
+test('sends a meeting page reopened by Back to sign-in after the password change', async ({
   page,
   request,
 }) => {
@@ -824,8 +830,10 @@ test('sends a meeting page restored by Back to sign-in after the password change
     window.sessionStorage.setItem('accessToken', accessToken);
     window.sessionStorage.setItem('userEmail', email);
   }, session);
-  // Both pages are opened as document navigations so that Back can restore the
-  // meeting page from the back/forward cache instead of mounting it again.
+  // Both pages are opened as document navigations, so Back leaves the sign-in
+  // screen for the meeting page by whichever route the browser picks. The
+  // restore route, which the browser will not take against the dev server, is
+  // covered by the test that follows.
   await page.goto(`/meetings/${meeting.id}`);
   await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
   await page.goto('/profile');
@@ -840,6 +848,52 @@ test('sends a meeting page restored by Back to sign-in after the password change
   await expect(page).toHaveURL('/login');
   await expect(page.getByText(meeting.title)).toHaveCount(0);
   await expect(page.getByText(session.email)).toHaveCount(0);
+});
+
+test('sends every authenticated page resumed without the session back to sign-in', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-password-restore');
+  const meeting = await createMeeting(request, session);
+  // Every screen the password change can leave behind in the same tab, so that
+  // dropping the guard from one of them is not hidden by the other two.
+  const resumablePages = [
+    { path: '/', content: page.getByRole('heading', { name: 'Рады видеть вас.' }) },
+    {
+      path: `/meetings/${meeting.id}`,
+      content: page.getByRole('heading', { name: meeting.title }),
+    },
+    { path: '/profile', content: page.getByLabel('Текущий пароль', { exact: true }) },
+  ];
+
+  for (const { path, content } of resumablePages) {
+    // Seeded per page instead of through `authenticate`: an init script would
+    // hand the token back and leave the guard with nothing to notice.
+    await page.goto('/login');
+    await page.evaluate(({ accessToken, email }) => {
+      window.sessionStorage.setItem('accessToken', accessToken);
+      window.sessionStorage.setItem('userEmail', email);
+    }, session);
+    await page.goto(path);
+    await expect(content).toBeVisible();
+
+    // A page served from the back/forward cache is resumed, not mounted, so the
+    // mount-time token check never runs again and only `pageshow` can see that
+    // the password change ended the session meanwhile. That resume is raised
+    // here rather than by pressing Back because the E2E suite runs against
+    // `next dev`, which sends `Cache-Control: no-store` over plain HTTP and so
+    // keeps Chromium from storing the page in the first place — pressing Back
+    // would silently re-mount and exercise the mount-time check instead.
+    await page.evaluate(() => {
+      window.sessionStorage.clear();
+      window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+    });
+
+    await expect(page).toHaveURL('/login');
+    await expect(content).toHaveCount(0);
+    await expect(page.getByText(session.email)).toHaveCount(0);
+  }
 });
 
 test('clears an expired session and redirects to login without showing profile data', async ({

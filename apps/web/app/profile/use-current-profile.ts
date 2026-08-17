@@ -39,7 +39,7 @@ export function useCurrentProfile(): CurrentProfile {
     router.replace(passwordChangedLoginPath);
   }, [router]);
 
-  useRestoredSessionGuard(handleUnauthorized);
+  useRestoredSessionGuard(clearSession);
 
   useEffect(() => {
     const token = readAccessToken();

@@ -63,7 +63,7 @@ export function useDashboardData(): DashboardData {
     clearSessionAndRedirectToLogin(router);
   }, [router]);
 
-  useRestoredSessionGuard(returnToLogin);
+  useRestoredSessionGuard(clearSession);
 
   useEffect(() => {
     const token = readAccessToken();
