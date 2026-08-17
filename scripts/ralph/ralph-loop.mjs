@@ -325,6 +325,21 @@ function closeIssue(config, repository, issue, commit) {
  * Читается до первого updateIssue: тот сразу перезаписывает фазу, и после него
  * отличить прерванное закрытие от обычного продолжения уже нечем.
  */
+/**
+ * С какого коммита следующая сессия продолжит issue.
+ *
+ * Это HEAD, если работа issue уже в его истории, и сам commit, если история
+ * разошлась: перенос базы вперёд по чужой ветке потерял бы работу вместо того,
+ * чтобы её продолжить.
+ */
+export function baseForNextSession(commit, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const head = execute('git', ['rev-parse', 'HEAD']).stdout;
+  const contains = dependencies.isAncestorCommit ?? isAncestorCommit;
+
+  return head && contains(commit, head, execute) ? head : commit;
+}
+
 export function reviewAlreadyPassed(issue, commit) {
   const storedIssue = activeStateStore()?.issue;
 
@@ -416,16 +431,22 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
     updateIssueReviewContext(repository, issue, review);
     // Состояние сохраняется, а не стирается: реализация уже в HEAD и уже прошла
     // валидацию, и следующая сессия должна чинить замечания поверх неё, а не
-    // выяснять заново, что сделано. `startingCommit` обязан переехать на этот
-    // commit — иначе сверка HEAD отвергнет повторный прогон, а проверка «ровно
-    // один commit» отвергнет исправляющий commit.
+    // выяснять заново, что сделано. `startingCommit` обязан переехать вперёд —
+    // иначе сверка HEAD отвергнет повторный прогон, а проверка «ровно один
+    // commit» отвергнет исправляющий commit.
     //
-    // Запись идёт до публикации комментария: 17 августа обрыв на комментарии
-    // оставил фазу `reviewing` без `reviewedCommit`, и вердикт FAIL, стоивший
-    // 4m19s, пришлось бы получать заново.
+    // Переезжает он именно на HEAD, а не на commit issue. Между ними могут
+    // лежать чужие коммиты: 17 августа это были мои правки Ralph, попавшие в
+    // ветку в том же прогоне, и следующая итерация потребовала HEAD, который
+    // остался двумя коммитами позади. Примирение в начале фазы такое уже не
+    // ловит — фаза началась раньше, чем состояние было записано.
+    //
+    // Запись идёт до публикации комментария: обрыв на комментарии оставил фазу
+    // `reviewing` без `reviewedCommit`, и вердикт FAIL, стоивший 4m19s,
+    // пришлось бы получать заново.
     activeStateStore()?.updateIssue({
       phase: 'review-failed',
-      startingCommit: commit,
+      startingCommit: baseForNextSession(commit),
       commit,
       // Отметка «этот commit проверен целиком»: следующему ревью не нужно
       // заново проходить то, что уже признано чистым.

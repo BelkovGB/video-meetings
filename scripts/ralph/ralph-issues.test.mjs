@@ -18,7 +18,7 @@ import {
   summarizeCommandFailure,
   uniqueFailedTests,
 } from './ralph-failure-summary.mjs';
-import { committedRecoveryPhases } from './ralph-loop.mjs';
+import { baseForNextSession, committedRecoveryPhases } from './ralph-loop.mjs';
 import {
   alreadyFixedCommitFromAgent,
   filesChangedBetween,
@@ -878,4 +878,38 @@ test('потерянный комментарий не роняет цикл, а
   assert.equal(errors.length, 1);
   assert.match(errors[0], /#82/);
   assert.match(errors[0], /потерян только комментарий/);
+});
+
+test('после отказа ревью база следующей сессии — HEAD, а не commit issue', () => {
+  const commit = 'a'.repeat(40);
+  const head = 'b'.repeat(40);
+
+  // Обычный случай: HEAD и есть commit issue.
+  assert.equal(
+    baseForNextSession(commit, {
+      run: () => ({ status: 0, stdout: commit }),
+      isAncestorCommit: () => true,
+    }),
+    commit,
+  );
+
+  // Ветка ушла вперёд, работа issue в её истории. Так было 17 августа: между
+  // коммитом issue и HEAD легли правки Ralph, и следующая итерация потребовала
+  // HEAD, отставший на два коммита.
+  assert.equal(
+    baseForNextSession(commit, {
+      run: () => ({ status: 0, stdout: head }),
+      isAncestorCommit: () => true,
+    }),
+    head,
+  );
+
+  // История разошлась: перенос базы вперёд потерял бы работу issue.
+  assert.equal(
+    baseForNextSession(commit, {
+      run: () => ({ status: 0, stdout: head }),
+      isAncestorCommit: () => false,
+    }),
+    commit,
+  );
 });
