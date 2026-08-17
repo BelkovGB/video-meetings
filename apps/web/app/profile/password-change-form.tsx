@@ -66,44 +66,61 @@ const unknownServerError: ServerError = {
 // Server errors are routed by `code` and worded here, because everything else on
 // this screen is Russian and the API answers in English. Matching its prose
 // instead would unmark the field the moment a message is reworded.
-const serverErrorsByCode: Record<string, ServerError> = {
-  CURRENT_PASSWORD_INCORRECT: { field: 'currentPassword', message: 'Неверный текущий пароль.' },
-  NEW_PASSWORD_NOT_DIFFERENT: {
-    field: 'newPassword',
-    message: 'Новый пароль должен отличаться от текущего.',
-  },
-  PASSWORD_CONFIRMATION_MISMATCH: { field: 'confirmation', message: 'Пароли не совпадают.' },
-  PASSWORD_CHANGE_RATE_LIMITED: {
-    field: null,
-    message: 'Слишком много попыток изменить пароль. Повторите через несколько минут.',
-  },
-};
+// A `Map` rather than an object literal: both keys come off the wire, and a
+// server-supplied `constructor` or `toString` would hit `Object.prototype` in a
+// literal and resolve to an inherited function with no message to show.
+const serverErrorsByCode = new Map<string, ServerError>([
+  ['CURRENT_PASSWORD_INCORRECT', { field: 'currentPassword', message: 'Неверный текущий пароль.' }],
+  [
+    'NEW_PASSWORD_NOT_DIFFERENT',
+    { field: 'newPassword', message: 'Новый пароль должен отличаться от текущего.' },
+  ],
+  ['PASSWORD_CONFIRMATION_MISMATCH', { field: 'confirmation', message: 'Пароли не совпадают.' }],
+  [
+    'PASSWORD_CHANGE_RATE_LIMITED',
+    {
+      field: null,
+      message: 'Слишком много попыток изменить пароль. Повторите через несколько минут.',
+    },
+  ],
+]);
 
 // A `VALIDATION_FAILED` response names the rejected request properties instead.
 // Local validation normally catches these first, so they are reached only when
 // the two rule sets drift apart.
-const serverErrorsByField: Record<string, ServerError> = {
-  currentPassword: {
-    field: 'currentPassword',
-    message: `Введите текущий пароль не длиннее ${maximumPasswordBytes} байт UTF-8.`,
-  },
-  newPassword: {
-    field: 'newPassword',
-    message: `Используйте не менее ${minimumPasswordLength} символов и не более ${maximumPasswordBytes} байт UTF-8.`,
-  },
-  confirmation: { field: 'confirmation', message: 'Подтвердите новый пароль.' },
-};
+const serverErrorsByField = new Map<string, ServerError>([
+  [
+    'currentPassword',
+    {
+      field: 'currentPassword',
+      message: `Введите текущий пароль не длиннее ${maximumPasswordBytes} байт UTF-8.`,
+    },
+  ],
+  [
+    'newPassword',
+    {
+      field: 'newPassword',
+      message: `Используйте не менее ${minimumPasswordLength} символов и не более ${maximumPasswordBytes} байт UTF-8.`,
+    },
+  ],
+  ['confirmation', { field: 'confirmation', message: 'Подтвердите новый пароль.' }],
+]);
 
 async function readServerError(response: Response): Promise<ServerError> {
   try {
     const body = (await response.json()) as CodedApiError;
     if (body.code === 'VALIDATION_FAILED') {
-      const rejectedField = body.fields?.find((field) => field in serverErrorsByField);
-      if (rejectedField) {
-        return serverErrorsByField[rejectedField];
+      for (const field of body.fields ?? []) {
+        const rejection = serverErrorsByField.get(field);
+        if (rejection) {
+          return rejection;
+        }
       }
-    } else if (body.code && body.code in serverErrorsByCode) {
-      return serverErrorsByCode[body.code];
+    } else if (body.code) {
+      const rejection = serverErrorsByCode.get(body.code);
+      if (rejection) {
+        return rejection;
+      }
     }
   } catch {
     // A malformed error response gets a safe, recoverable fallback.

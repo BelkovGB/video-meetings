@@ -808,6 +808,59 @@ test('validates and recovers from password-change failures without clearing the 
   );
   await expect(newPassword).toBeFocused();
 
+  // The API names all three properties, so all three routes are driven here: a
+  // typo in one key would otherwise drop that rejection into the generic slot
+  // with no field marked, and every assertion would still pass.
+  passwordChangeFailure = {
+    status: 400,
+    body: {
+      statusCode: 400,
+      message: ['currentPassword must contain no more than 72 UTF-8 bytes'],
+      error: 'Bad Request',
+      code: 'VALIDATION_FAILED',
+      fields: ['currentPassword'],
+    },
+  };
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#current-password-error')).toHaveText(
+    'Введите текущий пароль не длиннее 72 байт UTF-8.',
+  );
+  await expect(currentPassword).toBeFocused();
+
+  passwordChangeFailure = {
+    status: 400,
+    body: {
+      statusCode: 400,
+      message: ['confirmation should not be empty'],
+      error: 'Bad Request',
+      code: 'VALIDATION_FAILED',
+      fields: ['confirmation'],
+    },
+  };
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-confirmation-error')).toHaveText(
+    'Подтвердите новый пароль.',
+  );
+  await expect(confirmation).toBeFocused();
+
+  // `forbidNonWhitelisted` names a property this screen has no field for. It
+  // must still say something in Russian rather than fall silent.
+  passwordChangeFailure = {
+    status: 400,
+    body: {
+      statusCode: 400,
+      message: ['property unexpectedProperty should not exist'],
+      error: 'Bad Request',
+      code: 'VALIDATION_FAILED',
+      fields: ['unexpectedProperty'],
+    },
+  };
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText(
+    'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+  );
+  await expect(page.locator('#password-confirmation-error')).toHaveCount(0);
+
   passwordChangeFailure = {
     status: 429,
     body: {
@@ -836,6 +889,41 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page.getByText('Current credentials were rejected')).toHaveCount(0);
   await expect(currentPassword).toBeFocused();
   await expect(page).toHaveURL('/profile');
+
+  // A `code` or a rejected field named after an `Object.prototype` member is
+  // still just an unknown failure. Looking it up in a plain object would find
+  // the inherited function, whose `message` is `undefined`, and the screen would
+  // re-enable itself having told the user nothing at all.
+  for (const inherited of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    passwordChangeFailure = {
+      status: 400,
+      body: { message: 'Rejected', code: 'CURRENT_PASSWORD_INCORRECT' },
+    };
+    await page.getByRole('button', { name: 'Изменить пароль' }).click();
+    await expect(page.locator('#current-password-error')).toHaveText('Неверный текущий пароль.');
+
+    passwordChangeFailure = { status: 400, body: { message: 'Rejected', code: inherited } };
+    await page.getByRole('button', { name: 'Изменить пароль' }).click();
+    await expect(page.locator('#password-change-error')).toHaveText(
+      'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+    );
+
+    passwordChangeFailure = {
+      status: 400,
+      body: { message: 'Rejected', code: 'CURRENT_PASSWORD_INCORRECT' },
+    };
+    await page.getByRole('button', { name: 'Изменить пароль' }).click();
+    await expect(page.locator('#current-password-error')).toHaveText('Неверный текущий пароль.');
+
+    passwordChangeFailure = {
+      status: 400,
+      body: { message: 'Rejected', code: 'VALIDATION_FAILED', fields: [inherited] },
+    };
+    await page.getByRole('button', { name: 'Изменить пароль' }).click();
+    await expect(page.locator('#password-change-error')).toHaveText(
+      'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+    );
+  }
 });
 
 test('changes the password by keyboard, signs out, blocks protected routes, and requires the new password', async ({

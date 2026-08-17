@@ -28,7 +28,8 @@ JSON except for the multipart file-upload endpoint.
 
 ## Request validation errors
 
-Any endpoint that rejects a request body answers with the same shape:
+Any endpoint that rejects a request body because it broke a DTO rule answers
+with the same shape:
 
 ```json
 {
@@ -41,7 +42,13 @@ Any endpoint that rejects a request body answers with the same shape:
 ```
 
 `message` is English prose for developers and is free to be reworded. A client
-that shows its own text routes the failure by `code` and `fields`.
+that shows its own text routes the failure by `code` and `fields`. A property of a
+nested object is named by its dotted path, as in `parent.child`.
+
+Rejections raised by a handler, a service or a guard instead of by validation
+carry only the keys that code sets, usually just `{"message": …, "code": …}`.
+Neither `statusCode` nor `error` is guaranteed outside the shape above, so route
+those failures by `code` and the HTTP status alone.
 
 ## Authentication
 
@@ -197,8 +204,10 @@ thirty per client IP per minute. A rejected excess attempt returns `429 Too Many
 Requests` with `Retry-After`; it does not change the password or revoke the
 caller session.
 
-Every rejection carries a machine-readable `code`, because `message` is English
-prose that a localized client must not parse:
+These five codes are exhaustive for the `400` and `429` rejections of this
+endpoint, because `message` is English prose that a localized client must not
+parse. The `401` of a missing, legacy or revoked session and the `404` of a
+deleted account carry no `code`:
 
 | `code`                           | Status | Meaning                                             |
 | -------------------------------- | ------ | --------------------------------------------------- |
