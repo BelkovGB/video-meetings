@@ -641,6 +641,32 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page.locator('#password-confirmation-error')).toHaveText('Пароли не совпадают.');
   await expect(confirmation).toBeFocused();
 
+  // Recovery means editing one field while another still shows an error, so
+  // typing must keep the caret where the user put it. Typed key by key on
+  // purpose: `fill()` focuses its own target and writes in a single event,
+  // which hides a form that moves focus on every keystroke.
+  await newPassword.click();
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('retyped-secure-password-456');
+  await expect(newPassword).toBeFocused();
+  await expect(newPassword).toHaveValue('retyped-secure-password-456');
+  await expect(confirmation).toHaveValue('different-password');
+
+  // Two errors out of one submit: focus goes to the first of them once, and
+  // correcting the other one keeps it there.
+  await newPassword.fill('short');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#new-password-error')).toHaveText('Используйте не менее 9 символов.');
+  await expect(page.locator('#password-confirmation-error')).toHaveText('Пароли не совпадают.');
+  await expect(newPassword).toBeFocused();
+
+  await confirmation.click();
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('short');
+  await expect(confirmation).toBeFocused();
+  await expect(confirmation).toHaveValue('short');
+  await expect(page.locator('#new-password-error')).toHaveText('Используйте не менее 9 символов.');
+
   await newPassword.fill(password);
   await confirmation.fill(password);
   await page.getByRole('button', { name: 'Изменить пароль' }).click();

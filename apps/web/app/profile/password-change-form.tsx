@@ -93,6 +93,7 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
   const currentPasswordRef = useRef<HTMLInputElement>(null);
   const newPasswordRef = useRef<HTMLInputElement>(null);
   const confirmationRef = useRef<HTMLInputElement>(null);
+  const shouldFocusErrorRef = useRef(false);
 
   const focusField = (field: PasswordField) => {
     const refs = {
@@ -103,11 +104,18 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
     requestAnimationFrame(() => refs[field].current?.focus());
   };
 
+  // Focus follows a rejected submit, never the error state itself: clearing one
+  // field's error while another is still set would otherwise pull the caret out
+  // of the field being typed into and append the rest of the value elsewhere.
   useEffect(() => {
+    if (isSubmitting || !shouldFocusErrorRef.current) {
+      return;
+    }
+    shouldFocusErrorRef.current = false;
     const field = (['currentPassword', 'newPassword', 'confirmation'] as const).find(
       (name) => errors[name],
     );
-    if (field && !isSubmitting) {
+    if (field) {
       focusField(field);
     }
   }, [errors, isSubmitting]);
@@ -122,6 +130,7 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
 
     const validationErrors = validatePasswordChange(currentPassword, newPassword, confirmation);
     if (Object.keys(validationErrors).length > 0) {
+      shouldFocusErrorRef.current = true;
       setErrors(validationErrors);
       setRequestError(null);
       return;
@@ -157,6 +166,7 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
         const message = await getPasswordChangeApiError(response);
         const field = getServerErrorField(message);
         if (field) {
+          shouldFocusErrorRef.current = true;
           setErrors({ [field]: message });
         } else {
           setRequestError(message);
