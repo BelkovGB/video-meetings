@@ -20,6 +20,7 @@ import {
 import { committedRecoveryPhases } from './ralph-loop.mjs';
 import {
   alreadyFixedCommitFromAgent,
+  isAncestorCommit,
   issueChangeInventory,
   linkedCommitForIssue,
 } from './ralph-git.mjs';
@@ -159,6 +160,25 @@ test('after a rejected review the retry is told the work is already committed', 
   // Замечания в prompt не копируются: их несёт тело issue, которое и так
   // подставляется целиком.
   assert.doesNotMatch(prompt, /Location:/);
+});
+
+test('a branch that moved on is judged by ancestry, not by an exact HEAD match', () => {
+  const calls = [];
+  const run = (_name, args) => {
+    calls.push(args.join(' '));
+    return { status: args.includes('--is-ancestor') && args[2] === 'old' ? 0 : 1 };
+  };
+
+  // Коммит Ralph остался предком: ветка просто ушла вперёд, и продолжать можно.
+  assert.equal(isAncestorCommit('old', 'new', run), true);
+  assert.equal(calls.at(-1), 'merge-base --is-ancestor old new');
+
+  // Чужая история — не продолжение: здесь отказ остаётся правильным ответом.
+  assert.equal(isAncestorCommit('other', 'new', run), false);
+  // Отсутствующий commit не должен превращаться в вызов git с undefined.
+  assert.equal(isAncestorCommit(null, 'new', run), false);
+  assert.equal(isAncestorCommit('old', undefined, run), false);
+  assert.equal(calls.length, 2);
 });
 
 test('a rejected review never resumes without a new agent session', () => {

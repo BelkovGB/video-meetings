@@ -49,6 +49,19 @@ export function issueCommits(issue, head, execute = run) {
   return found.stdout.split(/\r?\n/).filter((line) => /^[0-9a-f]{40}$/i.test(line));
 }
 
+/**
+ * Является ли commit предком другого. Нужно там, где ветка законно ушла вперёд
+ * и точное совпадение HEAD спрашивать не за что.
+ */
+export function isAncestorCommit(ancestor, descendant, execute = run) {
+  if (!ancestor || !descendant) return false;
+
+  return (
+    execute('git', ['merge-base', '--is-ancestor', ancestor, descendant], { allowFailure: true })
+      .status === 0
+  );
+}
+
 function commitParent(commit, execute) {
   const parent = execute('git', ['rev-parse', '--verify', `${commit}^`], { allowFailure: true });
 

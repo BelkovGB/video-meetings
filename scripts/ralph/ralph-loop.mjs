@@ -59,6 +59,7 @@ import {
   commitMessageFromAgent,
   commitStagedChanges,
   commitTrailerForIssue,
+  isAncestorCommit,
   issueChangeInventory,
   linkedCommitForIssue,
   pushBranchAndVerify,
@@ -496,7 +497,26 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
 
   const currentHead = run('git', ['rev-parse', 'HEAD']).stdout;
   const continuation = Boolean(storedIssue);
-  const startingCommit = storedIssue?.startingCommit ?? currentHead;
+  const storedStart = storedIssue?.startingCommit;
+  // После отказа ревью работа уже закоммичена, а дерево чистое, поэтому ушедшая
+  // вперёд ветка ничему не мешает: замечания чинятся поверх нового HEAD. Точное
+  // совпадение здесь требовать не за что, и требование стоило потерянной задачи
+  // каждый раз, когда между прогонами в ветку попадал любой другой commit.
+  // Остальные фазы держат незакоммиченный diff — там сдвиг HEAD означает, что
+  // сохранённое состояние больше не описывает дерево, и это по-прежнему отказ.
+  const branchMovedOnAfterReview =
+    storedIssue?.phase === 'review-failed' &&
+    storedStart !== currentHead &&
+    workingTreeStatus() === '' &&
+    isAncestorCommit(storedStart, currentHead);
+  if (branchMovedOnAfterReview) {
+    console.log(
+      `Issue #${issue.number}: ветка ушла вперёд с ${storedStart.slice(0, 8)} ` +
+        `до ${currentHead.slice(0, 8)}; замечания ревью чиним поверх нового HEAD.`,
+    );
+    activeStateStore()?.updateIssue({ startingCommit: currentHead });
+  }
+  const startingCommit = branchMovedOnAfterReview ? currentHead : (storedStart ?? currentHead);
   if (startingCommit !== currentHead) {
     fail(
       `Issue #${issue.number}: recovery ожидал HEAD ${startingCommit}, но найден ${currentHead}.`,
