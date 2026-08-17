@@ -15,6 +15,7 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useRef, useState } from 'react';
 import { apiUrl } from '../lib/api/config';
 import type { ApiError, Meeting } from '../lib/api/contracts';
+import { apiErrorMessage } from '../lib/api/errors';
 import { readAccessToken } from '../lib/auth/session';
 import { CloseIcon } from './dashboard-icons';
 
@@ -57,13 +58,11 @@ function getMeetingDateError(value: string): string | undefined {
   return undefined;
 }
 
-function getApiErrorMessage(error: ApiError) {
-  if (Array.isArray(error.message)) {
-    return 'Проверьте название и дату встречи.';
-  }
-
-  return error.message ?? 'Не удалось выполнить запрос. Попробуйте ещё раз.';
-}
+// The API answers field validation in English; this screen words its own.
+const meetingErrorFallback = {
+  default: 'Не удалось выполнить запрос. Попробуйте ещё раз.',
+  validation: 'Проверьте название и дату встречи.',
+};
 
 export function CreateMeetingDialog({
   isOpen,
@@ -153,7 +152,7 @@ export function CreateMeetingDialog({
       const data = (await response.json()) as Omit<Meeting, 'accessRole'> & ApiError;
 
       if (!response.ok || !data.id) {
-        setSubmitError(getApiErrorMessage(data));
+        setSubmitError(apiErrorMessage(data, meetingErrorFallback));
         return;
       }
 

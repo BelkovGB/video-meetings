@@ -520,6 +520,46 @@ test('synchronizes the saved display name with the dashboard identity and keeps 
   );
 });
 
+test('falls back to a recoverable sentence when the API error body carries no message', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-empty-error-body');
+  await authenticate(page, session);
+  // The three bodies an API can answer with while still saying nothing usable:
+  // an empty validation array element, a message of the wrong shape, and prose
+  // that is not JSON at all. None of them may reach the screen as a blank error.
+  let rejectionBody = JSON.stringify({ message: [''] });
+
+  await page.route('**/users/me', async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.continue();
+      return;
+    }
+
+    await route.fulfill({ status: 400, contentType: 'application/json', body: rejectionBody });
+  });
+
+  await page.goto('/profile');
+  const displayNameInput = page.getByLabel('Отображаемое имя');
+  const fallback = 'Не удалось сохранить имя. Исправьте значение и повторите попытку.';
+
+  await displayNameInput.fill('Пустой ответ');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+  await expect(page.locator('#display-name-error')).toHaveText(fallback);
+
+  rejectionBody = JSON.stringify({ message: { detail: 'rejected' } });
+  await displayNameInput.fill('Ответ не той формы');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+  await expect(page.locator('#display-name-error')).toHaveText(fallback);
+
+  rejectionBody = 'Bad Request';
+  await displayNameInput.fill('Ответ не JSON');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+  await expect(page.locator('#display-name-error')).toHaveText(fallback);
+  await expect(displayNameInput).toBeFocused();
+});
+
 test('does not let stale dashboard hydration overwrite a newly saved display name', async ({
   page,
   request,

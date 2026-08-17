@@ -3,7 +3,8 @@
 import { ChangeEvent, FormEvent, RefObject, useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
-import type { ApiError, Avatar } from '../../lib/api/contracts';
+import type { Avatar } from '../../lib/api/contracts';
+import { readApiErrorMessage } from '../../lib/api/errors';
 import { readAccessToken } from '../../lib/auth/session';
 
 const maxAvatarBytes = 5 * 1024 * 1024;
@@ -116,7 +117,9 @@ export function useAvatarActions({
         return;
       }
       if (!response.ok) {
-        setError(await getAvatarApiError(response));
+        setError(
+          await readApiErrorMessage(response, 'Не удалось загрузить аватар. Повторите попытку.'),
+        );
         return;
       }
 
@@ -159,7 +162,7 @@ export function useAvatarActions({
       }
       if (!response.ok) {
         setError(
-          await getAvatarApiError(response, 'Не удалось удалить аватар. Повторите попытку.'),
+          await readApiErrorMessage(response, 'Не удалось удалить аватар. Повторите попытку.'),
         );
         return;
       }
@@ -186,22 +189,4 @@ export function useAvatarActions({
     uploadAvatar,
     removeAvatar,
   };
-}
-
-/**
- * Reads the API error message. An empty first array element falls back instead
- * of rendering an empty message, unlike the display name form.
- */
-async function getAvatarApiError(
-  response: Response,
-  fallback = 'Не удалось загрузить аватар. Повторите попытку.',
-) {
-  try {
-    const body = (await response.json()) as ApiError;
-    if (typeof body.message === 'string') return body.message;
-    if (Array.isArray(body.message) && body.message[0]) return body.message[0];
-  } catch {
-    // The server response is not always JSON, but a field-level failure is still actionable.
-  }
-  return fallback;
 }
