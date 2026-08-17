@@ -62,6 +62,9 @@
   per container next to `validationRunTimeoutMs` per run.
 - A shared type belongs to the contract module, not to the component that first
   needed it.
+- Do not combine a redesign, a behaviour change and a structural extraction in
+  one commit. Each is reviewed against a different question, and together they
+  hide each other.
 - Size is a signal, not a target. Split where a unit has more than one reason to
   change, so one subject area lives in one file and can be read without reading
   its neighbours. Do not split into single-method helpers: that makes things

@@ -3,13 +3,26 @@
 - Use the Next.js App Router under `app/`. Prefer Server Components; add
   `'use client'` only for browser state, effects, or event handlers.
 - Never expose server secrets; only `NEXT_PUBLIC_` variables may reach the client.
+- One place per shared concern: the API base URL, response contracts and error
+  shapes live in `lib/api/`, and every read, write and clearing of the browser
+  session goes through `lib/auth/session.ts`. Re-declaring either inside a page
+  is how this app ended up with five different behaviours on a 401.
+- Never import a Nest DTO class into browser code. Share a pure TypeScript
+  contract or a generated OpenAPI type instead.
+- A route file is a composition shell. Loading, mutation and auth-failure
+  handling belong in a hook; rendering belongs in components the shell arranges.
+- Renaming or splitting a spec that owns visual snapshots orphans its baselines:
+  `snapshotPathTemplate` contains the spec path, and
+  `e2e/profile.spec.ts-snapshots/` holds 18 PNGs. Move the directory in the same
+  commit, or the next visual run silently compares against nothing.
 - For user-visible changes, verify affected interactions, keyboard accessibility,
   and the configured desktop, mobile, and mobile-landscape Playwright projects.
 - A Ralph session runs with a substituted `HOME` and `LOCALAPPDATA`, so it
-  usually has no browsers: the launch fails with `Executable doesn't exist at
-...\ms-playwright\...`. On that error do not reinstall browsers and do not
-  retry — check the change by reading the code and by types, and let the
-  orchestrator run E2E. Interactive agents may use Playwright MCP.
+  usually has no browsers and the launch fails with an `Executable doesn't
+exist` error naming an `ms-playwright` path. On that error do not reinstall
+  browsers and do not retry — check the change by reading the code and by
+  types, and let the orchestrator run E2E. Interactive agents may use
+  Playwright MCP.
 - Run focused checks during implementation. Do not reinstall browsers or rerun
   the complete validation suite from an isolated Ralph agent session.
 - Never create or update Playwright visual snapshots. A screenshot is only valid
