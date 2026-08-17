@@ -15,7 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { readJsonFile, writeJsonAtomic } from './ralph-runtime.mjs';
-import { fail } from './ralph-scope.mjs';
+import { fail, validationScriptsForChangedFiles } from './ralph-scope.mjs';
 import { credentialFreeEnvironment, run } from './ralph-process-runner.mjs';
 import { agentInstructionFiles, trustedFileHash } from './ralph-config.mjs';
 import { stripAnsi } from './ralph-failure-summary.mjs';
@@ -425,12 +425,30 @@ export function runPreflight(config) {
   });
 }
 
-export function runConfiguredValidation(config) {
+/**
+ * `changedFiles` — пути, которые изменила эта issue. По ним набор сокращается
+ * до применимых проверок; без них выполняется полный набор.
+ *
+ * Перед созданием PR валидация вызывается без аргумента намеренно: сокращённые
+ * прогоны покрывают каждую issue по отдельности, а ветку целиком должен один
+ * раз проверить полный набор.
+ */
+export function runConfiguredValidation(config, changedFiles) {
   // Проверка стоит здесь, а не в runConfiguredScripts: дрейф вносит только
   // сессия агента, а preflight выполняется по заведомо чистому дереву.
   assertValidationDependenciesCommitted();
+  const selection = config.scopedValidation
+    ? validationScriptsForChangedFiles(config.validationScripts, changedFiles)
+    : { scripts: config.validationScripts, skipped: [], narrowed: false, requiresDatabase: true };
+  if (selection.narrowed) {
+    console.log(
+      `Validation сокращена по области изменения: пропущены ${selection.skipped.join(', ')}.`,
+    );
+  }
   // Каждый validation-запуск получает новый контейнер с новой изолированной БД и
   // выполняет preflight первым, чтобы migration текущей issue была применена
   // внутри того же контейнера, что и остальные scripts.
-  return runConfiguredScripts(config, config.validationScripts, 'Validation');
+  return runConfiguredScripts(config, selection.scripts, 'Validation', {
+    includePreflight: selection.requiresDatabase,
+  });
 }

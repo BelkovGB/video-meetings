@@ -92,6 +92,72 @@ export function reviewAuditAreas(changedFiles = []) {
     .map(([area]) => area);
 }
 
+/**
+ * Какие проверки может сломать изменение конкретного файла.
+ *
+ * Полный набор поднимает контейнер с PostgreSQL и прогоняет оба набора E2E —
+ * это минуты на каждую issue. Правка спеки Playwright не может уронить E2E API,
+ * а правка Markdown — вообще ничего, кроме форматирования. Сокращается не
+ * тщательность, а заведомо неприменимая проверка.
+ *
+ * Порядок значим: первое совпадение и есть ответ. Markdown идёт первым, иначе
+ * `apps/web/README.md` притянул бы за собой сборку и браузерные тесты.
+ *
+ * Список намеренно неполон. Незнакомый путь — это полный набор, а не пустой:
+ * пропущенная проверка обнаруживается через несколько issue и стоит дороже
+ * лишнего прогона.
+ */
+const validationAreas = [
+  [/\.md$/, ['format:check']],
+  [/^\.github\//, ['format:check']],
+  // Изменения в API ломают и его собственные E2E, и браузерные: Playwright
+  // поднимает рядом настоящий сервер API.
+  [/^apps\/api\//, ['format:check', 'lint', 'build', 'test:e2e:api', 'test:e2e:web']],
+  [/^apps\/web\//, ['format:check', 'lint', 'build', 'test:e2e:web']],
+  [/^scripts\//, ['format:check', 'lint', 'test:ralph']],
+];
+
+// Что нельзя выполнить без поднятой и мигрированной базы. Когда ни одна такая
+// проверка не выбрана, preflight не выполняется вовсе.
+const databaseBackedScripts = new Set(['test:e2e:api', 'test:e2e:web']);
+
+function normalizedPath(file) {
+  return String(file ?? '')
+    .trim()
+    .replaceAll('\\', '/')
+    .replace(/^\.\//, '');
+}
+
+/**
+ * Подмножество `validationScripts`, которое имеет смысл выполнить для данного
+ * изменения. Порядок берётся из конфигурации, а не из карты областей.
+ */
+export function validationScriptsForChangedFiles(configuredScripts, changedFiles) {
+  const scripts = [...(configuredScripts ?? [])];
+  const fullSet = { scripts, skipped: [], narrowed: false, requiresDatabase: true };
+  const files = (changedFiles ?? []).map(normalizedPath).filter(Boolean);
+  if (files.length === 0) return fullSet;
+
+  const required = new Set();
+  for (const file of files) {
+    const area = validationAreas.find(([pattern]) => pattern.test(file));
+    if (!area) return fullSet;
+    for (const script of area[1]) required.add(script);
+  }
+
+  const selected = scripts.filter((script) => required.has(script));
+  // Пустой набор означал бы «валидация не выполнялась»: такое состояние
+  // неотличимо от прошедшей проверки, поэтому вместо него — полный набор.
+  if (selected.length === 0) return fullSet;
+
+  return {
+    scripts: selected,
+    skipped: scripts.filter((script) => !required.has(script)),
+    narrowed: selected.length < scripts.length,
+    requiresDatabase: selected.some((script) => databaseBackedScripts.has(script)),
+  };
+}
+
 export function issueLabels(issue) {
   return (issue?.labels ?? []).map((label) =>
     typeof label === 'string' ? label : String(label?.name ?? ''),

@@ -20,6 +20,7 @@ import {
   validationAttestationKey,
   validationImageForSnapshot,
 } from './ralph-validation-runner.mjs';
+import { validationScriptsForChangedFiles } from './ralph-scope.mjs';
 import {
   ralphConfigPath,
   trustedAgentInstructionFiles,
@@ -644,4 +645,65 @@ test('a dependency changed only in the working tree stops the run before the con
   assertValidationDependenciesCommitted({
     run: () => ({ status: 0, stdout: '', stderr: '' }),
   });
+});
+
+test('набор проверок сокращается до применимых к изменённым файлам', () => {
+  const configured = [
+    'format:check',
+    'lint',
+    'build',
+    'test:ralph',
+    'test:e2e:api',
+    'test:e2e:web',
+  ];
+
+  // Правка браузерной спеки не может уронить E2E API и тесты Ralph, и база ей
+  // всё равно нужна: Playwright поднимает рядом настоящий сервер API.
+  const web = validationScriptsForChangedFiles(configured, ['apps/web/e2e/profile.spec.ts']);
+  assert.deepEqual(web.scripts, ['format:check', 'lint', 'build', 'test:e2e:web']);
+  assert.deepEqual(web.skipped, ['test:ralph', 'test:e2e:api']);
+  assert.equal(web.requiresDatabase, true);
+
+  // Markdown не поднимает контейнер с базой вовсе.
+  const documentation = validationScriptsForChangedFiles(configured, [
+    'README.md',
+    'apps/web/README.md',
+  ]);
+  assert.deepEqual(documentation.scripts, ['format:check']);
+  assert.equal(documentation.requiresDatabase, false);
+
+  // Изменение API тянет за собой и браузерные тесты: они ходят в настоящий API.
+  const api = validationScriptsForChangedFiles(configured, [
+    'apps/api/src/auth/auth.controller.ts',
+  ]);
+  assert.deepEqual(api.scripts, ['format:check', 'lint', 'build', 'test:e2e:api', 'test:e2e:web']);
+
+  // Один незнакомый путь возвращает полный набор целиком: пропущенная проверка
+  // обнаруживается через несколько issue и стоит дороже лишнего прогона.
+  const unknown = validationScriptsForChangedFiles(configured, [
+    'apps/web/app/page.tsx',
+    'docker-compose.yml',
+  ]);
+  assert.deepEqual(unknown.scripts, configured);
+  assert.equal(unknown.narrowed, false);
+  assert.equal(unknown.requiresDatabase, true);
+
+  // Неизвестный состав изменений — тоже полный набор.
+  assert.deepEqual(validationScriptsForChangedFiles(configured, []).scripts, configured);
+  assert.deepEqual(validationScriptsForChangedFiles(configured, null).scripts, configured);
+});
+
+test('сокращение набора не может привести к пустой валидации', () => {
+  // Набор без format:check и Markdown-правка: пересечение пусто, и «ничего не
+  // выполнялось» неотличимо от «всё прошло». Возвращается полный набор.
+  const selection = validationScriptsForChangedFiles(['lint', 'build'], ['docs/plan.md']);
+
+  assert.deepEqual(selection.scripts, ['lint', 'build']);
+  assert.equal(selection.narrowed, false);
+});
+
+test('конфигурация включает сокращение набора по умолчанию', () => {
+  // Значение по умолчанию, а не обязательное поле: конфигурации без него
+  // работали до появления сокращения и должны работать после.
+  assert.equal(loadConfig().scopedValidation, true);
 });

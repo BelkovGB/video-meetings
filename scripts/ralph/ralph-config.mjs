@@ -317,6 +317,10 @@ function applyValidationAndReviewDefaults(config) {
   };
   config.preflightScripts ??= [];
   config.validationScripts ??= ['format:check', 'lint', 'build'];
+  // Сокращение набора по области изменения. Выключается, когда набор проверок
+  // не соответствует карте областей в ralph-scope.mjs и оператору нужен
+  // гарантированно полный прогон на каждой issue.
+  config.scopedValidation ??= true;
   config.review ??= {
     enabled: true,
     model: 'gpt-5.6-terra',
@@ -437,6 +441,9 @@ function validateScriptNames(config) {
     fail(
       'Поля "preflightScripts" и "validationScripts" должны быть массивами безопасных имён npm scripts.',
     );
+  }
+  if (typeof config.scopedValidation !== 'boolean') {
+    fail('Поле "scopedValidation" должно быть true или false.');
   }
 }
 

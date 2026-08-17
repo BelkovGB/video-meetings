@@ -62,6 +62,7 @@ import {
   filesChangedBetween,
   isAncestorCommit,
   issueChangeInventory,
+  issueChangedPaths,
   linkedCommitForIssue,
   pushBranchAndVerify,
   reconcileStateAfterCrash,
@@ -69,6 +70,7 @@ import {
   verifyBaseHistory,
   verifyPushedHead,
   verifyRepository,
+  workingTreePaths,
 } from './ralph-git.mjs';
 
 import {
@@ -407,7 +409,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     const commit = verifiedIssueCommit(alreadyFixedCommit, issue);
     activeStateStore()?.updateIssue({ phase: 'validating' });
     try {
-      measuredValidation(() => runConfiguredValidation(config));
+      measuredValidation(() => runConfiguredValidation(config, issueChangedPaths(issue, commit)));
     } catch (error) {
       const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
       activeStateStore()?.updateIssue({
@@ -431,7 +433,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 
   activeStateStore()?.updateIssue({ phase: 'validating' });
   try {
-    measuredValidation(() => runConfiguredValidation(config));
+    measuredValidation(() => runConfiguredValidation(config, workingTreePaths(changes)));
   } catch (error) {
     const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
     activeStateStore()?.updateIssue({
@@ -544,13 +546,7 @@ function branchMovedWithoutDisturbingIssue(storedIssue, currentHead) {
   if (storedIssue.phase === 'review-failed') return status === '';
   if (!uncommittedWorkPhases.has(storedIssue.phase) || status === '') return false;
 
-  const dirtyFiles = new Set(
-    status
-      .split(/\r?\n/)
-      .filter(Boolean)
-      // Формат `XY <путь>`, а для переименования — `R  старый -> новый`.
-      .map((line) => line.slice(3).trim().split(' -> ').at(-1)),
-  );
+  const dirtyFiles = new Set(workingTreePaths(status));
   const moved = filesChangedBetween(storedStart, currentHead);
 
   return moved !== null && moved.every((file) => !dirtyFiles.has(file));
@@ -569,7 +565,7 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
     );
     const resumePhase = storedIssue.phase;
     try {
-      measuredValidation(() => runConfiguredValidation(config));
+      measuredValidation(() => runConfiguredValidation(config, issueChangedPaths(issue, commit)));
     } catch (error) {
       activeStateStore().updateIssue({ phase: resumePhase, ...recordedFailure(error) });
       throw error;

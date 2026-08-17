@@ -74,6 +74,41 @@ export function isAncestorCommit(ancestor, descendant, execute = run) {
 }
 
 /**
+ * Пути, которые изменила issue, — без diff и статистики.
+ *
+ * Отдельно от issueChangeInventory: тому нужен патч для ревьюера, а выбору
+ * набора проверок хватает имён файлов, и собирать ради него сотню килобайт
+ * текста незачем.
+ */
+export function issueChangedPaths(issue, commit, execute = run) {
+  const commits = issueCommits(issue, commit, execute);
+  const inspected = execute(
+    'git',
+    ['show', '--format=', '--name-only', ...(commits.length > 0 ? commits : [commit])],
+    { allowFailure: true },
+  );
+  if (inspected.status !== 0) return [];
+
+  return [...new Set(inspected.stdout.split(/\r?\n/).filter(Boolean))];
+}
+
+/**
+ * Пути из `git status --porcelain`: формат `XY <путь>`, а для переименования —
+ * `R  старый -> новый`, где нужен последний.
+ */
+export function workingTreePaths(status) {
+  return [
+    ...new Set(
+      String(status ?? '')
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => line.slice(3).trim().split(' -> ').at(-1))
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/**
  * Полный набор изменений issue одним объектом: список файлов, статистика и
  * ограниченный diff.
  *
