@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -86,22 +86,45 @@ test.describe('committed visual baselines', () => {
 
     // That rewriting run is why the reconciliation below stands aside there: it
     // would read `e2e/` while another worker is still writing baselines into it.
+    // Once the inventory owes nothing there is nothing left to write, so the
+    // reconciliation runs even without `--ignore-snapshots`.
     test.skip(
-      !treeIsStableDuring(test.info().project),
-      'This run regenerates baselines, so the tree it would reconcile is still being written.',
+      !treeIsStableDuring(test.info().project, owed),
+      'This run regenerates the pending baselines, so the tree it would reconcile is still being written.',
     );
 
     expect(findBaselineViolations(e2eDir, projectNames)).toEqual([]);
   });
 
+  // The reconciliation above is the only test that reads the real repository
+  // tree, and it stands aside in a run that writes baselines. That is safe only
+  // while the validation entrypoint passes the flag which stops the writing: if
+  // this script ever drops it, the guard would report `skipped` in every
+  // validation run instead of failing, and issue #84's protection would be gone
+  // behind a green suite. Nothing else in the repository asserts that coupling.
+  test('the validation entrypoint runs with the flag that keeps this guard enabled', () => {
+    const manifest: unknown = JSON.parse(
+      readFileSync(path.join(e2eDir, '..', 'package.json'), 'utf8'),
+    );
+    const scripts = (manifest as { scripts?: Record<string, string> }).scripts ?? {};
+
+    expect(scripts['test:e2e']).toContain('--ignore-snapshots');
+  });
+
   // Playwright spreads spec files across workers even with `fullyParallel: false`,
   // so during `npm run test:e2e:web:visual` this guard and the `toHaveScreenshot`
-  // call that writes the pending PNGs run at the same time. Only a run told to
-  // ignore snapshots leaves the tree settled enough to reconcile.
-  test('reconciles the repository tree only in a run that writes no baselines', () => {
-    expect(treeIsStableDuring({ ignoreSnapshots: true })).toBe(true);
-    expect(treeIsStableDuring({ ignoreSnapshots: false })).toBe(false);
-    expect(treeIsStableDuring({})).toBe(false);
+  // call that writes the pending PNGs run at the same time. A run told to ignore
+  // snapshots writes nothing; so does any run with no baseline left to render,
+  // which is what keeps the guard live for an agent following apps/web/AGENTS.md
+  // and invoking `npx playwright test e2e/visual-baselines.spec.ts` directly.
+  test('reconciles the repository tree in every run that writes no baselines', () => {
+    const owed = ['profile.spec.ts-snapshots/password-change-form-desktop-chromium.png'];
+
+    expect(treeIsStableDuring({ ignoreSnapshots: true }, owed)).toBe(true);
+    expect(treeIsStableDuring({ ignoreSnapshots: false }, [])).toBe(true);
+    expect(treeIsStableDuring({}, [])).toBe(true);
+    expect(treeIsStableDuring({ ignoreSnapshots: false }, owed)).toBe(false);
+    expect(treeIsStableDuring({}, owed)).toBe(false);
   });
 
   // The failure this guard exists for: a session adds a visual assertion and

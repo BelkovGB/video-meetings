@@ -217,12 +217,24 @@ export function findBaselineViolations(e2eDir: string, projectNames: readonly st
  * under `fullyParallel: false`. So during `npm run test:e2e:web:visual` the guard
  * would read `e2e/` while the specs it reconciles are still writing into it, and
  * the "regenerated, but still pending" message — the operator's cue to move those
- * names into `directories` — would depend on which worker got there first. The
- * validation set runs with `--ignore-snapshots`, which is where the tree is
- * settled and the reconciliation is authoritative.
+ * names into `directories` — would depend on which worker got there first.
+ *
+ * Two runs leave the tree settled. One passes `--ignore-snapshots`, as the
+ * validation set does. The other is any run with nothing left to render: a
+ * baseline is only written when it is absent, so once `pending` is empty the
+ * reconciliation is authoritative regardless of the flag. That second case is
+ * what keeps this guard live for the reader `apps/web/AGENTS.md` sends to
+ * `npx playwright test <file>`, which passes no flags — a run that skipped here
+ * would report success on the very check that catches an agent-rendered PNG.
+ *
+ * `owed` is `pendingBaselines`, read from the inventory alone, so it is itself
+ * unaffected by whatever the other workers are writing.
  */
-export function treeIsStableDuring(project: { ignoreSnapshots?: boolean }): boolean {
-  return project.ignoreSnapshots === true;
+export function treeIsStableDuring(
+  project: { ignoreSnapshots?: boolean },
+  owed: readonly string[],
+): boolean {
+  return project.ignoreSnapshots === true || owed.length === 0;
 }
 
 /** The baselines the inventory records as still owed, as `directory/name`. */
