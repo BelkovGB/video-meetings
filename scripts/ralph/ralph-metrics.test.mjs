@@ -8,6 +8,7 @@ import {
   appendIssueMetrics,
   beginIssueMetrics,
   currentIssueMetrics,
+  effectiveTokenBreakdown,
   finishIssueMetrics,
   formatIssueMetrics,
   recordAgentTelemetry,
@@ -167,13 +168,38 @@ test('строка для оператора считает токены, а н�
   assert.match(line, /Стоимость issue #57: 22m19s/);
   assert.match(line, /validation 2m52s, из attestation/);
   assert.match(line, /шагов 88, вызовов инструментов 34/);
-  // Вход — полный, а не некэшированный остаток; чтение кэша расходует окно
-  // квоты так же, как всё остальное.
-  assert.match(line, /вход 5\.8M \(кэш: чтение 5\.6M, запись 194k, вне кэша 3k\)/);
-  assert.match(line, /выход 56k, рассуждений 41k/);
+  // Ведущее число — взвешенное: сырой счёт на 95% состоит из чтения кэша,
+  // которое стоит десятую долю базового токена, и указывает не туда.
+  assert.match(line, /расход 1\.9M базовых токенов \(больше всего — рассуждения 35%\)/);
+  assert.match(line, /сырых: вход 5\.8M, выход 56k, рассуждений 41k/);
   // На подписке доллары условны и в строку не идут.
   assert.doesNotMatch(line, /\$/);
   assert.match(line, /независимое ревью вернуло замечания/);
+});
+
+test('взвешивание переставляет составляющие местами по сравнению с сырым счётом', () => {
+  const breakdown = effectiveTokenBreakdown({
+    uncachedInputTokens: 3_533,
+    cacheCreationTokens: 182_213,
+    cacheReadTokens: 4_416_992,
+    outputTokens: 60_098,
+    thinkingTokens: 42_211,
+  });
+
+  // Чтение кэша — 95% сырых токенов и 26% расхода; рассуждения — 0,9% сырых и
+  // 38% расхода. Ради этой перестановки веса и введены.
+  assert.equal(Math.round((breakdown.cacheRead / breakdown.total) * 100), 26);
+  assert.equal(Math.round((breakdown.reasoning / breakdown.total) * 100), 38);
+  assert.ok(breakdown.reasoning > breakdown.cacheRead);
+  assert.equal(breakdown.total, 1_847_038);
+});
+
+test('отсутствующая телеметрия считается нулём, а не роняет расчёт', () => {
+  const breakdown = effectiveTokenBreakdown({ outputTokens: 100 });
+
+  assert.equal(breakdown.reasoning, 0);
+  assert.equal(breakdown.answer, 1660);
+  assert.equal(breakdown.total, 1660);
 });
 
 test('неполная телеметрия помечается числом сессий, а не выдаётся за полную', () => {
@@ -199,7 +225,8 @@ test('неполная телеметрия помечается числом с
   });
 
   assert.match(line, /телеметрию прислали 1\/2/);
-  assert.match(line, /кэш: чтение —, запись —/);
+  // Взвешенный расход считается и по неполным данным: пропуски — нули.
+  assert.match(line, /расход 930 базовых токенов/);
 });
 
 // Формат сохраняется отдельным тестом: ошибка здесь тихо портит строку, ради

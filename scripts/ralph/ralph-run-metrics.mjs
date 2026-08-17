@@ -29,6 +29,28 @@ export const issueMetricsPath = path.join(
 const metricsVersion = 1;
 const maxStoredIssueRecords = 200;
 
+/**
+ * Вес токена по виду обращения, в единицах базового входа.
+ *
+ * Числа не взяты из прайс-листа, а выведены из собственных прогонов: CLI
+ * присылает и сырые счётчики, и `total_cost_usd`, поэтому ставки решаются как
+ * система уравнений. Запись кэша вышла 6,03 $/Mtok, чтение 0,33, выход 50,2 и
+ * 49,9 по двум независимым сессиям. Отсюда базовый вход 3,015 и веса ниже.
+ *
+ * Считать сырые токены нельзя: чтение кэша составляло 95% их числа и 26%
+ * стоимости, а рассуждения — 0,9% числа и 38% стоимости. Два счёта ведут к
+ * противоположным решениям, и невзвешенный указывает не туда.
+ *
+ * Ставки сняты на claude-opus-5 с окном в 1M. Сменится модель — веса надо
+ * пересчитать тем же способом; пока их источник один, они живут здесь.
+ */
+const tokenWeights = {
+  uncachedInput: 1,
+  cacheCreation: 2,
+  cacheRead: 0.109,
+  output: 16.6,
+};
+
 // -----------------------------------------------------------------------------
 // Активная запись
 // -----------------------------------------------------------------------------
@@ -120,6 +142,26 @@ function sumTelemetry(agents, field) {
 export function summarizeIssueMetrics(metrics, outcome) {
   const finishedMs = metrics.now();
   const agents = metrics.agents;
+  const totals = {
+    // Роли считаются отдельно от суммы: цену одной issue задаёт не только
+    // общий счёт, но и распределение между реализацией и ревью.
+    sessions: agents.length,
+    // Число сессий, приславших цену. Codex её не отдаёт, и общая сумма без
+    // этого счётчика выглядела бы полной, будучи частичной.
+    costReportedBy: agents.filter((agent) => typeof agent.costUsd === 'number').length,
+    costUsd: sumTelemetry(agents, 'costUsd'),
+    turns: sumTelemetry(agents, 'turns'),
+    // Разделяет две причины дорогого цикла, которые метка шага в логе не
+    // различает: агент много ходил по репозиторию или много рассуждал.
+    toolResults: sumTelemetry(agents, 'toolResults'),
+    thinkingTokens: sumTelemetry(agents, 'thinkingTokens'),
+    uncachedInputTokens: sumTelemetry(agents, 'uncachedInputTokens'),
+    outputTokens: sumTelemetry(agents, 'outputTokens'),
+    cacheReadTokens: sumTelemetry(agents, 'cacheReadTokens'),
+    cacheCreationTokens: sumTelemetry(agents, 'cacheCreationTokens'),
+    // Полный вход, а не одно из трёх слагаемых.
+    inputTokens: totalInputTokens(agents),
+  };
 
   return {
     version: metricsVersion,
@@ -135,27 +177,8 @@ export function summarizeIssueMetrics(metrics, outcome) {
     wallMs: finishedMs - metrics.startedMs,
     stages: Object.fromEntries(metrics.stages),
     agents,
-    totals: {
-      // Роли считаются отдельно от суммы: цену одной issue задаёт не только
-      // общий счёт, но и распределение между реализацией и ревью.
-      sessions: agents.length,
-      // Число сессий, приславших цену. Codex её не отдаёт, и общая сумма без
-      // этого счётчика выглядела бы полной, будучи частичной.
-      costReportedBy: agents.filter((agent) => typeof agent.costUsd === 'number').length,
-      costUsd: sumTelemetry(agents, 'costUsd'),
-      turns: sumTelemetry(agents, 'turns'),
-      // Разделяет две причины дорогого цикла, которые метка шага в логе не
-      // различает: агент много ходил по репозиторию или много рассуждал.
-      toolResults: sumTelemetry(agents, 'toolResults'),
-      thinkingTokens: sumTelemetry(agents, 'thinkingTokens'),
-      uncachedInputTokens: sumTelemetry(agents, 'uncachedInputTokens'),
-      outputTokens: sumTelemetry(agents, 'outputTokens'),
-      cacheReadTokens: sumTelemetry(agents, 'cacheReadTokens'),
-      cacheCreationTokens: sumTelemetry(agents, 'cacheCreationTokens'),
-      // Полный вход, а не одно из трёх слагаемых. Чтение кэша дешевле, но окно
-      // квоты расходует так же, и именно оно ограничивает прогон.
-      inputTokens: totalInputTokens(agents),
-    },
+    totals,
+    effective: effectiveTokenBreakdown(totals),
   };
 }
 
@@ -165,6 +188,48 @@ function totalInputTokens(agents) {
     .filter((value) => typeof value === 'number');
 
   return parts.length > 0 ? parts.reduce((total, value) => total + value, 0) : null;
+}
+
+/**
+ * Расход в единицах базового входа, по составляющим. Разбивка важнее суммы:
+ * она отвечает на вопрос, что именно сокращать, а сумма — только на вопрос,
+ * стало ли лучше.
+ */
+export function effectiveTokenBreakdown(totals) {
+  const thinking = totals.thinkingTokens ?? 0;
+  const output = totals.outputTokens ?? 0;
+  // Округление на каждой составляющей, а не только на сумме: доли базового
+  // токена смысла не имеют, а вес 16,6 порождает их на любом входе.
+  const weighted = {
+    uncachedInput: Math.round((totals.uncachedInputTokens ?? 0) * tokenWeights.uncachedInput),
+    cacheCreation: Math.round((totals.cacheCreationTokens ?? 0) * tokenWeights.cacheCreation),
+    cacheRead: Math.round((totals.cacheReadTokens ?? 0) * tokenWeights.cacheRead),
+    // Рассуждения отделены от остального выхода: тарифицируются одинаково, но
+    // сокращаются разными средствами — effort против объёма задачи.
+    reasoning: Math.round(thinking * tokenWeights.output),
+    answer: Math.round(Math.max(output - thinking, 0) * tokenWeights.output),
+  };
+
+  return {
+    ...weighted,
+    total: Object.values(weighted).reduce((sum, value) => sum + value, 0),
+  };
+}
+
+function largestEffectiveShare(breakdown) {
+  const names = {
+    uncachedInput: 'вход вне кэша',
+    cacheCreation: 'запись кэша',
+    cacheRead: 'чтение кэша',
+    reasoning: 'рассуждения',
+    answer: 'ответ',
+  };
+  const entries = Object.entries(names)
+    .map(([key, name]) => [name, breakdown[key]])
+    .sort(([, a], [, b]) => b - a);
+  const [name, value] = entries[0];
+
+  return breakdown.total > 0 ? `${name} ${Math.round((value / breakdown.total) * 100)}%` : null;
 }
 
 export function appendIssueMetrics(record, dependencies = {}) {
@@ -218,19 +283,20 @@ function formatTokens(value) {
  * CLI остаётся в записи — она приходит даром и её нельзя восстановить потом.
  */
 function formatTokenVolume(record) {
-  const { inputTokens, uncachedInputTokens, cacheReadTokens, cacheCreationTokens } = record.totals;
-  const { outputTokens, thinkingTokens, sessions, costReportedBy } = record.totals;
+  const { inputTokens, outputTokens, thinkingTokens, sessions, costReportedBy } = record.totals;
   if (typeof inputTokens !== 'number' && typeof outputTokens !== 'number') return null;
+  const breakdown = record.effective ?? effectiveTokenBreakdown(record.totals);
+  const dominant = largestEffectiveShare(breakdown);
   const partial =
     costReportedBy < sessions ? `, телеметрию прислали ${costReportedBy}/${sessions}` : '';
   const reasoning =
     typeof thinkingTokens === 'number' ? `, рассуждений ${formatTokens(thinkingTokens)}` : '';
 
   return (
-    `вход ${formatTokens(inputTokens)} ` +
-    `(кэш: чтение ${formatTokens(cacheReadTokens)}, запись ${formatTokens(cacheCreationTokens)}, ` +
-    `вне кэша ${formatTokens(uncachedInputTokens)}), ` +
-    `выход ${formatTokens(outputTokens)}${reasoning}${partial}`
+    `расход ${formatTokens(breakdown.total)} базовых токенов` +
+    `${dominant ? ` (больше всего — ${dominant})` : ''}; ` +
+    `сырых: вход ${formatTokens(inputTokens)}, выход ${formatTokens(outputTokens)}${reasoning}` +
+    partial
   );
 }
 
