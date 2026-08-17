@@ -144,6 +144,10 @@ export function summarizeIssueMetrics(metrics, outcome) {
       costReportedBy: agents.filter((agent) => typeof agent.costUsd === 'number').length,
       costUsd: sumTelemetry(agents, 'costUsd'),
       turns: sumTelemetry(agents, 'turns'),
+      // Разделяет две причины дорогого цикла, которые метка шага в логе не
+      // различает: агент много ходил по репозиторию или много рассуждал.
+      toolResults: sumTelemetry(agents, 'toolResults'),
+      thinkingTokens: sumTelemetry(agents, 'thinkingTokens'),
       inputTokens: sumTelemetry(agents, 'inputTokens'),
       outputTokens: sumTelemetry(agents, 'outputTokens'),
       cacheReadTokens: sumTelemetry(agents, 'cacheReadTokens'),
@@ -213,17 +217,23 @@ export function formatIssueMetrics(record) {
       return `${name} ${formatDuration(stage.ms)}${runs}${attested}`;
     })
     .join(', ');
-  const { turns, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens } = record.totals;
+  const { turns, toolResults, thinkingTokens, inputTokens, outputTokens } = record.totals;
+  const { cacheReadTokens, cacheCreationTokens } = record.totals;
   const cost = formatCost(record);
+  const work =
+    `${record.totals.sessions} сессий` +
+    `${typeof turns === 'number' ? `, шагов ${turns}` : ''}` +
+    `${typeof toolResults === 'number' ? `, вызовов инструментов ${toolResults}` : ''}`;
   const tokens =
     typeof inputTokens === 'number' || typeof outputTokens === 'number'
-      ? `токены ${formatTokens(inputTokens)}/${formatTokens(outputTokens)} ` +
+      ? `токены ${formatTokens(inputTokens)}/${formatTokens(outputTokens)}` +
+        `${typeof thinkingTokens === 'number' ? `, из них рассуждений ${formatTokens(thinkingTokens)}` : ''} ` +
         `(кэш: чтение ${formatTokens(cacheReadTokens)}, запись ${formatTokens(cacheCreationTokens)})`
       : null;
 
   return [
     `Стоимость issue #${record.issue}: ${formatDuration(record.wallMs)} — ${stages || 'без стадий'}`,
-    `${record.totals.sessions} сессий${typeof turns === 'number' ? `, шагов ${turns}` : ''}`,
+    work,
     cost,
     tokens,
     `итог: ${record.reason ?? record.outcome}`,

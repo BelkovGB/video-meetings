@@ -210,6 +210,10 @@ function claudeTelemetry(event) {
 
   return {
     reportedTurns: numberOrNull(event.num_turns),
+    // Рассуждения тарифицируются как выход. Без отдельного числа «дорого ли
+    // обходится effort» остаётся мнением: метка шага в логе для этого не
+    // годится, она называет только первую часть сообщения.
+    thinkingTokens: numberOrNull(usage.output_tokens_details?.thinking_tokens),
     // Имя отличается от `wallMs` сессии намеренно: оркестратор меряет жизнь
     // дочернего процесса, CLI — собственную работу, и это разные числа.
     cliWallMs: numberOrNull(event.duration_ms),
@@ -289,6 +293,9 @@ function readClaudeEvent(line) {
   // них run.log Claude-сессии содержал бы только реплики модели, тогда как для
   // Codex туда попадает вывод выполненных команд.
   if (event.type === 'user') {
+    const results = (event.message?.content ?? []).filter(
+      (part) => part.type === 'tool_result',
+    ).length;
     const output = (event.message?.content ?? [])
       .filter((part) => part.type === 'tool_result')
       .map((part) =>
@@ -302,7 +309,12 @@ function readClaudeEvent(line) {
       .filter(Boolean)
       .join('\n')
       .replace(/\r?\n$/, '');
-    return output ? { log: outputTail(output) } : {};
+
+    // Счётчик ведётся по результатам, а не по меткам шагов: метка называет
+    // только первую часть сообщения ассистента, поэтому шаг с вызовом
+    // инструмента регулярно подписан как `assistant_message`. Результат же
+    // приходит ровно один на выполненный вызов.
+    return { toolResults: results, ...(output ? { log: outputTail(output) } : {}) };
   }
 
   if (event.type !== 'result') return {};

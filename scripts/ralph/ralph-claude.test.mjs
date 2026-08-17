@@ -102,6 +102,50 @@ test('the development role is not handed tools it never calls', () => {
   assert.equal(denied.includes('WebFetch'), false);
 });
 
+test('tool calls are counted from results, not from the step label', () => {
+  // Шаг с вызовом инструмента регулярно подписан как `assistant_message`:
+  // метка берётся из первой части сообщения. Результат приходит ровно один на
+  // выполненный вызов, поэтому считается он.
+  const twoResults = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', content: 'первый' },
+          { type: 'tool_result', content: 'второй' },
+        ],
+      },
+    }),
+  );
+  assert.equal(twoResults.toolResults, 2);
+  assert.match(twoResults.log, /первый/);
+
+  // Пустой результат по-прежнему ничего не печатает, но считается.
+  const empty = claudeBackend.readEvent(
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: '' }] } }),
+  );
+  assert.equal(empty.toolResults, 1);
+  assert.equal(empty.log, undefined);
+});
+
+test('reasoning is measured in tokens, not guessed from the log', () => {
+  const result = claudeBackend.readEvent(
+    JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: 'done',
+      num_turns: 3,
+      total_cost_usd: 1.25,
+      usage: { output_tokens: 900, output_tokens_details: { thinking_tokens: 780 } },
+    }),
+  );
+
+  assert.equal(result.telemetry.thinkingTokens, 780);
+  assert.equal(result.telemetry.outputTokens, 900);
+  assert.equal(result.telemetry.costUsd, 1.25);
+});
+
 test('a closed quota window is reported instead of being swallowed', () => {
   const open = claudeBackend.readEvent(
     JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } }),

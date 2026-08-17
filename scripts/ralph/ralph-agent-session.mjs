@@ -112,7 +112,7 @@ async function waitForChildTermination(child, childResult, graceMs) {
  * - `createSandboxedEnvironment(source, options)` — песочница с учётными данными;
  * - `readEvent(line)` — разбор одной строки stdout. Возвращает `null`, если
  *   строка не разобрана (её печатают как есть), иначе объект с полями
- *   `stepId`, `log`, `agentMessage`, `error`, `telemetry`;
+ *   `stepId`, `log`, `agentMessage`, `error`, `telemetry`, `toolResults`;
  * - `exitFailure(result, stderr)` — Error по коду завершения, если backend
  *   умеет распознать причину точнее общего сообщения.
  *
@@ -157,6 +157,7 @@ export async function runAgentSession(backend, args, options) {
   // лимите шагов: единственный признак отказа приходит в потоке событий.
   let streamError = null;
   let backendTelemetry = null;
+  let toolResults = 0;
   let resolveTurnLimit;
   const seenStepIds = new Set();
 
@@ -165,6 +166,7 @@ export async function runAgentSession(backend, args, options) {
   // потратить весь бюджет, и без её цены сводка прогона занижена.
   const sessionTelemetry = () => ({
     turns,
+    toolResults,
     wallMs: Date.now() - sessionStartedMs,
     ...(backendTelemetry ?? {}),
   });
@@ -187,6 +189,7 @@ export async function runAgentSession(backend, args, options) {
     if (event.agentMessage) lastAgentMessage = event.agentMessage;
     if (event.error) streamError ??= event.error;
     if (event.telemetry) backendTelemetry = event.telemetry;
+    if (event.toolResults) toolResults += event.toolResults;
 
     let currentTurn = null;
     if (event.stepId !== undefined && event.stepId !== null && !seenStepIds.has(event.stepId)) {
