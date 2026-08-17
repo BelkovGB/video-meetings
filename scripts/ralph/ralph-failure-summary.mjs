@@ -88,11 +88,36 @@ function primaryErrorLine(lines) {
   );
 }
 
+/**
+ * Вывод одного упавшего script, а не всего набора.
+ *
+ * Entrypoint печатает маркер отдельной строкой перед каждым script, а `set -eu`
+ * останавливает цикл на первом сбое: всё до последнего маркера — вывод уже
+ * прошедших проверок. Без отсечения excerpt показывал хвост предыдущего,
+ * успешного script: на реальном прогоне в сводке про упавший `test:e2e:web`
+ * стояли строки `PASS test/...` от API-набора.
+ */
+const validationScriptMarkerLine = /^RALPH_VALIDATION_SCRIPT=(\S+)\s*$/gm;
+
+export function failingScriptOutput(rawOutput, script) {
+  // Маркер печатается контейнером и может прийти в escape-последовательностях,
+  // как и всё остальное; runner ищет его тоже по очищенному тексту.
+  const output = stripAnsi(rawOutput);
+  const markers = [...output.matchAll(validationScriptMarkerLine)];
+  const last = markers.at(-1);
+  // Сверка с именем, которое runner уже определил: если маркеры разъедутся с
+  // атрибуцией ошибки, лучше показать весь вывод, чем чужой кусок.
+  if (!last || (script && last[1] !== script)) return output;
+
+  return output.slice(last.index + last[0].length);
+}
+
 export function summarizeCommandFailure(error, options = {}) {
   const maxLines = options.maxLines ?? 20;
-  const output =
+  const fullOutput =
     [error?.stdout, error?.stderr].filter(Boolean).join('\n').trim() ||
     stripAnsi(error?.message ?? '');
+  const output = failingScriptOutput(fullOutput, error?.script);
   const lines = significantOutputLines(output);
   const { tests, omitted } = uniqueFailedTests(output);
   const primary = primaryErrorLine(lines) ?? String(error?.message ?? '').split(/\r?\n/)[0] ?? '';

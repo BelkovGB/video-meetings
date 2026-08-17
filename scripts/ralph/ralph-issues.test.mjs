@@ -12,6 +12,7 @@ import {
   verifyAgentSkills,
 } from './ralph-config.mjs';
 import {
+  failingScriptOutput,
   formatFailureSummary,
   recoveryPrompt,
   summarizeCommandFailure,
@@ -161,6 +162,33 @@ test('after a rejected review the retry is told the work is already committed', 
   // подставляется целиком.
   assert.doesNotMatch(prompt, /Location:/);
 });
+
+test('the failure excerpt comes from the script that failed, not the one before it', () => {
+  const output = [
+    'RALPH_VALIDATION_SCRIPT=test:e2e:api',
+    'PASS test/profile.e2e-spec.ts',
+    'Tests:       158 passed, 158 total',
+    'RALPH_VALIDATION_SCRIPT=test:e2e:web',
+    'Error: expect(page).toHaveURL(expected) failed',
+    '  1) [desktop-chromium] › e2e/profile.spec.ts:849:5 › resumed page returns to sign-in',
+  ].join('\n');
+
+  const scoped = failingScriptOutput(output, 'test:e2e:web');
+  assert.match(scoped, /toHaveURL/);
+  // Хвост предыдущего, успешного набора в отчёт попадать не должен: на реальном
+  // прогоне про упавший web-набор были показаны строки PASS от API.
+  assert.doesNotMatch(scoped, /158 passed/);
+  assert.doesNotMatch(scoped, /RALPH_VALIDATION_SCRIPT/);
+
+  // Маркеры разошлись с атрибуцией ошибки — показываем всё, а не чужой кусок.
+  assert.equal(failingScriptOutput(output, 'lint'), stripAnsiForTest(output));
+  assert.equal(failingScriptOutput('без маркеров', 'lint'), 'без маркеров');
+});
+
+function stripAnsiForTest(text) {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\[[0-9;]*m/g, '');
+}
 
 test('a branch that moved on is judged by ancestry, not by an exact HEAD match', () => {
   const calls = [];
