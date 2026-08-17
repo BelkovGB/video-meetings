@@ -10,12 +10,18 @@ type Session = {
   userId: string;
 };
 
+type Meeting = {
+  id: string;
+  title: string;
+};
+
 loadEnvFile(resolve(__dirname, '../../../.env'));
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 const password = 'secure-password-123';
 const prisma = new PrismaClient();
 const createdUserIds = new Set<string>();
+const createdMeetingIds = new Set<string>();
 let testClientAddress = 1;
 
 function uniqueEmail(prefix: string): string {
@@ -66,6 +72,19 @@ async function register(request: APIRequestContext, prefix: string): Promise<Ses
   return { accessToken, email, userId };
 }
 
+async function createMeeting(request: APIRequestContext, owner: Session): Promise<Meeting> {
+  const response = await request.post(`${apiUrl}/meetings`, {
+    headers: { Authorization: `Bearer ${owner.accessToken}` },
+    data: { title: `Встреча после смены пароля ${Date.now()}`, date: '2026-08-15T10:30:00.000Z' },
+  });
+  expect(response.ok()).toBeTruthy();
+
+  const meeting = (await response.json()) as Meeting;
+  createdMeetingIds.add(meeting.id);
+
+  return meeting;
+}
+
 async function authenticate(page: Page, session: Session): Promise<void> {
   await page.addInitScript(({ accessToken, email }) => {
     window.sessionStorage.setItem('accessToken', accessToken);
@@ -74,6 +93,7 @@ async function authenticate(page: Page, session: Session): Promise<void> {
 }
 
 test.afterAll(async () => {
+  await prisma.meeting.deleteMany({ where: { id: { in: [...createdMeetingIds] } } });
   await prisma.user.deleteMany({ where: { id: { in: [...createdUserIds] } } });
   await prisma.$disconnect();
 });
@@ -706,6 +726,9 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
   await page.keyboard.type(newPassword);
   await page.keyboard.press('Tab');
   await expect(page.getByRole('button', { name: 'Изменить пароль' })).toBeFocused();
+  // Pressed twice the way a held Enter repeats: the form must stay submitted so
+  // that a second run cannot replace the notice URL with a bare /login.
+  await page.keyboard.press('Enter');
   await page.keyboard.press('Enter');
 
   await expect(page).toHaveURL('/login?reason=password-changed');
@@ -713,6 +736,9 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
   await expect(page.getByRole('status')).toHaveText(
     'Пароль изменён. Войдите заново с новым паролем.',
   );
+  // The notice carries the only explanation of the sign-out, so it takes focus
+  // instead of relying on a live region that mounted with its own text.
+  await expect(page.getByRole('status')).toBeFocused();
   await expect(
     page.evaluate(() => window.sessionStorage.getItem('accessToken')),
   ).resolves.toBeNull();
@@ -739,6 +765,39 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
     data: { email: session.email, password: newPassword },
   });
   expect(newPasswordLogin.ok()).toBeTruthy();
+});
+
+test('sends a meeting page restored by Back to sign-in after the password change', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-password-meeting-back');
+  const meeting = await createMeeting(request, session);
+  const newPassword = 'meeting-restore-secure-password-789';
+
+  // Seeded once, as in the sign-out test: an init script would hand the token
+  // back to the restored page and hide a session that failed to end.
+  await page.goto('/login');
+  await page.evaluate(({ accessToken, email }) => {
+    window.sessionStorage.setItem('accessToken', accessToken);
+    window.sessionStorage.setItem('userEmail', email);
+  }, session);
+  // Both pages are opened as document navigations so that Back can restore the
+  // meeting page from the back/forward cache instead of mounting it again.
+  await page.goto(`/meetings/${meeting.id}`);
+  await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
+  await page.goto('/profile');
+
+  await page.getByLabel('Текущий пароль', { exact: true }).fill(password);
+  await page.getByLabel('Новый пароль', { exact: true }).fill(newPassword);
+  await page.getByLabel('Подтвердите новый пароль', { exact: true }).fill(newPassword);
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page).toHaveURL('/login?reason=password-changed');
+
+  await page.goBack();
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByText(meeting.title)).toHaveCount(0);
+  await expect(page.getByText(session.email)).toHaveCount(0);
 });
 
 test('clears an expired session and redirects to login without showing profile data', async ({

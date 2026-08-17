@@ -115,6 +115,11 @@ lifetime, deployments set the flag to `false`; missing, malformed, unknown, or
 revoked session identities are then rejected as `401` and every protected token
 is selectively revocable.
 
+Only token verification is treated as an authentication failure: if the session
+lookup itself fails, the error propagates as `5xx` instead of `401`. A `401`
+makes every browser clear its session and return to sign-in, so a database blip
+would otherwise sign all active users out.
+
 After this verification, the guard attaches the payload to the Nest request.
 The controller passes only `sub` to the command or query. Collection and detail
 queries accept either the owner or a `MeetingParticipant` and return a derived

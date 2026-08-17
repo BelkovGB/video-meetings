@@ -136,6 +136,7 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
     setIsSubmitting(true);
     setErrors({});
     setRequestError(null);
+    let hasChanged = false;
 
     try {
       const response = await fetch(`${apiUrl}/users/me/password`, {
@@ -164,12 +165,18 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
         return;
       }
 
+      hasChanged = true;
       onPasswordChanged();
     } catch {
       setRequestError('Не удалось изменить пароль. Проверьте соединение и повторите попытку.');
       focusField('currentPassword');
     } finally {
-      setIsSubmitting(false);
+      // A successful change leaves the form submitted while the router leaves
+      // the page: re-enabling it would let a repeated Enter run again without a
+      // token and replace the sign-out notice with a bare /login.
+      if (!hasChanged) {
+        setIsSubmitting(false);
+      }
     }
   };
 
