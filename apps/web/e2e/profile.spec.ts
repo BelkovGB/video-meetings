@@ -610,16 +610,22 @@ test('validates and recovers from password-change failures without clearing the 
   request,
 }) => {
   const session = await register(request, 'profile-password-change');
-  let responseMessage = 'Current password is incorrect';
+  // Every rejection below is the body the API actually returns, English prose
+  // and machine-readable code included: the screen must show Russian text
+  // routed by the code, never the server's own wording.
+  let passwordChangeFailure: { status: number; body: Record<string, unknown> } = {
+    status: 400,
+    body: { message: 'Current password is incorrect', code: 'CURRENT_PASSWORD_INCORRECT' },
+  };
   let submittedPasswordChange: unknown;
 
   await page.route('**/users/me/password', async (route) => {
     submittedPasswordChange = route.request().postDataJSON();
     await new Promise((resolve) => setTimeout(resolve, 250));
     await route.fulfill({
-      status: responseMessage === 'Слишком много попыток.' ? 429 : 400,
+      status: passwordChangeFailure.status,
       contentType: 'application/json',
-      body: JSON.stringify({ message: responseMessage }),
+      body: JSON.stringify(passwordChangeFailure.body),
     });
   });
   await authenticate(page, session);
@@ -745,7 +751,7 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page.getByRole('button', { name: 'Изменяем пароль…' })).toBeDisabled();
   await expect(currentPassword).toBeDisabled();
   await expect(page.locator('#password-change-status')).toHaveText('Изменяем пароль…');
-  await expect(page.locator('#current-password-error')).toHaveText('Current password is incorrect');
+  await expect(page.locator('#current-password-error')).toHaveText('Неверный текущий пароль.');
   expect(submittedPasswordChange).toEqual({
     currentPassword: 'wrong-password',
     newPassword: 'new-secure-password-456',
@@ -757,26 +763,78 @@ test('validates and recovers from password-change failures without clearing the 
     session.accessToken,
   );
 
-  responseMessage = 'New password must differ from the current password';
+  passwordChangeFailure = {
+    status: 400,
+    body: {
+      message: 'New password must differ from the current password',
+      code: 'NEW_PASSWORD_NOT_DIFFERENT',
+    },
+  };
   await currentPassword.fill(password);
   await newPassword.fill('another-secure-password-456');
   await confirmation.fill('another-secure-password-456');
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
   await expect(page.locator('#new-password-error')).toHaveText(
-    'New password must differ from the current password',
+    'Новый пароль должен отличаться от текущего.',
   );
   await expect(newPassword).toBeFocused();
 
-  responseMessage = 'Password confirmation does not match';
+  passwordChangeFailure = {
+    status: 400,
+    body: {
+      message: 'Password confirmation does not match',
+      code: 'PASSWORD_CONFIRMATION_MISMATCH',
+    },
+  };
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
-  await expect(page.locator('#password-confirmation-error')).toHaveText(
-    'Password confirmation does not match',
-  );
+  await expect(page.locator('#password-confirmation-error')).toHaveText('Пароли не совпадают.');
   await expect(confirmation).toBeFocused();
 
-  responseMessage = 'Слишком много попыток.';
+  // A DTO rejection routes by the field the API names, not by the property name
+  // that happens to appear in the constraint message.
+  passwordChangeFailure = {
+    status: 400,
+    body: {
+      statusCode: 400,
+      message: ['newPassword must contain at least 9 characters and no more than 72 UTF-8 bytes'],
+      error: 'Bad Request',
+      code: 'VALIDATION_FAILED',
+      fields: ['newPassword'],
+    },
+  };
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
-  await expect(page.locator('#password-change-error')).toHaveText('Слишком много попыток.');
+  await expect(page.locator('#new-password-error')).toHaveText(
+    'Используйте не менее 9 символов и не более 72 байт UTF-8.',
+  );
+  await expect(newPassword).toBeFocused();
+
+  passwordChangeFailure = {
+    status: 429,
+    body: {
+      statusCode: 429,
+      message: 'Too many password-change attempts. Please try again later.',
+      code: 'PASSWORD_CHANGE_RATE_LIMITED',
+      retryAfterSeconds: 900,
+    },
+  };
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText(
+    'Слишком много попыток изменить пароль. Повторите через несколько минут.',
+  );
+  await expect(page).toHaveURL('/profile');
+
+  // A failure the browser does not recognise still says something in Russian
+  // and keeps the caret in the form, instead of pasting server prose on screen.
+  passwordChangeFailure = {
+    status: 400,
+    body: { message: 'Current credentials were rejected', code: 'SOMETHING_UNMAPPED' },
+  };
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText(
+    'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+  );
+  await expect(page.getByText('Current credentials were rejected')).toHaveCount(0);
+  await expect(currentPassword).toBeFocused();
   await expect(page).toHaveURL('/profile');
 });
 

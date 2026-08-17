@@ -68,7 +68,10 @@ export class ProfileService {
     { currentPassword, newPassword, confirmation }: ChangePasswordDto,
   ): Promise<void> {
     if (newPassword !== confirmation) {
-      throw new BadRequestException('Password confirmation does not match');
+      throw new BadRequestException({
+        message: 'Password confirmation does not match',
+        code: 'PASSWORD_CONFIRMATION_MISMATCH',
+      });
     }
 
     const normalizedCurrentPassword = currentPassword.normalize('NFC');
@@ -86,10 +89,16 @@ export class ProfileService {
         throw new NotFoundException('User not found');
       }
       if (!(await bcrypt.compare(normalizedCurrentPassword, user.passwordHash))) {
-        throw new BadRequestException('Current password is incorrect');
+        throw new BadRequestException({
+          message: 'Current password is incorrect',
+          code: 'CURRENT_PASSWORD_INCORRECT',
+        });
       }
       if (await bcrypt.compare(normalizedNewPassword, user.passwordHash)) {
-        throw new BadRequestException('New password must differ from the current password');
+        throw new BadRequestException({
+          message: 'New password must differ from the current password',
+          code: 'NEW_PASSWORD_NOT_DIFFERENT',
+        });
       }
 
       const passwordHash = await bcrypt.hash(normalizedNewPassword, 12);

@@ -57,6 +57,7 @@ export class PasswordChangeRateLimitGuard implements CanActivate {
         {
           statusCode: HttpStatus.TOO_MANY_REQUESTS,
           message: 'Too many password-change attempts. Please try again later.',
+          code: 'PASSWORD_CHANGE_RATE_LIMITED',
           retryAfterSeconds: result.retryAfterSeconds,
         },
         HttpStatus.TOO_MANY_REQUESTS,

@@ -26,6 +26,23 @@ JSON except for the multipart file-upload endpoint.
 
 `UsersModule` is an internal API module and does not expose HTTP routes.
 
+## Request validation errors
+
+Any endpoint that rejects a request body answers with the same shape:
+
+```json
+{
+  "statusCode": 400,
+  "message": ["displayName must contain between 1 and 100 Unicode characters"],
+  "error": "Bad Request",
+  "code": "VALIDATION_FAILED",
+  "fields": ["displayName"]
+}
+```
+
+`message` is English prose for developers and is free to be reworded. A client
+that shows its own text routes the failure by `code` and `fields`.
+
 ## Authentication
 
 Create an account or log in to obtain a JWT access token.
@@ -179,6 +196,17 @@ Password-change attempts are limited to five per account in fifteen minutes and
 thirty per client IP per minute. A rejected excess attempt returns `429 Too Many
 Requests` with `Retry-After`; it does not change the password or revoke the
 caller session.
+
+Every rejection carries a machine-readable `code`, because `message` is English
+prose that a localized client must not parse:
+
+| `code`                           | Status | Meaning                                             |
+| -------------------------------- | ------ | --------------------------------------------------- |
+| `VALIDATION_FAILED`              | 400    | A field broke a rule above; see request validation. |
+| `CURRENT_PASSWORD_INCORRECT`     | 400    | `currentPassword` does not match the account.       |
+| `NEW_PASSWORD_NOT_DIFFERENT`     | 400    | `newPassword` equals the current password.          |
+| `PASSWORD_CONFIRMATION_MISMATCH` | 400    | `confirmation` differs from `newPassword`.          |
+| `PASSWORD_CHANGE_RATE_LIMITED`   | 429    | The attempt limit above was exceeded.               |
 
 On success, the password replacement and revocation of the calling JWT session
 are atomic. That JWT can no longer access protected routes, while the user's

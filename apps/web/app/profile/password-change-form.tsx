@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, forwardRef, useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
-import type { ApiError } from '../../lib/api/contracts';
+import type { CodedApiError } from '../../lib/api/contracts';
 import { readAccessToken } from '../../lib/auth/session';
 
 const minimumPasswordLength = 9;
@@ -55,37 +55,61 @@ function validatePasswordChange(
   return errors;
 }
 
-function getServerErrorField(message: string): PasswordField | null {
-  const normalizedMessage = message.toLowerCase();
-  if (normalizedMessage.includes('confirmation') || normalizedMessage.includes('confirm')) {
-    return 'confirmation';
-  }
-  if (normalizedMessage.includes('newpassword') || normalizedMessage.includes('new password')) {
-    return 'newPassword';
-  }
-  if (
-    normalizedMessage.includes('currentpassword') ||
-    normalizedMessage.includes('current password')
-  ) {
-    return 'currentPassword';
-  }
-  return null;
-}
+/** A server rejection as the screen shows it: Russian text, and its field if any. */
+type ServerError = { field: PasswordField | null; message: string };
 
-async function getPasswordChangeApiError(response: Response): Promise<string> {
+const unknownServerError: ServerError = {
+  field: null,
+  message: 'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+};
+
+// Server errors are routed by `code` and worded here, because everything else on
+// this screen is Russian and the API answers in English. Matching its prose
+// instead would unmark the field the moment a message is reworded.
+const serverErrorsByCode: Record<string, ServerError> = {
+  CURRENT_PASSWORD_INCORRECT: { field: 'currentPassword', message: 'Неверный текущий пароль.' },
+  NEW_PASSWORD_NOT_DIFFERENT: {
+    field: 'newPassword',
+    message: 'Новый пароль должен отличаться от текущего.',
+  },
+  PASSWORD_CONFIRMATION_MISMATCH: { field: 'confirmation', message: 'Пароли не совпадают.' },
+  PASSWORD_CHANGE_RATE_LIMITED: {
+    field: null,
+    message: 'Слишком много попыток изменить пароль. Повторите через несколько минут.',
+  },
+};
+
+// A `VALIDATION_FAILED` response names the rejected request properties instead.
+// Local validation normally catches these first, so they are reached only when
+// the two rule sets drift apart.
+const serverErrorsByField: Record<string, ServerError> = {
+  currentPassword: {
+    field: 'currentPassword',
+    message: `Введите текущий пароль не длиннее ${maximumPasswordBytes} байт UTF-8.`,
+  },
+  newPassword: {
+    field: 'newPassword',
+    message: `Используйте не менее ${minimumPasswordLength} символов и не более ${maximumPasswordBytes} байт UTF-8.`,
+  },
+  confirmation: { field: 'confirmation', message: 'Подтвердите новый пароль.' },
+};
+
+async function readServerError(response: Response): Promise<ServerError> {
   try {
-    const body = (await response.json()) as ApiError;
-    if (typeof body.message === 'string') {
-      return body.message;
-    }
-    if (Array.isArray(body.message) && body.message.length > 0) {
-      return body.message[0];
+    const body = (await response.json()) as CodedApiError;
+    if (body.code === 'VALIDATION_FAILED') {
+      const rejectedField = body.fields?.find((field) => field in serverErrorsByField);
+      if (rejectedField) {
+        return serverErrorsByField[rejectedField];
+      }
+    } else if (body.code && body.code in serverErrorsByCode) {
+      return serverErrorsByCode[body.code];
     }
   } catch {
     // A malformed error response gets a safe, recoverable fallback.
   }
 
-  return 'Не удалось изменить пароль. Проверьте соединение и повторите попытку.';
+  return unknownServerError;
 }
 
 /** Changes the signed-in user's password while retaining field-level recovery feedback. */
@@ -170,8 +194,7 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
       }
 
       if (!response.ok) {
-        const message = await getPasswordChangeApiError(response);
-        const field = getServerErrorField(message);
+        const { field, message } = await readServerError(response);
         if (field) {
           shouldFocusErrorRef.current = true;
           setErrors({ [field]: message });
@@ -185,7 +208,7 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
       hasChanged = true;
       onPasswordChanged();
     } catch {
-      setRequestError('Не удалось изменить пароль. Проверьте соединение и повторите попытку.');
+      setRequestError(unknownServerError.message);
       focusField('currentPassword');
     } finally {
       // A successful change leaves the form submitted while the router leaves

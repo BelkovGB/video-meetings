@@ -19,6 +19,17 @@ export type UploadApiError = ApiError & {
   code?: string;
 };
 
+/**
+ * Errors that carry a machine-readable discriminator. `code` identifies the
+ * failure, and `fields` names the rejected request properties of a
+ * `VALIDATION_FAILED` response. A caller that shows localized text must key off
+ * these instead of the English `message`, which is free to be reworded.
+ */
+export type CodedApiError = ApiError & {
+  code?: string;
+  fields?: string[];
+};
+
 export type Avatar = {
   mimeType: string;
   sizeBytes: number;

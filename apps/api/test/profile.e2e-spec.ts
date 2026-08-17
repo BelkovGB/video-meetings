@@ -187,11 +187,20 @@ describe('Current user profile (e2e)', () => {
         .send({ displayName: savedDisplayName })
         .expect(200);
 
-      await request(app.getHttpServer())
+      const rejection = await request(app.getHttpServer())
         .patch('/users/me')
         .set('Authorization', `Bearer ${user.accessToken}`)
         .send(displayName === undefined ? {} : { displayName })
         .expect(400);
+      // The documented shape of a validation failure: prose for developers, plus
+      // a code and the rejected field for a client that words its own message.
+      expect(rejection.body).toEqual({
+        statusCode: 400,
+        message: expect.arrayContaining([expect.any(String)]),
+        error: 'Bad Request',
+        code: 'VALIDATION_FAILED',
+        fields: ['displayName'],
+      });
 
       const response = await request(app.getHttpServer())
         .get('/users/me')
@@ -225,32 +234,55 @@ describe('Current user profile (e2e)', () => {
 
   it('rejects invalid password changes without changing the password or session', async () => {
     const user = await registerUser('password-change-invalid');
+    // Every rejection carries a machine-readable discriminator, and validation
+    // failures name the rejected field: the browser routes the error to that
+    // input and renders its own localized text instead of parsing this prose.
     const invalidRequests = [
       {
-        currentPassword: 'not-the-current-password',
-        newPassword: 'new-password-123',
-        confirmation: 'new-password-123',
-      },
-      { currentPassword: validPassword, newPassword: validPassword, confirmation: validPassword },
-      { currentPassword: validPassword, newPassword: 'password', confirmation: 'password' },
-      {
-        currentPassword: validPassword,
-        newPassword: '😀'.repeat(19),
-        confirmation: '😀'.repeat(19),
+        body: {
+          currentPassword: 'not-the-current-password',
+          newPassword: 'new-password-123',
+          confirmation: 'new-password-123',
+        },
+        expected: { code: 'CURRENT_PASSWORD_INCORRECT' },
       },
       {
-        currentPassword: validPassword,
-        newPassword: 'new-password-123',
-        confirmation: 'different-password-123',
+        body: {
+          currentPassword: validPassword,
+          newPassword: validPassword,
+          confirmation: validPassword,
+        },
+        expected: { code: 'NEW_PASSWORD_NOT_DIFFERENT' },
+      },
+      {
+        body: { currentPassword: validPassword, newPassword: 'password', confirmation: 'password' },
+        expected: { code: 'VALIDATION_FAILED', fields: ['newPassword'] },
+      },
+      {
+        body: {
+          currentPassword: validPassword,
+          newPassword: '😀'.repeat(19),
+          confirmation: '😀'.repeat(19),
+        },
+        expected: { code: 'VALIDATION_FAILED', fields: ['newPassword'] },
+      },
+      {
+        body: {
+          currentPassword: validPassword,
+          newPassword: 'new-password-123',
+          confirmation: 'different-password-123',
+        },
+        expected: { code: 'PASSWORD_CONFIRMATION_MISMATCH' },
       },
     ];
 
-    for (const body of invalidRequests) {
-      await request(app.getHttpServer())
+    for (const { body, expected } of invalidRequests) {
+      const response = await request(app.getHttpServer())
         .post('/users/me/password')
         .set('Authorization', `Bearer ${user.accessToken}`)
         .send(body)
         .expect(400);
+      expect(response.body).toMatchObject(expected);
 
       await request(app.getHttpServer())
         .get('/users/me')
@@ -266,7 +298,7 @@ describe('Current user profile (e2e)', () => {
     const user = await registerUser('password-change-oversized-current', currentPassword);
     const newPassword = 'new-password-123';
 
-    await request(app.getHttpServer())
+    const response = await request(app.getHttpServer())
       .post('/users/me/password')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .send({
@@ -275,12 +307,29 @@ describe('Current user profile (e2e)', () => {
         confirmation: newPassword,
       })
       .expect(400);
+    expect(response.body).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      fields: ['currentPassword'],
+    });
 
     await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .expect(200);
     await loginUser(user.email, currentPassword);
+  });
+
+  it('names the confirmation field when it is rejected by the DTO', async () => {
+    const user = await registerUser('password-change-blank-confirmation');
+
+    const response = await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ currentPassword: validPassword, newPassword: 'new-password-123', confirmation: '' })
+      .expect(400);
+    expect(response.body).toMatchObject({ code: 'VALIDATION_FAILED', fields: ['confirmation'] });
+
+    await loginUser(user.email, validPassword);
   });
 
   it('rejects a password below the minimum after NFC normalization', async () => {
@@ -339,12 +388,13 @@ describe('Current user profile (e2e)', () => {
         .expect(400);
     }
 
-    await request(app.getHttpServer())
+    const limited = await request(app.getHttpServer())
       .post('/users/me/password')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .send(invalidChange)
       .expect('Retry-After', /\d+/)
       .expect(429);
+    expect(limited.body).toMatchObject({ code: 'PASSWORD_CHANGE_RATE_LIMITED' });
 
     await request(app.getHttpServer())
       .get('/users/me')
