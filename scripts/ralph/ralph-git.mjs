@@ -50,6 +50,17 @@ export function issueCommits(issue, head, execute = run) {
 }
 
 /**
+ * Файлы, изменённые между двумя коммитами. Нужно, чтобы отличить «ветка ушла
+ * вперёд по чужим файлам» от «ветка ушла вперёд по тем же, что правит агент».
+ */
+export function filesChangedBetween(from, to, execute = run) {
+  const changed = execute('git', ['diff', '--name-only', from, to], { allowFailure: true });
+  if (changed.status !== 0) return null;
+
+  return changed.stdout.split(/\r?\n/).filter(Boolean);
+}
+
+/**
  * Является ли commit предком другого. Нужно там, где ветка законно ушла вперёд
  * и точное совпадение HEAD спрашивать не за что.
  */

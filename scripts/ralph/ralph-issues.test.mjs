@@ -21,6 +21,7 @@ import {
 import { committedRecoveryPhases } from './ralph-loop.mjs';
 import {
   alreadyFixedCommitFromAgent,
+  filesChangedBetween,
   isAncestorCommit,
   issueChangeInventory,
   linkedCommitForIssue,
@@ -207,6 +208,27 @@ test('a branch that moved on is judged by ancestry, not by an exact HEAD match',
   assert.equal(isAncestorCommit(null, 'new', run), false);
   assert.equal(isAncestorCommit('old', undefined, run), false);
   assert.equal(calls.length, 2);
+});
+
+test('the moved-branch check tells apart untouched files from contested ones', () => {
+  const run = (_name, args) => {
+    if (args[0] === 'diff' && args[1] === '--name-only') {
+      return { status: 0, stdout: 'scripts/ralph/ralph-loop.mjs\nAGENTS.md' };
+    }
+    return { status: 1, stdout: '' };
+  };
+
+  // Оператор правил control plane, агент правит спеку: пересечения нет.
+  assert.deepEqual(filesChangedBetween('old', 'new', run), [
+    'scripts/ralph/ralph-loop.mjs',
+    'AGENTS.md',
+  ]);
+  // Недостижимая база — не список из одного пустого элемента, а null: вызвавший
+  // обязан отличить «ничего не изменилось» от «сравнить не удалось».
+  assert.equal(
+    filesChangedBetween('old', 'new', () => ({ status: 128, stdout: '' })),
+    null,
+  );
 });
 
 test('a rejected review never resumes without a new agent session', () => {

@@ -59,6 +59,7 @@ import {
   commitMessageFromAgent,
   commitStagedChanges,
   commitTrailerForIssue,
+  filesChangedBetween,
   isAncestorCommit,
   issueChangeInventory,
   linkedCommitForIssue,
@@ -500,6 +501,46 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 // Реализация одной issue агентом и проверка правил завершения
 // -----------------------------------------------------------------------------
 
+// Фазы, на которых работа issue лежит незакоммиченной в рабочем дереве.
+const uncommittedWorkPhases = new Set(['agent-running', 'working-tree', 'validating']);
+
+/**
+ * Можно ли продолжить issue, если ветка ушла вперёд с сохранённого commit.
+ *
+ * Требование точного совпадения HEAD теряло задачу каждый раз, когда между
+ * прогонами в ветку попадал любой посторонний commit — а это ровно то, что
+ * делает оператор, правя Ralph между запусками.
+ *
+ * Условие зависит от того, где лежит работа. После отказа ревью она в HEAD, а
+ * дерево чистое: двигать базу безопасно всегда. На фазах с незакоммиченным
+ * diff — только если пришедшие коммиты не трогают ни одного файла, который
+ * сейчас правит агент; иначе его правки лягут поверх изменившегося файла, и
+ * это уже не продолжение, а конфликт.
+ *
+ * `staging` не входит: там в состоянии лежит `expectedTree`, собранный против
+ * прежнего HEAD.
+ */
+function branchMovedWithoutDisturbingIssue(storedIssue, currentHead) {
+  const storedStart = storedIssue?.startingCommit;
+  if (!storedStart || storedStart === currentHead) return false;
+  if (!isAncestorCommit(storedStart, currentHead)) return false;
+
+  const status = workingTreeStatus();
+  if (storedIssue.phase === 'review-failed') return status === '';
+  if (!uncommittedWorkPhases.has(storedIssue.phase) || status === '') return false;
+
+  const dirtyFiles = new Set(
+    status
+      .split(/\r?\n/)
+      .filter(Boolean)
+      // Формат `XY <путь>`, а для переименования — `R  старый -> новый`.
+      .map((line) => line.slice(3).trim().split(' -> ').at(-1)),
+  );
+  const moved = filesChangedBetween(storedStart, currentHead);
+
+  return moved !== null && moved.every((file) => !dirtyFiles.has(file));
+}
+
 export async function runAgentOnIssue(config, repository, issue, rules) {
   issue = assertTrustedIssue(config, issue, repository);
   const storedIssue =
@@ -524,25 +565,15 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
   const currentHead = run('git', ['rev-parse', 'HEAD']).stdout;
   const continuation = Boolean(storedIssue);
   const storedStart = storedIssue?.startingCommit;
-  // После отказа ревью работа уже закоммичена, а дерево чистое, поэтому ушедшая
-  // вперёд ветка ничему не мешает: замечания чинятся поверх нового HEAD. Точное
-  // совпадение здесь требовать не за что, и требование стоило потерянной задачи
-  // каждый раз, когда между прогонами в ветку попадал любой другой commit.
-  // Остальные фазы держат незакоммиченный diff — там сдвиг HEAD означает, что
-  // сохранённое состояние больше не описывает дерево, и это по-прежнему отказ.
-  const branchMovedOnAfterReview =
-    storedIssue?.phase === 'review-failed' &&
-    storedStart !== currentHead &&
-    workingTreeStatus() === '' &&
-    isAncestorCommit(storedStart, currentHead);
-  if (branchMovedOnAfterReview) {
+  const branchMovedOn = branchMovedWithoutDisturbingIssue(storedIssue, currentHead);
+  if (branchMovedOn) {
     console.log(
       `Issue #${issue.number}: ветка ушла вперёд с ${storedStart.slice(0, 8)} ` +
-        `до ${currentHead.slice(0, 8)}; замечания ревью чиним поверх нового HEAD.`,
+        `до ${currentHead.slice(0, 8)}; продолжаем поверх нового HEAD.`,
     );
     activeStateStore()?.updateIssue({ startingCommit: currentHead });
   }
-  const startingCommit = branchMovedOnAfterReview ? currentHead : (storedStart ?? currentHead);
+  const startingCommit = branchMovedOn ? currentHead : (storedStart ?? currentHead);
   if (startingCommit !== currentHead) {
     fail(
       `Issue #${issue.number}: recovery ожидал HEAD ${startingCommit}, но найден ${currentHead}.`,
