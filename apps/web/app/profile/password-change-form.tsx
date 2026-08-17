@@ -140,6 +140,12 @@ export function PasswordChangeForm({
   const [errors, setErrors] = useState<PasswordErrors>({});
   const [requestError, setRequestError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // A rejection that belongs to no field returns the caret to a field all the
+  // same, and a screen reader reads the description of the control it lands on.
+  // Every field points at the message while it stands, so the refusal is heard
+  // there instead of being left to an alert that mounts already filled — the
+  // pattern the sign-in notice rejects because it is announced unreliably.
+  const requestErrorId = requestError ? 'password-change-error' : undefined;
   const currentPasswordRef = useRef<HTMLInputElement>(null);
   const newPasswordRef = useRef<HTMLInputElement>(null);
   const confirmationRef = useRef<HTMLInputElement>(null);
@@ -263,6 +269,7 @@ export function PasswordChangeForm({
             autoComplete="current-password"
             value={currentPassword}
             error={errors.currentPassword}
+            requestErrorId={requestErrorId}
             disabled={isSubmitting}
             onChange={(value) => {
               setCurrentPassword(value);
@@ -277,6 +284,7 @@ export function PasswordChangeForm({
             autoComplete="new-password"
             value={newPassword}
             error={errors.newPassword}
+            requestErrorId={requestErrorId}
             disabled={isSubmitting}
             onChange={(value) => {
               setNewPassword(value);
@@ -291,6 +299,7 @@ export function PasswordChangeForm({
             autoComplete="new-password"
             value={confirmation}
             error={errors.confirmation}
+            requestErrorId={requestErrorId}
             disabled={isSubmitting}
             onChange={(value) => {
               setConfirmation(value);
@@ -334,15 +343,20 @@ type PasswordInputProps = {
   autoComplete: string;
   value: string;
   error?: string;
+  /** The id of the form-level error, while one is on screen. */
+  requestErrorId?: string;
   disabled: boolean;
   onChange: (value: string) => void;
 };
 
 const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(function PasswordInput(
-  { id, label, name, autoComplete, value, error, disabled, onChange },
+  { id, label, name, autoComplete, value, error, requestErrorId, disabled, onChange },
   ref,
 ) {
   const errorId = `${id}-error`;
+  const describedBy = [error ? errorId : 'password-change-help', requestErrorId]
+    .filter(Boolean)
+    .join(' ');
 
   return (
     <div>
@@ -358,7 +372,7 @@ const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(function 
         value={value}
         disabled={disabled}
         aria-invalid={error ? true : undefined}
-        aria-describedby={error ? errorId : 'password-change-help'}
+        aria-describedby={describedBy}
         className="mt-2 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-4 py-2 text-base text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-cyan-700 focus:ring-2 focus:ring-cyan-700/25 disabled:cursor-wait disabled:bg-slate-100 disabled:text-slate-500"
         onChange={(event) => onChange(event.target.value)}
       />

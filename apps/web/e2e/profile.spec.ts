@@ -874,7 +874,23 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page.locator('#password-change-error')).toHaveText(
     'Слишком много попыток изменить пароль. Повторите через несколько минут.',
   );
+  // The refusal belongs to no field, so the caret returns to «Текущий пароль».
+  // That field has to describe itself with the refusal: a screen reader reads the
+  // description of the control it lands on, and an alert that mounts already
+  // filled is announced unreliably. Hearing only the label and the generic help
+  // text would present the attempt as if nothing had happened.
+  await expect(currentPassword).toBeFocused();
+  await expect(currentPassword).toHaveAttribute(
+    'aria-describedby',
+    'password-change-help password-change-error',
+  );
   await expect(page).toHaveURL('/profile');
+
+  // The description is not permanent: typing clears the refusal, and the field
+  // goes back to pointing at the help text alone.
+  await currentPassword.fill('retyped-current-password');
+  await expect(currentPassword).toHaveAttribute('aria-describedby', 'password-change-help');
+  await currentPassword.fill(password);
 
   // A failure the browser does not recognise still says something in Russian
   // and keeps the caret in the form, instead of pasting server prose on screen.
