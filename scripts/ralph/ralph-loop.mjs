@@ -520,6 +520,21 @@ const uncommittedWorkPhases = new Set(['agent-running', 'working-tree', 'validat
  * `staging` не входит: там в состоянии лежит `expectedTree`, собранный против
  * прежнего HEAD.
  */
+export function advanceStartingCommitIfBranchMovedOn(stateStore = activeStateStore()) {
+  const storedIssue = stateStore?.issue;
+  const currentHead = run('git', ['rev-parse', 'HEAD']).stdout;
+  if (!branchMovedWithoutDisturbingIssue(storedIssue, currentHead)) return false;
+
+  console.log(
+    `Issue #${storedIssue.number}: ветка ушла вперёд с ` +
+      `${storedIssue.startingCommit.slice(0, 8)} до ${currentHead.slice(0, 8)}; ` +
+      'продолжаем поверх нового HEAD.',
+  );
+  stateStore.updateIssue({ startingCommit: currentHead });
+
+  return true;
+}
+
 function branchMovedWithoutDisturbingIssue(storedIssue, currentHead) {
   const storedStart = storedIssue?.startingCommit;
   if (!storedStart || storedStart === currentHead) return false;
@@ -564,16 +579,9 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
 
   const currentHead = run('git', ['rev-parse', 'HEAD']).stdout;
   const continuation = Boolean(storedIssue);
-  const storedStart = storedIssue?.startingCommit;
-  const branchMovedOn = branchMovedWithoutDisturbingIssue(storedIssue, currentHead);
-  if (branchMovedOn) {
-    console.log(
-      `Issue #${issue.number}: ветка ушла вперёд с ${storedStart.slice(0, 8)} ` +
-        `до ${currentHead.slice(0, 8)}; продолжаем поверх нового HEAD.`,
-    );
-    activeStateStore()?.updateIssue({ startingCommit: currentHead });
-  }
-  const startingCommit = branchMovedOn ? currentHead : (storedStart ?? currentHead);
+  // База уже сдвинута в начале фазы, до проверки рабочего дерева; здесь
+  // остаётся простое сравнение.
+  const startingCommit = storedIssue?.startingCommit ?? currentHead;
   if (startingCommit !== currentHead) {
     fail(
       `Issue #${issue.number}: recovery ожидал HEAD ${startingCommit}, но найден ${currentHead}.`,
@@ -1239,6 +1247,12 @@ async function main() {
     const milestones = config.phases.map((phase) => verifyMilestone(repository, phase.milestone));
     const actions = defaultActions();
     const runPhase = async (phaseConfig) => {
+      // Примирение с реальным HEAD идёт до проверки дерева: `verifyRepository`
+      // разрешает грязное дерево только через `allowsDirtyRecovery`, а тот
+      // требует точного совпадения HEAD с сохранённым startingCommit. Пока база
+      // не сдвинута, продолжение отвергается на слой раньше, чем до него
+      // доходит очередь.
+      if (mode !== '--check') advanceStartingCommitIfBranchMovedOn();
       const repositoryState = verifyRepository(phaseConfig, mode !== '--check');
       // Слепок пересчитывается сразу после переключения ветки и до сессии
       // агента. `verifyRepository` — единственное место, где рабочее дерево
