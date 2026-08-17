@@ -106,7 +106,7 @@ export function validationContainerRunArgs(config, scripts, snapshotPath) {
   ];
 }
 
-function createValidationWorkspaceSnapshot() {
+export function createValidationWorkspaceSnapshot() {
   const snapshotPath = mkdtempSync(path.join(tmpdir(), 'ralph-validation-'));
   try {
     const files = run('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])
@@ -123,7 +123,14 @@ function createValidationWorkspaceSnapshot() {
         fail(`Небезопасный путь в git ls-files: ${relativePath}`);
       }
       const sourcePath = path.join(projectRoot, normalizedPath);
-      if (lstatSync(sourcePath).isSymbolicLink()) {
+      // Удалённый в рабочем дереве файл git ls-files всё ещё перечисляет как
+      // отслеживаемый. Снимок обязан повторять дерево, а не индекс: иначе
+      // issue, которую нельзя выполнить без удаления файла, не проходит
+      // валидацию в принципе. На issue #84 три попытки подряд падали с ENOENT
+      // за секунду и съели остаток бюджета итераций.
+      const sourceStats = lstatSync(sourcePath, { throwIfNoEntry: false });
+      if (!sourceStats) continue;
+      if (sourceStats.isSymbolicLink()) {
         fail(`Validation snapshot не допускает symbolic link: ${relativePath}`);
       }
       const destinationPath = path.join(snapshotPath, normalizedPath);

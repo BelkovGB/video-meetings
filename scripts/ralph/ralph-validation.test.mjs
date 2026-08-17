@@ -11,6 +11,7 @@ import { run } from './ralph-process-runner.mjs';
 import {
   assertValidationDependenciesCommitted,
   createTrustedValidationDependencySnapshot,
+  createValidationWorkspaceSnapshot,
   ensureValidationImage,
   failedValidationScript,
   hasValidationAttestation,
@@ -706,4 +707,26 @@ test('конфигурация включает сокращение набор�
   // Значение по умолчанию, а не обязательное поле: конфигурации без него
   // работали до появления сокращения и должны работать после.
   assert.equal(loadConfig().scopedValidation, true);
+});
+
+test('снимок повторяет рабочее дерево, а не индекс: удалённый файл его не роняет', () => {
+  // Отслеживаемый файл, удалённый в рабочем дереве, git ls-files по-прежнему
+  // перечисляет. Пока снимок копировал список дословно, он падал с ENOENT за
+  // секунду, и issue, требующая удалить файл, была невыполнима в принципе.
+  const victim = path.join('scripts', 'ralph', 'README.md');
+  const absolute = path.join(process.cwd(), victim);
+  const original = readFileSync(absolute);
+  let snapshot;
+
+  try {
+    rmSync(absolute);
+    snapshot = createValidationWorkspaceSnapshot();
+
+    assert.equal(existsSync(path.join(snapshot, victim)), false);
+    // Снимок собран целиком, а не оборван на удалённом файле.
+    assert.equal(existsSync(path.join(snapshot, 'package.json')), true);
+  } finally {
+    writeFileSync(absolute, original);
+    if (snapshot) rmSync(snapshot, { recursive: true, force: true });
+  }
 });
