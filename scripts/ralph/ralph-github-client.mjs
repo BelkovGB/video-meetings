@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { fail, isRalphInfrastructureIssue } from './ralph-scope.mjs';
 import { run, runNetwork, runtimeSettings } from './ralph-process-runner.mjs';
+import { retryTransientOperation } from './ralph-runtime.mjs';
 import { parseJson } from './ralph-config.mjs';
 
 /**
@@ -159,30 +160,55 @@ export function patchIssue(repository, issueNumber, values) {
   );
 }
 
+/**
+ * Публикация шла через `run`, то есть без повтора, и один 503 от GitHub убивал
+ * прогон целиком: на milestone фазы 8 это стоило часа работы — ревью уже
+ * вернуло PASS, оставалось закрыть issue.
+ *
+ * Повторяется не сам POST, а проверка вместе с ним. Публикация комментария не
+ * идемпотентна, и слепой повтор мог бы напечатать его дважды; повтор с
+ * перечитыванием списка находит комментарий, если предыдущая попытка всё же
+ * дошла, и не делает ничего.
+ */
 export function postIssueCommentOnce(repository, issueNumber, body, marker) {
-  const comments = githubPagedArray(
-    repository,
-    `issues/${issueNumber}/comments`,
-    [],
-    `GitHub comments for issue #${issueNumber}`,
-  );
-  if (
-    comments.some((comment) => typeof comment.body === 'string' && comment.body.includes(marker))
-  ) {
-    console.log(`Комментарий ${marker} уже опубликован в issue #${issueNumber}.`);
-    return;
-  }
-  run(
-    'gh',
-    [
-      'api',
-      '--method',
-      'POST',
-      `repos/${repository}/issues/${issueNumber}/comments`,
-      '--input',
-      '-',
-    ],
-    { input: JSON.stringify({ body: `${marker}\n${body}`.slice(0, 60_000) }) },
+  return retryTransientOperation(
+    () => {
+      const comments = githubPagedArray(
+        repository,
+        `issues/${issueNumber}/comments`,
+        [],
+        `GitHub comments for issue #${issueNumber}`,
+      );
+      if (
+        comments.some(
+          (comment) => typeof comment.body === 'string' && comment.body.includes(marker),
+        )
+      ) {
+        console.log(`Комментарий ${marker} уже опубликован в issue #${issueNumber}.`);
+        return;
+      }
+      run(
+        'gh',
+        [
+          'api',
+          '--method',
+          'POST',
+          `repos/${repository}/issues/${issueNumber}/comments`,
+          '--input',
+          '-',
+        ],
+        { input: JSON.stringify({ body: `${marker}\n${body}`.slice(0, 60_000) }) },
+      );
+    },
+    {
+      attempts: runtimeSettings().networkRetryAttempts,
+      baseDelayMs: runtimeSettings().networkRetryBaseDelayMs,
+      onRetry: (error, attempt, delay) =>
+        console.error(
+          `Временная ошибка публикации комментария (попытка ${attempt}): ${error.message}. ` +
+            `Повтор через ${delay} ms.`,
+        ),
+    },
   );
 }
 

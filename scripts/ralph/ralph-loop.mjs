@@ -774,7 +774,10 @@ function createPullRequest(config, repository) {
     args.push('--draft');
   }
 
-  const url = run('gh', args).stdout;
+  // Через runNetwork: создание PR — сетевой вызов, и 503 от GitHub не повод
+  // терять прогон. Повторная попытка при уже созданном PR падает своей ошибкой
+  // «pull request already exists», а не молча создаёт второй.
+  const url = runNetwork('gh', args).stdout;
   console.log(`Создан PR: ${url}`);
   return verifyPullRequestTarget(config, pullRequestDetails(repository, url));
 }

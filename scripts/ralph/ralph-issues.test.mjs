@@ -35,6 +35,7 @@ import {
 } from './ralph-issue-contract.mjs';
 import {
   createOrReopenReviewIssues,
+  groupFindingsIntoBatches,
   limitMilestoneReviewFindings,
   milestonePassReviewIsClean,
   milestoneReviewMarker,
@@ -99,8 +100,14 @@ test('review findings create, reuse, and reopen milestone issues without duplica
     { verdict: 'fail', findings: [...findings, findings[0]] },
     {
       milestoneIssues: () => existing,
-      createReviewFindingIssue: (_config, _repository, _milestone, _pr, finding) => {
-        const issue = { number: 3, state: 'OPEN', body: reviewFindingMarker(pullRequest, finding) };
+      // Дублёр получает группу замечаний, а не одно: тело задачи несёт по
+      // маркеру на каждое, иначе дедупликация следующего раунда их не найдёт.
+      createReviewFindingIssue: (_config, _repository, _milestone, _pr, batch) => {
+        const issue = {
+          number: 3,
+          state: 'OPEN',
+          body: batch.map((finding) => reviewFindingMarker(pullRequest, finding)).join('\n'),
+        };
         created.push(issue.number);
         return issue;
       },
@@ -114,8 +121,45 @@ test('review findings create, reuse, and reopen milestone issues without duplica
     [1, 2, 3],
   );
   assert.deepEqual(created, [3]);
-  assert.deepEqual(updated, [1, 2, 1]);
+  // Повторно пришедшее замечание попадает в свою же группу, а не обрабатывается
+  // вторым проходом: раньше та же задача обновлялась дважды подряд.
+  assert.deepEqual(updated, [1, 2]);
   assert.deepEqual(reopened, [2]);
+});
+
+test('findings are batched by file and severity band, not one issue each', () => {
+  const findings = [
+    { severity: 'P1', title: 'Focus jumps', file: 'form.tsx', line: 106, body: 'a' },
+    { severity: 'P2', title: 'Empty password', file: 'form.tsx', line: 32, body: 'b' },
+    { severity: 'P3', title: 'Not announced', file: 'form.tsx', line: 241, body: 'c' },
+    { severity: 'P3', title: 'Baselines committed', file: 'spec.ts', line: 621, body: 'd' },
+  ];
+
+  const batches = groupFindingsIntoBatches(findings);
+
+  // Три задачи вместо четырёх: P2 и P3 одного файла чинятся за один заход.
+  assert.equal(batches.length, 3);
+  assert.deepEqual(
+    batches.map((batch) => batch.map((finding) => finding.title)),
+    [['Focus jumps'], ['Empty password', 'Not announced'], ['Baselines committed']],
+  );
+
+  // Полоса важности разделяет намеренно: задача закрывается целиком, и P3, не
+  // прошедший ревью, держал бы открытым уже исправленный P1.
+  assert.equal(batches[0][0].severity, 'P1');
+
+  // Размер ограничен, иначе задача перестаёт быть обозримой на ревью.
+  const many = Array.from({ length: 7 }, (_, index) => ({
+    severity: 'P3',
+    title: `finding ${index}`,
+    file: 'form.tsx',
+    line: index,
+    body: 'x',
+  }));
+  assert.deepEqual(
+    groupFindingsIntoBatches(many).map((batch) => batch.length),
+    [5, 2],
+  );
 });
 
 test('issue review context is replaced instead of growing on every retry', () => {
