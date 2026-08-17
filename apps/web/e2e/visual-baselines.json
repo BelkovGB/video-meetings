@@ -1,0 +1,25 @@
+{
+  "note": "Playwright baselines rendered by the operator's validation image. An agent does not add lines here: it writes the visual test, the operator regenerates the snapshots with npm run test:e2e:web:visual and records the names. Enforced by visual-baselines.spec.ts.",
+  "directories": {
+    "profile.spec.ts-snapshots": [
+      "avatar-preview-panel-desktop-chromium.png",
+      "avatar-preview-panel-mobile-chromium.png",
+      "avatar-preview-panel-mobile-landscape-chromium.png",
+      "avatar-removal-controls-desktop-chromium.png",
+      "avatar-removal-controls-mobile-chromium.png",
+      "avatar-removal-controls-mobile-landscape-chromium.png",
+      "current-user-avatar-image-desktop-chromium.png",
+      "current-user-avatar-image-mobile-chromium.png",
+      "current-user-avatar-image-mobile-landscape-chromium.png",
+      "current-user-avatar-load-error-fallback-desktop-chromium.png",
+      "current-user-avatar-load-error-fallback-mobile-chromium.png",
+      "current-user-avatar-load-error-fallback-mobile-landscape-chromium.png",
+      "dashboard-account-entry-desktop-chromium.png",
+      "dashboard-account-entry-mobile-chromium.png",
+      "dashboard-account-entry-mobile-landscape-chromium.png",
+      "dashboard-account-header-desktop-chromium.png",
+      "dashboard-account-header-mobile-chromium.png",
+      "dashboard-account-header-mobile-landscape-chromium.png"
+    ]
+  }
+}
