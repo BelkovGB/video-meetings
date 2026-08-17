@@ -881,7 +881,10 @@ test('validates and recovers from password-change failures without clearing the 
   // text would present the attempt as if nothing had happened.
   // The assertion is on the computed description rather than on the id list,
   // because the id list stays byte-identical if the referenced node is renamed
-  // or hidden — exactly the regressions that would silence the refusal. The
+  // or removed — the reference dangles and the refusal is silenced, while the
+  // attribute still reads as if it were wired up. Hiding that node is not such
+  // a regression: a directly referenced node is traversed even when hidden, so
+  // both this assertion and a screen reader still get the sentence. The
   // refusal comes first: a description is announced after the label, is
   // interruptible, and the guidance is what the user has already heard.
   await expect(currentPassword).toBeFocused();
