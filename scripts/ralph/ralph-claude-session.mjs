@@ -219,7 +219,11 @@ function claudeTelemetry(event) {
     cliWallMs: numberOrNull(event.duration_ms),
     apiMs: numberOrNull(event.duration_api_ms),
     costUsd: numberOrNull(event.total_cost_usd),
-    inputTokens: numberOrNull(usage.input_tokens),
+    // Имя называет ровно то, что в поле: `usage.input_tokens` — это вход, не
+    // покрытый кэшем. Полный вход сессии складывается из него, записи кэша и
+    // чтения кэша, и складывает его сводка. Прежнее имя `inputTokens` обещало
+    // весь вход и показывало 0,06% от него.
+    uncachedInputTokens: numberOrNull(usage.input_tokens),
     outputTokens: numberOrNull(usage.output_tokens),
     cacheReadTokens: numberOrNull(usage.cache_read_input_tokens),
     cacheCreationTokens: numberOrNull(usage.cache_creation_input_tokens),

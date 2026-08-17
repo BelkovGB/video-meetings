@@ -64,20 +64,36 @@ test('totals суммируют только присланные значени
     recordAgentTelemetry('development', {
       turns: 34,
       costUsd: 2.5,
-      inputTokens: 120,
+      uncachedInputTokens: 120,
+      cacheCreationTokens: 1_000,
+      cacheReadTokens: 50_000,
       outputTokens: 40,
     });
     // Codex цену не присылает: сумма обязана остаться суммой известного, а не
     // получить ноль вместо «не сообщено».
-    recordAgentTelemetry('review', { turns: 12, inputTokens: 80, outputTokens: 20 });
+    recordAgentTelemetry('review', { turns: 12, uncachedInputTokens: 80, outputTokens: 20 });
     const record = finishIssueMetrics({ outcome: 'completed' }, { metricsPath });
 
     assert.equal(record.totals.sessions, 2);
     assert.equal(record.totals.costReportedBy, 1);
     assert.equal(record.totals.costUsd, 2.5);
     assert.equal(record.totals.turns, 46);
-    assert.equal(record.totals.inputTokens, 200);
-    assert.equal(record.totals.cacheReadTokens, null);
+    // Вход — это все три слагаемых. Одно из них выдавали за весь вход, и на
+    // реальном прогоне это показывало 3k вместо 5,8M.
+    assert.equal(record.totals.uncachedInputTokens, 200);
+    assert.equal(record.totals.inputTokens, 200 + 1_000 + 50_000);
+    assert.equal(record.totals.thinkingTokens, null);
+  });
+});
+
+test('вход не считается, когда телеметрии нет вовсе', () => {
+  withMetricsFile((metricsPath) => {
+    beginIssueMetrics({ issue: 11 }, { now: clockOf([0, 0]) });
+    recordAgentTelemetry('development', { turns: 5 });
+    const record = finishIssueMetrics({ outcome: 'completed' }, { metricsPath });
+
+    assert.equal(record.totals.inputTokens, null);
+    assert.equal(record.totals.turns, 5);
   });
 });
 
@@ -122,37 +138,45 @@ test('журнал метрик хранится новыми записями �
   });
 });
 
-test('строка для оператора называет стадии, цену и исход', () => {
+test('строка для оператора считает токены, а не деньги', () => {
   const line = formatIssueMetrics({
     issue: 57,
-    wallMs: 932_000,
+    wallMs: 1_339_000,
     stages: {
-      implementation: { ms: 390_000, runs: 1 },
-      validation: { ms: 151_000, runs: 1, attested: true },
-      review: { ms: 368_000, runs: 1 },
+      implementation: { ms: 621_000, runs: 1 },
+      validation: { ms: 172_000, runs: 1, attested: true },
+      review: { ms: 533_000, runs: 1 },
     },
     totals: {
       sessions: 2,
       costReportedBy: 2,
-      costUsd: 12.4,
-      turns: 46,
-      inputTokens: 1_240_000,
-      outputTokens: 18_000,
-      cacheReadTokens: 1_100_000,
-      cacheCreationTokens: 42_000,
+      costUsd: 6.18,
+      turns: 88,
+      toolResults: 34,
+      thinkingTokens: 41_000,
+      uncachedInputTokens: 3_199,
+      inputTokens: 5_800_762,
+      outputTokens: 55_802,
+      cacheReadTokens: 5_603_819,
+      cacheCreationTokens: 193_744,
     },
     outcome: 'review-failed',
     reason: 'независимое ревью вернуло замечания',
   });
 
-  assert.match(line, /Стоимость issue #57: 15m32s/);
-  assert.match(line, /validation 2m31s, из attestation/);
-  assert.match(line, /\$12\.40/);
-  assert.match(line, /токены 1\.2M\/18k/);
+  assert.match(line, /Стоимость issue #57: 22m19s/);
+  assert.match(line, /validation 2m52s, из attestation/);
+  assert.match(line, /шагов 88, вызовов инструментов 34/);
+  // Вход — полный, а не некэшированный остаток; чтение кэша расходует окно
+  // квоты так же, как всё остальное.
+  assert.match(line, /вход 5\.8M \(кэш: чтение 5\.6M, запись 194k, вне кэша 3k\)/);
+  assert.match(line, /выход 56k, рассуждений 41k/);
+  // На подписке доллары условны и в строку не идут.
+  assert.doesNotMatch(line, /\$/);
   assert.match(line, /независимое ревью вернуло замечания/);
 });
 
-test('частичная цена помечается числом сессий, а не выдаётся за полную', () => {
+test('неполная телеметрия помечается числом сессий, а не выдаётся за полную', () => {
   const line = formatIssueMetrics({
     issue: 58,
     wallMs: 60_000,
@@ -161,9 +185,12 @@ test('частичная цена помечается числом сессий
       sessions: 2,
       costReportedBy: 1,
       costUsd: 1.5,
-      turns: null,
-      inputTokens: null,
-      outputTokens: null,
+      turns: 10,
+      toolResults: 3,
+      thinkingTokens: null,
+      uncachedInputTokens: 100,
+      inputTokens: 100,
+      outputTokens: 50,
       cacheReadTokens: null,
       cacheCreationTokens: null,
     },
@@ -171,8 +198,8 @@ test('частичная цена помечается числом сессий
     reason: null,
   });
 
-  assert.match(line, /\$1\.50 \(цену прислали 1\/2\)/);
-  assert.doesNotMatch(line, /токены/);
+  assert.match(line, /телеметрию прислали 1\/2/);
+  assert.match(line, /кэш: чтение —, запись —/);
 });
 
 // Формат сохраняется отдельным тестом: ошибка здесь тихо портит строку, ради
@@ -187,6 +214,9 @@ test('короткие стадии печатаются в секундах, д
       costReportedBy: 0,
       costUsd: null,
       turns: null,
+      toolResults: null,
+      thinkingTokens: null,
+      uncachedInputTokens: null,
       inputTokens: null,
       outputTokens: null,
       cacheReadTokens: null,
@@ -197,4 +227,6 @@ test('короткие стадии печатаются в секундах, д
   });
 
   assert.match(line, /45s — validation 8s ×3/);
+  // Ни одной сессии не было: объём печатать нечего, и нулей быть не должно.
+  assert.doesNotMatch(line, /вход/);
 });

@@ -148,12 +148,23 @@ export function summarizeIssueMetrics(metrics, outcome) {
       // различает: агент много ходил по репозиторию или много рассуждал.
       toolResults: sumTelemetry(agents, 'toolResults'),
       thinkingTokens: sumTelemetry(agents, 'thinkingTokens'),
-      inputTokens: sumTelemetry(agents, 'inputTokens'),
+      uncachedInputTokens: sumTelemetry(agents, 'uncachedInputTokens'),
       outputTokens: sumTelemetry(agents, 'outputTokens'),
       cacheReadTokens: sumTelemetry(agents, 'cacheReadTokens'),
       cacheCreationTokens: sumTelemetry(agents, 'cacheCreationTokens'),
+      // Полный вход, а не одно из трёх слагаемых. Чтение кэша дешевле, но окно
+      // квоты расходует так же, и именно оно ограничивает прогон.
+      inputTokens: totalInputTokens(agents),
     },
   };
+}
+
+function totalInputTokens(agents) {
+  const parts = ['uncachedInputTokens', 'cacheCreationTokens', 'cacheReadTokens']
+    .map((field) => sumTelemetry(agents, field))
+    .filter((value) => typeof value === 'number');
+
+  return parts.length > 0 ? parts.reduce((total, value) => total + value, 0) : null;
 }
 
 export function appendIssueMetrics(record, dependencies = {}) {
@@ -201,12 +212,26 @@ function formatTokens(value) {
   return String(value);
 }
 
-function formatCost(record) {
-  const { costUsd, costReportedBy, sessions } = record.totals;
-  if (typeof costUsd !== 'number') return null;
-  const partial = costReportedBy < sessions ? ` (цену прислали ${costReportedBy}/${sessions})` : '';
+/**
+ * Строка оператору считает токены, а не деньги: на подписке доллары условны, а
+ * прогон ограничивает пятичасовое окно, которое расходуется токенами. Цена от
+ * CLI остаётся в записи — она приходит даром и её нельзя восстановить потом.
+ */
+function formatTokenVolume(record) {
+  const { inputTokens, uncachedInputTokens, cacheReadTokens, cacheCreationTokens } = record.totals;
+  const { outputTokens, thinkingTokens, sessions, costReportedBy } = record.totals;
+  if (typeof inputTokens !== 'number' && typeof outputTokens !== 'number') return null;
+  const partial =
+    costReportedBy < sessions ? `, телеметрию прислали ${costReportedBy}/${sessions}` : '';
+  const reasoning =
+    typeof thinkingTokens === 'number' ? `, рассуждений ${formatTokens(thinkingTokens)}` : '';
 
-  return `$${costUsd.toFixed(2)}${partial}`;
+  return (
+    `вход ${formatTokens(inputTokens)} ` +
+    `(кэш: чтение ${formatTokens(cacheReadTokens)}, запись ${formatTokens(cacheCreationTokens)}, ` +
+    `вне кэша ${formatTokens(uncachedInputTokens)}), ` +
+    `выход ${formatTokens(outputTokens)}${reasoning}${partial}`
+  );
 }
 
 export function formatIssueMetrics(record) {
@@ -217,25 +242,16 @@ export function formatIssueMetrics(record) {
       return `${name} ${formatDuration(stage.ms)}${runs}${attested}`;
     })
     .join(', ');
-  const { turns, toolResults, thinkingTokens, inputTokens, outputTokens } = record.totals;
-  const { cacheReadTokens, cacheCreationTokens } = record.totals;
-  const cost = formatCost(record);
+  const { turns, toolResults } = record.totals;
   const work =
     `${record.totals.sessions} сессий` +
     `${typeof turns === 'number' ? `, шагов ${turns}` : ''}` +
     `${typeof toolResults === 'number' ? `, вызовов инструментов ${toolResults}` : ''}`;
-  const tokens =
-    typeof inputTokens === 'number' || typeof outputTokens === 'number'
-      ? `токены ${formatTokens(inputTokens)}/${formatTokens(outputTokens)}` +
-        `${typeof thinkingTokens === 'number' ? `, из них рассуждений ${formatTokens(thinkingTokens)}` : ''} ` +
-        `(кэш: чтение ${formatTokens(cacheReadTokens)}, запись ${formatTokens(cacheCreationTokens)})`
-      : null;
 
   return [
     `Стоимость issue #${record.issue}: ${formatDuration(record.wallMs)} — ${stages || 'без стадий'}`,
     work,
-    cost,
-    tokens,
+    formatTokenVolume(record),
     `итог: ${record.reason ?? record.outcome}`,
   ]
     .filter(Boolean)
