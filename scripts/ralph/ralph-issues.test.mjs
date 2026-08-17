@@ -42,7 +42,7 @@ import {
   reviewFindingFingerprint,
   reviewFindingMarker,
 } from './ralph-milestone-review.mjs';
-import { verifyRepositoryWriteAccess } from './ralph-github-client.mjs';
+import { reopenIssueWithComment, verifyRepositoryWriteAccess } from './ralph-github-client.mjs';
 import { ralphConfigPath, withPatchedRalphConfig } from './ralph-test-support.mjs';
 
 test('finding fingerprint is stable for Unicode titles and changes with location', () => {
@@ -840,4 +840,42 @@ test('the recovery prompt carries the summary and tells the agent to rerun only 
   const withoutFailure = recoveryPrompt({});
   assert.match(withoutFailure, /процесс завершился до фиксации результата/);
   assert.equal(/Сначала повтори только упавшие проверки/.test(withoutFailure), false);
+});
+
+test('потерянный комментарий не роняет цикл, а незакрытая issue роняет', () => {
+  const failing = () => {
+    const error = new Error('gh api: HTTP 503');
+    throw error;
+  };
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+
+  try {
+    // Публикация недоступна: 17 августа именно на ней обрывался цикл, уже
+    // сделавший работу, — до пятнадцати минут за раз.
+    reopenIssueWithComment('owner/repo', { number: 82 }, 'Findings', {
+      issueState: () => 'OPEN',
+      patchIssue: () => ({}),
+      postComment: failing,
+    });
+
+    // Переоткрытие недоступно: закрытая issue выпадет из очереди, и расхождение
+    // с сохранённым состоянием обязано остановить прогон.
+    assert.throws(
+      () =>
+        reopenIssueWithComment('owner/repo', { number: 82 }, 'Findings', {
+          issueState: () => 'CLOSED',
+          patchIssue: failing,
+          postComment: () => {},
+        }),
+      /503/,
+    );
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /#82/);
+  assert.match(errors[0], /потерян только комментарий/);
 });

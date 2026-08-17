@@ -293,12 +293,22 @@ function closeIssue(config, repository, issue, commit) {
     ? 'Ralph Loop validations and independent review passed.'
     : 'Ralph Loop validations passed; independent review is disabled in config.';
   const commentMarker = `<!-- ralph-issue-complete commit:${commit} -->`;
-  postIssueCommentOnce(
-    repository,
-    issue.number,
-    `Implemented in commit ${commit}. ${completion}`,
-    commentMarker,
-  );
+  // Комментарий — след для человека, а не часть контракта: его marker никто не
+  // читает, а связь issue с работой держат trailer коммита, тело issue и PR.
+  // Закрытие ниже обязательно, публикация — нет.
+  try {
+    postIssueCommentOnce(
+      repository,
+      issue.number,
+      `Implemented in commit ${commit}. ${completion}`,
+      commentMarker,
+    );
+  } catch (error) {
+    console.error(
+      `Issue #${issue.number}: не удалось опубликовать комментарий о завершении: ${error.message}. ` +
+        'Issue всё равно закрывается: работа сделана и проверена.',
+    );
+  }
 
   const closedIssue = patchIssue(repository, issue.number, {
     state: 'closed',
@@ -401,13 +411,18 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
     throw error;
   }
   if (review.verdict !== 'pass') {
+    // Замечания попадают в тело issue первыми: именно их читает следующая
+    // сессия агента, и без них она не знает, что чинить.
     updateIssueReviewContext(repository, issue, review);
-    reopenIssueWithComment(repository, issue, formatReviewComment(review));
     // Состояние сохраняется, а не стирается: реализация уже в HEAD и уже прошла
     // валидацию, и следующая сессия должна чинить замечания поверх неё, а не
     // выяснять заново, что сделано. `startingCommit` обязан переехать на этот
     // commit — иначе сверка HEAD отвергнет повторный прогон, а проверка «ровно
     // один commit» отвергнет исправляющий commit.
+    //
+    // Запись идёт до публикации комментария: 17 августа обрыв на комментарии
+    // оставил фазу `reviewing` без `reviewedCommit`, и вердикт FAIL, стоивший
+    // 4m19s, пришлось бы получать заново.
     activeStateStore()?.updateIssue({
       phase: 'review-failed',
       startingCommit: commit,
@@ -421,6 +436,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
       validationFixAttempts: 0,
       ...clearedFailure,
     });
+    reopenIssueWithComment(repository, issue, formatReviewComment(review));
     return { completed: false, commit, review };
   }
 

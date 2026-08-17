@@ -212,18 +212,33 @@ export function postIssueCommentOnce(repository, issueNumber, body, marker) {
   );
 }
 
-export function reopenIssueWithComment(repository, issue, comment) {
-  if (issueState(repository, issue.number) === 'CLOSED') {
-    patchIssue(repository, issue.number, { state: 'open' });
+/**
+ * Открытие issue обязательно, комментарий — нет.
+ *
+ * Закрытая issue выпадает из очереди, поэтому её состояние обязано совпадать с
+ * сохранённым, и отказ на нём останавливает цикл. Комментарий же — след для
+ * человека: всё, что Ralph читает сам, лежит в теле issue и в state. Пока он
+ * был обязательным, 17 августа три обрыва подряд пришлись именно на него,
+ * каждый раз уничтожая уже сделанную работу — до пятнадцати минут за раз.
+ */
+export function reopenIssueWithComment(repository, issue, comment, dependencies = {}) {
+  const readState = dependencies.issueState ?? issueState;
+  const reopen = dependencies.patchIssue ?? patchIssue;
+  const publish = dependencies.postComment ?? postIssueCommentOnce;
+
+  if (readState(repository, issue.number) === 'CLOSED') {
+    reopen(repository, issue.number, { state: 'open' });
   }
 
   const fingerprint = createHash('sha256').update(comment).digest('hex').slice(0, 20);
-  postIssueCommentOnce(
-    repository,
-    issue.number,
-    comment,
-    `<!-- ralph-issue-comment id:${fingerprint} -->`,
-  );
+  try {
+    publish(repository, issue.number, comment, `<!-- ralph-issue-comment id:${fingerprint} -->`);
+  } catch (error) {
+    console.error(
+      `Issue #${issue.number}: не удалось опубликовать комментарий: ${error.message}. ` +
+        'Состояние цикла сохранено, потерян только комментарий.',
+    );
+  }
 }
 
 export function milestoneIssues(repository, milestone) {
