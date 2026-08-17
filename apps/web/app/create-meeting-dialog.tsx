@@ -15,7 +15,7 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useRef, useState } from 'react';
 import { apiUrl } from '../lib/api/config';
 import type { ApiError, Meeting } from '../lib/api/contracts';
-import { apiErrorMessage } from '../lib/api/errors';
+import { apiErrorMessage, type ApiErrorFallback } from '../lib/api/errors';
 import { readAccessToken } from '../lib/auth/session';
 import { CloseIcon } from './dashboard-icons';
 
@@ -59,10 +59,13 @@ function getMeetingDateError(value: string): string | undefined {
 }
 
 // The API answers field validation in English; this screen words its own.
+// `satisfies` rather than a bare const: passed as a variable, a misspelled
+// `validaton` would be an unchecked excess property and would silently
+// downgrade every field rejection to the default sentence.
 const meetingErrorFallback = {
   default: 'Не удалось выполнить запрос. Попробуйте ещё раз.',
   validation: 'Проверьте название и дату встречи.',
-};
+} satisfies ApiErrorFallback;
 
 export function CreateMeetingDialog({
   isOpen,

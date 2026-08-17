@@ -5,12 +5,9 @@ import { useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
 import type { ApiError, Meeting, MeetingFile } from '../../../lib/api/contracts';
+import { apiErrorMessage } from '../../../lib/api/errors';
 import { clearAccessToken, clearSessionIdentity, readAccessToken } from '../../../lib/auth/session';
 import { useRestoredSessionGuard } from '../../../lib/auth/use-restored-session-guard';
-
-function getApiMessage(error: ApiError, fallback: string): string {
-  return typeof error.message === 'string' ? error.message : fallback;
-}
 
 export function useMeetingFiles(meetingId: string) {
   const router = useRouter();
@@ -143,7 +140,7 @@ export function useMeetingFiles(meetingId: string) {
       }
 
       if (!response.ok || !data.ticket) {
-        setActionError(getApiMessage(data, `Не удалось скачать «${file.name}».`));
+        setActionError(apiErrorMessage(data, `Не удалось скачать «${file.name}».`));
         return;
       }
 
@@ -187,7 +184,7 @@ export function useMeetingFiles(meetingId: string) {
 
       if (!response.ok) {
         const data = (await response.json()) as ApiError;
-        setActionError(getApiMessage(data, `Не удалось удалить «${file.name}».`));
+        setActionError(apiErrorMessage(data, `Не удалось удалить «${file.name}».`));
         return;
       }
 

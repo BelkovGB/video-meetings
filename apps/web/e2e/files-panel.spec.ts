@@ -228,6 +228,22 @@ test('meeting form shows validation errors in one shared summary', async ({ page
   await expect(errorSummary).toContainText('Не удалось создать встречу');
   await expect(errorSummary).toContainText('Сервис временно недоступен. Повторите попытку.');
   expect(createRequestCount).toBe(1);
+
+  // Field validation is the one rejection the API answers in English prose. The
+  // dialog words its own guidance instead, so the server's sentence must not
+  // reach the screen.
+  await page.route(`${apiUrl}/meetings`, async (route) => {
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: ['title must not be empty'], code: 'VALIDATION_FAILED' }),
+    });
+  });
+  await titleInput.fill('Проверка ответа валидации');
+  await page.getByRole('button', { name: 'Создать', exact: true }).click();
+
+  await expect(errorSummary).toContainText('Проверьте название и дату встречи.');
+  await expect(page.getByText('title must not be empty')).toHaveCount(0);
 });
 
 test('uploads files by selection and drag-and-drop with progress and processing feedback', async ({
@@ -434,6 +450,22 @@ test('owner navigates to files, downloads metadata, and deletes with feedback', 
   await expect(page.getByText('PDF-документ')).toBeVisible();
   await expect(page.getByText('16 Б')).toBeVisible();
 
+  // A refused ticket is reported in the API's own words, through the shared
+  // reader; only a body with nothing to say falls back to the file name.
+  const ticketRoute = `**/meetings/${meeting.id}/files/*/download-ticket`;
+  await page.route(ticketRoute, async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Файл ещё обрабатывается. Повторите попытку позже.' }),
+    });
+  });
+  await page.getByRole('button', { name: 'Скачать phase-3-notes.pdf' }).click();
+  await expect(page.locator('main').getByRole('alert')).toHaveText(
+    'Файл ещё обрабатывается. Повторите попытку позже.',
+  );
+
+  await page.unroute(ticketRoute);
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Скачать phase-3-notes.pdf' }).click();
   const download = await downloadPromise;

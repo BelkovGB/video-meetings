@@ -3,7 +3,7 @@
 import { FormEvent, forwardRef, useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
-import type { CodedApiError } from '../../lib/api/contracts';
+import { readApiErrorBody } from '../../lib/api/errors';
 import { readAccessToken } from '../../lib/auth/session';
 
 const minimumPasswordLength = 9;
@@ -106,24 +106,24 @@ const serverErrorsByField = new Map<string, ServerError>([
   ['confirmation', { field: 'confirmation', message: 'Подтвердите новый пароль.' }],
 ]);
 
+// Only the routing lives here. What a body that is not JSON means is decided in
+// `lib/api/errors`, so this screen cannot drift from the ones that read the
+// message: a body with nothing to route on gets the same recoverable fallback.
 async function readServerError(response: Response): Promise<ServerError> {
-  try {
-    const body = (await response.json()) as CodedApiError;
-    if (body.code === 'VALIDATION_FAILED') {
-      for (const field of body.fields ?? []) {
-        const rejection = serverErrorsByField.get(field);
-        if (rejection) {
-          return rejection;
-        }
-      }
-    } else if (body.code) {
-      const rejection = serverErrorsByCode.get(body.code);
+  const body = await readApiErrorBody(response);
+
+  if (body?.code === 'VALIDATION_FAILED') {
+    for (const field of body.fields ?? []) {
+      const rejection = serverErrorsByField.get(field);
       if (rejection) {
         return rejection;
       }
     }
-  } catch {
-    // A malformed error response gets a safe, recoverable fallback.
+  } else if (body?.code) {
+    const rejection = serverErrorsByCode.get(body.code);
+    if (rejection) {
+      return rejection;
+    }
   }
 
   return unknownServerError;

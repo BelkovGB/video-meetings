@@ -526,9 +526,10 @@ test('falls back to a recoverable sentence when the API error body carries no me
 }) => {
   const session = await register(request, 'profile-empty-error-body');
   await authenticate(page, session);
-  // The three bodies an API can answer with while still saying nothing usable:
-  // an empty validation array element, a message of the wrong shape, and prose
-  // that is not JSON at all. None of them may reach the screen as a blank error.
+  // The four bodies an API can answer with while still saying nothing usable:
+  // an empty validation array element, a message of the wrong shape, a
+  // validation element of the wrong shape, and prose that is not JSON at all.
+  // None of them may reach the screen as a blank error.
   let rejectionBody = JSON.stringify({ message: [''] });
 
   await page.route('**/users/me', async (route) => {
@@ -550,6 +551,14 @@ test('falls back to a recoverable sentence when the API error body carries no me
 
   rejectionBody = JSON.stringify({ message: { detail: 'rejected' } });
   await displayNameInput.fill('Ответ не той формы');
+  await page.getByRole('button', { name: 'Сохранить имя' }).click();
+  await expect(page.locator('#display-name-error')).toHaveText(fallback);
+
+  // An object inside the validation array is the shape a differently configured
+  // validation pipe emits. Returned as-is it would reach React as a child and
+  // take the screen down instead of leaving the form recoverable.
+  rejectionBody = JSON.stringify({ message: [{ detail: 'rejected' }] });
+  await displayNameInput.fill('Элемент не той формы');
   await page.getByRole('button', { name: 'Сохранить имя' }).click();
   await expect(page.locator('#display-name-error')).toHaveText(fallback);
 
@@ -653,7 +662,9 @@ test('validates and recovers from password-change failures without clearing the 
   // Every rejection below is the body the API actually returns, English prose
   // and machine-readable code included: the screen must show Russian text
   // routed by the code, never the server's own wording.
-  let passwordChangeFailure: { status: number; body: Record<string, unknown> } = {
+  // A `string` body is sent verbatim: the API answers plain text for some
+  // failures, and that has to reach the screen unparsed.
+  let passwordChangeFailure: { status: number; body: Record<string, unknown> | string } = {
     status: 400,
     body: { message: 'Current password is incorrect', code: 'CURRENT_PASSWORD_INCORRECT' },
   };
@@ -662,10 +673,11 @@ test('validates and recovers from password-change failures without clearing the 
   await page.route('**/users/me/password', async (route) => {
     submittedPasswordChange = route.request().postDataJSON();
     await new Promise((resolve) => setTimeout(resolve, 250));
+    const { status, body } = passwordChangeFailure;
     await route.fulfill({
-      status: passwordChangeFailure.status,
-      contentType: 'application/json',
-      body: JSON.stringify(passwordChangeFailure.body),
+      status,
+      contentType: typeof body === 'string' ? 'text/plain' : 'application/json',
+      body: typeof body === 'string' ? body : JSON.stringify(body),
     });
   });
   await authenticate(page, session);
@@ -956,6 +968,16 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(page.getByText('Current credentials were rejected')).toHaveCount(0);
   await expect(currentPassword).toBeFocused();
   await expect(page).toHaveURL('/profile');
+
+  // A body that is not JSON at all has nothing to route on, and gets the same
+  // recoverable sentence rather than an unhandled rejection.
+  await currentPassword.fill(password);
+  passwordChangeFailure = { status: 502, body: 'Bad Gateway' };
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText(
+    'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+  );
+  await expect(currentPassword).toBeFocused();
 
   // A `code` or a rejected field named after an `Object.prototype` member is
   // still just an unknown failure. Looking it up in a plain object would find
