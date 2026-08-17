@@ -92,6 +92,19 @@ async function authenticate(page: Page, session: Session): Promise<void> {
   }, session);
 }
 
+// Lets a focus move that the page deferred with `requestAnimationFrame` land
+// before the next assertion. Two frames because the React effect that schedules
+// it is passive: the first `evaluate` round trip gives that effect its task, the
+// wait itself covers the frame the callback runs in.
+async function settleAnimationFrames(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+}
+
 test.afterAll(async () => {
   await prisma.meeting.deleteMany({ where: { id: { in: [...createdMeetingIds] } } });
   await prisma.user.deleteMany({ where: { id: { in: [...createdUserIds] } } });
@@ -644,10 +657,17 @@ test('validates and recovers from password-change failures without clearing the 
   // Recovery means editing one field while another still shows an error, so
   // typing must keep the caret where the user put it. Typed key by key on
   // purpose: `fill()` focuses its own target and writes in a single event,
-  // which hides a form that moves focus on every keystroke.
+  // which hides a form that moves focus on every keystroke. The frame wait in
+  // the middle is what makes this bite: the form defers its focus move with
+  // `requestAnimationFrame`, so an uninterrupted burst of keystrokes can finish
+  // inside one frame and let the stolen focus land after the last character,
+  // where it corrupts nothing.
   await newPassword.click();
   await page.keyboard.press('Control+a');
-  await page.keyboard.type('retyped-secure-password-456');
+  await page.keyboard.type('retyped');
+  await settleAnimationFrames(page);
+  await expect(newPassword).toBeFocused();
+  await page.keyboard.type('-secure-password-456');
   await expect(newPassword).toBeFocused();
   await expect(newPassword).toHaveValue('retyped-secure-password-456');
   await expect(confirmation).toHaveValue('different-password');
@@ -662,7 +682,11 @@ test('validates and recovers from password-change failures without clearing the 
 
   await confirmation.click();
   await page.keyboard.press('Control+a');
-  await page.keyboard.type('short');
+  await page.keyboard.type('sh');
+  await settleAnimationFrames(page);
+  await expect(confirmation).toBeFocused();
+  await page.keyboard.type('ort');
+  await settleAnimationFrames(page);
   await expect(confirmation).toBeFocused();
   await expect(confirmation).toHaveValue('short');
   await expect(page.locator('#new-password-error')).toHaveText('Используйте не менее 9 символов.');
