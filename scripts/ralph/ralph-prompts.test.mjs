@@ -123,6 +123,103 @@ test('a truncated change set says so instead of looking complete', () => {
   assert.doesNotMatch(prompt, /previous review/);
 });
 
+test('the audit list drops directions that no changed file belongs to', () => {
+  const specOnly = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 57, title: 'Cover the keyboard path', body: 'Outcome text.' },
+    'a'.repeat(40),
+    {
+      changes: {
+        commit: 'a'.repeat(40),
+        paths: ['apps/web/e2e/profile.spec.ts'],
+        stat: ' 1 file changed',
+        nameStatus: 'M\tapps/web/e2e/profile.spec.ts',
+        diff: '--- a/apps/web/e2e/profile.spec.ts',
+        truncated: false,
+      },
+    },
+  );
+
+  assert.match(specOnly, /no changed file belongs to any other/);
+  assert.match(specOnly, /tests assert real externally observable behaviour/);
+  // Ни одного файла контрактов, миграций или деплоя в изменении нет: думать о
+  // них — та самая трата, ради которой список и сузили.
+  assert.doesNotMatch(specOnly, /migrations/);
+  assert.doesNotMatch(specOnly, /deployment/);
+  assert.doesNotMatch(specOnly, /public API response contracts/);
+  // Общие направления остаются всегда.
+  assert.match(specOnly, /every requirement and definition-of-done item/);
+
+  const apiChange = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 58, title: 'Change the contract', body: 'Outcome text.' },
+    'b'.repeat(40),
+    {
+      changes: {
+        commit: 'b'.repeat(40),
+        paths: ['apps/api/src/profile/profile.controller.ts', 'apps/api/prisma/schema.prisma'],
+        stat: ' 2 files changed',
+        nameStatus: 'M\tapps/api/src/profile/profile.controller.ts',
+        diff: '--- a/apps/api/src/profile/profile.controller.ts',
+        truncated: false,
+      },
+    },
+  );
+
+  assert.match(apiChange, /public API response contracts/);
+  assert.match(apiChange, /database schema and migrations/);
+  assert.doesNotMatch(apiChange, /tests assert real externally observable/);
+});
+
+test('without a file list the audit keeps every direction', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 59, title: 'No inventory', body: 'Outcome text.' },
+    'c'.repeat(40),
+  );
+
+  // Не зная файлов, сузить область не на чем, и молчаливое сокращение было бы
+  // потерей проверки.
+  assert.match(prompt, /Audit all of these areas:/);
+  assert.match(prompt, /migrations, and deployment\/runtime assumptions/);
+});
+
+test('a repeat review is told what the previous one already cleared', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 57, title: 'Second pass', body: 'Outcome text.' },
+    'd'.repeat(40),
+    {
+      changes: {
+        commit: 'd'.repeat(40),
+        commits: ['d'.repeat(40), 'e'.repeat(40)],
+        paths: ['apps/web/e2e/profile.spec.ts'],
+        stat: ' 1 file changed',
+        nameStatus: 'M\tapps/web/e2e/profile.spec.ts',
+        diff: '--- a/apps/web/e2e/profile.spec.ts',
+        truncated: false,
+      },
+      previousReview: { commit: 'e'.repeat(40), newCommits: ['d'.repeat(40)] },
+    },
+  );
+
+  assert.match(prompt, new RegExp(`previous review audited commit ${'e'.repeat(40)} in full`));
+  assert.match(prompt, new RegExp(`added commit ${'d'.repeat(40)}`));
+  assert.match(prompt, /Do not re-audit unchanged code that the previous review already cleared/);
+});
+
+test('a first review is not told anything was already cleared', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 60, title: 'First pass', body: 'Outcome text.' },
+    'f'.repeat(40),
+    { changes: { commit: 'f'.repeat(40), paths: ['a.ts'], stat: '', nameStatus: '', diff: '' } },
+  );
+
+  assert.doesNotMatch(prompt, /already cleared/);
+  assert.doesNotMatch(prompt, /audited commit/);
+});
+
 test('a second iteration names every commit of the issue, not just the last', () => {
   const prompt = buildIndependentReviewPrompt(
     { agentCli: 'claude' },

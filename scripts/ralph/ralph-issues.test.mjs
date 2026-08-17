@@ -240,7 +240,7 @@ test('the change inventory reads one commit through show and marks an oversized 
   assert.ok(calls.some((call) => call.includes(':(exclude)package-lock.json')));
 });
 
-test('a second iteration is reviewed as a whole, not as its fix-up commit alone', () => {
+test('a second iteration shows the issue commits only, not the range between them', () => {
   const newest = 'b'.repeat(40);
   const oldest = 'c'.repeat(40);
   const { calls, run } = inventoryRunner([newest, oldest]);
@@ -248,12 +248,16 @@ test('a second iteration is reviewed as a whole, not as its fix-up commit alone'
   const inventory = issueChangeInventory({ number: 57 }, newest, { run });
 
   assert.deepEqual(inventory.commits, [newest, oldest]);
-  // Диапазон строится от родителя самого раннего commit этой issue: иначе
-  // ревью второй итерации судит о реализации, которой ему не показали.
-  assert.ok(calls.some((call) => call === `rev-parse --verify ${oldest}^`));
-  assert.equal(calls.filter((call) => call.startsWith('diff ')).length, 3);
-  assert.ok(calls.every((call) => !call.startsWith('show ')));
-  assert.ok(calls.some((call) => call.includes(`${'d'.repeat(40)} ${newest}`)));
+  // Диапазон `oldest^..newest` втянул бы всё, что легло в ветку между ними:
+  // на #57 это 31 файл вместо четырёх, включая чужие правки control plane.
+  assert.ok(!calls.some((call) => call.startsWith('rev-parse')));
+  assert.ok(!calls.some((call) => call.startsWith('diff ')));
+  // Оба commit перечислены в хронологическом порядке в одном вызове.
+  assert.equal(
+    calls.filter((call) => call.includes(`${oldest} ${newest}`)).length,
+    3,
+    'ожидались три вызова show с обоими commit',
+  );
 });
 
 test('a completion marker left by an older Ralph is read and then stripped', () => {

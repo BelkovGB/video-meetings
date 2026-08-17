@@ -1,8 +1,12 @@
 /**
  * Prompt для реализации issue и для обоих ревьюеров.
  *
- * Модуль не импортирует ничего: это только текст с подстановками.
+ * Из зависимостей только правила области: какие направления аудита вообще
+ * применимы к набору изменённых файлов. Сами правила живут в `ralph-scope.mjs`
+ * рядом с остальными предикатами по путям.
  */
+
+import { reviewAuditAreas } from './ralph-scope.mjs';
 
 function renderTemplate(template, replacements) {
   let result = template;
@@ -121,22 +125,65 @@ The previous review of this issue reported the findings below. Check each one be
 ${previousFindings}`;
 }
 
+/**
+ * Что уже проверено прошлым ревью.
+ *
+ * Без этого блока каждое повторное ревью проходит полный аудит заново: на
+ * issue #57 их было три подряд, и два из них перепроверяли то, что первое уже
+ * признало чистым. Глубина не снижается — сужается область, а неизменившийся
+ * код объявляется проверенным ровно в том объёме, в каком он и был проверен.
+ */
+function reviewAlreadyAudited(previousReview) {
+  if (!previousReview?.commit) return '';
+  const added = previousReview.newCommits ?? [];
+  const scope =
+    added.length > 0
+      ? `Since then this issue added ${added.length === 1 ? 'commit' : 'commits'} ${added.join(', ')}.`
+      : 'Nothing has been added to this issue since.';
+
+  return `
+
+The previous review audited commit ${previousReview.commit} in full. ${scope} Audit those changes in full, verify at HEAD that every finding listed above is resolved, and make one bounded pass over how the new changes interact with the rest of the issue. Do not re-audit unchanged code that the previous review already cleared.`;
+}
+
+// Направления, применимые к любому изменению, — они не зависят от того, какие
+// файлы затронуты.
+const universalAuditAreas = [
+  'every requirement and definition-of-done item from the issue body',
+  'correctness, edge cases, regressions, security, and test coverage',
+  'interactions between all changed files, not only the most obvious one',
+];
+
+// Полный список остаётся дословно для случая без инвентаря: не зная файлов,
+// сузить область не на чем, и молчаливое сокращение было бы потерей проверки.
+const allAuditAreas = [
+  'public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant',
+  'whether tests assert the real externally observable behavior rather than only an implementation detail',
+];
+
+function reviewAuditSection(changes) {
+  const known = Array.isArray(changes?.paths) && changes.paths.length > 0;
+  const areas = known
+    ? [...universalAuditAreas, ...reviewAuditAreas(changes.paths)]
+    : [...universalAuditAreas, ...allAuditAreas];
+  const heading = known
+    ? 'Audit all of these areas, and only these — no changed file belongs to any other:'
+    : 'Audit all of these areas:';
+
+  return `${heading}\n${areas.map((area) => `- ${area};`).join('\n')}`;
+}
+
 export function buildIndependentReviewPrompt(config, issue, commit, context = {}) {
   const issueBody = issue.body?.trim() || '(empty)';
 
   return `Review the current branch state at HEAD as the implementation of GitHub issue #${issue.number}: ${issue.title}. Commit ${commit} is the claimed implementation commit; verify that the current HEAD still satisfies the issue and has not regressed it.
 
 Issue body:
-${issueBody}${reviewPreviousFindings(context.previousFindings)}${context.changes ? reviewChangeInventory(issueChangeHeading(context.changes), context.changes) : ''}${reviewValidationEvidence(config)}
+${issueBody}${reviewPreviousFindings(context.previousFindings)}${context.changes ? reviewChangeInventory(issueChangeHeading(context.changes), context.changes) : ''}${reviewAlreadyAudited(context.previousReview)}${reviewValidationEvidence(config)}
 
 Complete the entire audit before deciding the verdict. Do not stop after the first problem. Return every distinct, actionable finding you can substantiate in this single response, without duplicates and without inventing findings to fill a quota.
 
-Audit all of these areas:
-- every requirement and definition-of-done item from the issue body;
-- correctness, edge cases, regressions, security, and test coverage;
-- interactions between all changed files, not only the most obvious one;
-- public API response contracts, documentation, configuration, migrations, and deployment/runtime assumptions when relevant;
-- whether tests assert the real externally observable behavior rather than only an implementation detail.
+${reviewAuditSection(context.changes)}
 
 ${reviewShellGuidance(config)}
 

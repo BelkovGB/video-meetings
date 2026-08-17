@@ -189,6 +189,27 @@ function verifyTools(config) {
 // Локальное ревью commit одной issue отдельной сессией агента
 // -----------------------------------------------------------------------------
 
+/**
+ * Коммит, уже проверенный прошлым ревью целиком, и то, что добавилось после.
+ *
+ * Возвращает null на первом ревью issue и на повторном ревью того же самого
+ * коммита: в обоих случаях сокращать нечего.
+ */
+function previouslyAuditedCommit(changes, commit) {
+  const reviewedCommit = activeStateStore()?.issue?.reviewedCommit;
+  if (!reviewedCommit || reviewedCommit === commit) return null;
+  if (!isAncestorCommit(reviewedCommit, commit)) return null;
+
+  return {
+    commit: reviewedCommit,
+    // Проверенными считаются только те коммиты issue, что были достижимы из
+    // уже отревьюенного: остальные добавились после и требуют полного разбора.
+    newCommits: (changes?.commits ?? []).filter(
+      (candidate) => !isAncestorCommit(candidate, reviewedCommit),
+    ),
+  };
+}
+
 async function runIndependentReview(config, repository, issue, commit) {
   if (!config.review.enabled) {
     return { verdict: 'pass', summary: 'Independent review is disabled.', findings: [] };
@@ -203,13 +224,15 @@ async function runIndependentReview(config, repository, issue, commit) {
   // Замечания прошлого ревью вынимаются из тела issue в отдельную секцию
   // prompt: внутри тела они приезжали без подписи, вперемешку с критериями
   // готовности, и требование «проверь их закрытие» опереться было не на что.
+  const inventory = issueChangeInventory(issue, commit);
   const reviewPrompt = buildIndependentReviewPrompt(
     config,
     { ...issue, body: issueBodyWithoutRalphMetadata(issue) },
     commit,
     {
-      changes: issueChangeInventory(issue, commit),
+      changes: inventory,
       previousFindings: reviewContextFromIssueBody(issue),
+      previousReview: previouslyAuditedCommit(inventory, commit),
     },
   );
 
@@ -337,6 +360,9 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
       phase: 'review-failed',
       startingCommit: commit,
       commit,
+      // Отметка «этот commit проверен целиком»: следующему ревью не нужно
+      // заново проходить то, что уже признано чистым.
+      reviewedCommit: commit,
       pushedHead: null,
       expectedTree: null,
       commitMessage: null,

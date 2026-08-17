@@ -62,36 +62,42 @@ export function isAncestorCommit(ancestor, descendant, execute = run) {
   );
 }
 
-function commitParent(commit, execute) {
-  const parent = execute('git', ['rev-parse', '--verify', `${commit}^`], { allowFailure: true });
-
-  return parent.status === 0 && /^[0-9a-f]{40}$/i.test(parent.stdout) ? parent.stdout : null;
-}
-
 /**
  * Полный набор изменений issue одним объектом: список файлов, статистика и
  * ограниченный diff.
  *
- * Для одного commit берётся `git show`: у него нет особого случая для корневого
- * commit, в отличие от `commit^..commit`. Для нескольких — diff от родителя
- * самого раннего, иначе ревью второй итерации видело бы только доработку и
- * судило бы о реализации, которой ему не показали.
+ * Показываются именно коммиты этой issue, по одному, в хронологическом
+ * порядке. Диапазон `first^..last` был бы короче, но он втягивает всё, что
+ * легло в ветку между ними: на issue #57 это дало 31 файл вместо четырёх,
+ * включая правки control plane, сделанные оператором между прогонами. Ревьюер
+ * получал чужую работу под видом реализации задачи.
+ *
+ * `git show` принимает список коммитов и печатает их подряд, поэтому вызовов
+ * по-прежнему три, а не три на коммит.
  */
 export function issueChangeInventory(issue, commit, dependencies = {}) {
   const execute = dependencies.run ?? run;
   const commits = issueCommits(issue, commit, execute);
-  const base = commits.length > 1 ? commitParent(commits.at(-1), execute) : null;
+  // issueCommits отдаёт новейший первым; ревьюеру нужен порядок появления.
+  const reviewed = commits.length > 0 ? [...commits].reverse() : [commit];
   const inspect = (flags, pathspecs = []) =>
-    base
-      ? execute('git', ['diff', ...flags, base, commit, ...pathspecs]).stdout
-      : execute('git', ['show', '--format=', ...flags, commit, ...pathspecs]).stdout;
+    execute('git', ['show', '--format=', ...flags, ...reviewed, ...pathspecs]).stdout;
   const patch = inspect(['--patch', '--unified=3'], ['--', '.', ...reviewDiffExcludedPaths]);
   const truncated = patch.length > reviewDiffCharacterBudget;
+
+  const nameStatus = inspect(['--name-status']);
 
   return {
     commit,
     commits: commits.length > 0 ? commits : [commit],
-    nameStatus: inspect(['--name-status']),
+    // Пути разбираются здесь, у источника: `git diff --name-status` печатает
+    // статус, табуляцию и путь, а для переименования — два пути, из которых
+    // нужен последний.
+    paths: nameStatus
+      .split(/\r?\n/)
+      .map((line) => line.split('\t').at(-1)?.trim())
+      .filter(Boolean),
+    nameStatus,
     stat: inspect(['--stat']),
     // Обрезанный diff полезнее отсутствующего: ревьюер видит начало изменений и
     // знает, что остаток надо дочитать сам.

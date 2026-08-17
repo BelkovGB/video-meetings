@@ -53,6 +53,45 @@ export const controlPlaneExcludePathspec = [
   ':(exclude,glob)**/AGENTS.md',
 ];
 
+/**
+ * Направления аудита, которые имеет смысл называть ревьюеру только когда в
+ * изменении есть соответствующие файлы.
+ *
+ * Промпт требовал проверить контракты API, документацию, конфигурацию,
+ * миграции и предположения о деплое на каждой issue. Когда изменение — две
+ * строки в тестовой спеке, эти вопросы всё равно обдумываются, а рассуждения
+ * стоят 38% расхода цикла при 0,9% его токенов. Убирается не тщательность, а
+ * заведомо пустое направление.
+ */
+const conditionalAuditAreas = [
+  [
+    'public API response contracts',
+    (file) => /^apps\/api\/src\/.+\.(controller|dto)\.ts$/.test(file),
+  ],
+  ['documentation', (file) => file.endsWith('.md')],
+  [
+    'configuration',
+    (file) => /(^|\/)[^/]*\.(json|ya?ml|toml)$/.test(file) || /(^|\/)\.env/.test(file),
+  ],
+  ['database schema and migrations', (file) => file.includes('prisma/')],
+  [
+    'deployment and runtime assumptions',
+    (file) => /^(Dockerfile|docker-compose)/.test(file) || file.startsWith('.github/'),
+  ],
+  [
+    'whether tests assert real externally observable behaviour rather than an implementation detail',
+    (file) => /\.(spec|test|e2e-spec)\.[cm]?[jt]sx?$/.test(file),
+  ],
+];
+
+export function reviewAuditAreas(changedFiles = []) {
+  const files = changedFiles.map((file) => String(file).replaceAll('\\', '/'));
+
+  return conditionalAuditAreas
+    .filter(([, matches]) => files.some((file) => matches(file)))
+    .map(([area]) => area);
+}
+
 export function issueLabels(issue) {
   return (issue?.labels ?? []).map((label) =>
     typeof label === 'string' ? label : String(label?.name ?? ''),
