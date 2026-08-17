@@ -9,6 +9,7 @@ import {
   inventoryFileName,
   pendingBaselines,
   treeIsStableDuring,
+  unrenderedBaselines,
 } from './visual-baselines';
 
 const e2eDir = __dirname;
@@ -86,11 +87,11 @@ test.describe('committed visual baselines', () => {
 
     // That rewriting run is why the reconciliation below stands aside there: it
     // would read `e2e/` while another worker is still writing baselines into it.
-    // Once the inventory owes nothing there is nothing left to write, so the
-    // reconciliation runs even without `--ignore-snapshots`.
+    // What a flagless run can still write is read from the specs and the disk,
+    // not from the inventory whose accuracy is the thing under test.
     test.skip(
-      !treeIsStableDuring(test.info().project, owed),
-      'This run regenerates the pending baselines, so the tree it would reconcile is still being written.',
+      !treeIsStableDuring(test.info().project, unrenderedBaselines(e2eDir, projectNames)),
+      'This run renders the baselines that are absent, so the tree it would reconcile is still being written.',
     );
 
     expect(findBaselineViolations(e2eDir, projectNames)).toEqual([]);
@@ -113,18 +114,67 @@ test.describe('committed visual baselines', () => {
 
   // Playwright spreads spec files across workers even with `fullyParallel: false`,
   // so during `npm run test:e2e:web:visual` this guard and the `toHaveScreenshot`
-  // call that writes the pending PNGs run at the same time. A run told to ignore
-  // snapshots writes nothing; so does any run with no baseline left to render,
-  // which is what keeps the guard live for an agent following apps/web/AGENTS.md
-  // and invoking `npx playwright test e2e/visual-baselines.spec.ts` directly.
+  // calls that write the absent PNGs run at the same time. A run told to ignore
+  // snapshots writes nothing; so does a run in which every asserted baseline is
+  // already on disk, which is what keeps the guard live for an agent following
+  // apps/web/AGENTS.md and invoking `npx playwright test <file>` directly.
   test('reconciles the repository tree in every run that writes no baselines', () => {
-    const owed = ['profile.spec.ts-snapshots/password-change-form-desktop-chromium.png'];
+    const unrendered = ['profile.spec.ts-snapshots/password-change-form-desktop-chromium.png'];
 
-    expect(treeIsStableDuring({ ignoreSnapshots: true }, owed)).toBe(true);
+    expect(treeIsStableDuring({ ignoreSnapshots: true }, unrendered)).toBe(true);
     expect(treeIsStableDuring({ ignoreSnapshots: false }, [])).toBe(true);
     expect(treeIsStableDuring({}, [])).toBe(true);
-    expect(treeIsStableDuring({ ignoreSnapshots: false }, owed)).toBe(false);
-    expect(treeIsStableDuring({}, owed)).toBe(false);
+    expect(treeIsStableDuring({ ignoreSnapshots: false }, unrendered)).toBe(false);
+    expect(treeIsStableDuring({}, unrendered)).toBe(false);
+  });
+
+  // The inventory cannot answer what a flagless run will write: `pending` says
+  // what the operator was told they owe, and whether that matches the disk is the
+  // question `findBaselineViolations` exists to settle. Asking the specs and the
+  // tree instead keeps the skip out of that circle.
+  test('counts an asserted baseline missing from disk as unrendered, whatever the inventory owes', () => {
+    const root = tree({
+      committed: { 'profile.spec.ts-snapshots': ['stale-desktop-chromium.png'] },
+      present: { 'profile.spec.ts-snapshots': [] },
+      specs: { 'profile.spec.ts': ['stale.png'] },
+    });
+
+    expect(unrenderedBaselines(root, treeProjects)).toEqual([
+      'profile.spec.ts-snapshots/stale-desktop-chromium.png',
+    ]);
+    expect(treeIsStableDuring({}, unrenderedBaselines(root, treeProjects))).toBe(false);
+  });
+
+  // The same reads, in the tree the operator leaves behind once every baseline
+  // has been regenerated: nothing is absent, so nothing will be written, and the
+  // guard reconciles without the flag.
+  test('counts nothing as unrendered once every asserted baseline is on disk', () => {
+    const root = tree({
+      committed: { 'profile.spec.ts-snapshots': ['listed-desktop-chromium.png'] },
+      pending: { 'profile.spec.ts-snapshots': ['listed-desktop-chromium.png'] },
+      present: { 'profile.spec.ts-snapshots': ['listed-desktop-chromium.png'] },
+      specs: { 'profile.spec.ts': ['listed.png'] },
+    });
+
+    expect(unrenderedBaselines(root, treeProjects)).toEqual([]);
+    expect(treeIsStableDuring({}, unrenderedBaselines(root, treeProjects))).toBe(true);
+  });
+
+  // A baseline nothing asserts is never written by `toHaveScreenshot`, so its
+  // absence leaves the tree settled. It is still a violation, and the run that
+  // stays live here is the run that reports it.
+  test('counts an unasserted inventory entry as rendered, so its own violation is reported', () => {
+    const root = tree({
+      committed: { 'profile.spec.ts-snapshots': ['orphan-desktop-chromium.png'] },
+      present: { 'profile.spec.ts-snapshots': [] },
+      specs: { 'profile.spec.ts': [] },
+    });
+
+    expect(unrenderedBaselines(root, treeProjects)).toEqual([]);
+    expect(findBaselineViolations(root, treeProjects)).toEqual([
+      expect.stringContaining('the file is missing'),
+      expect.stringContaining('no toHaveScreenshot call'),
+    ]);
   });
 
   // The failure this guard exists for: a session adds a visual assertion and

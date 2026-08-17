@@ -210,6 +210,27 @@ export function findBaselineViolations(e2eDir: string, projectNames: readonly st
 }
 
 /**
+ * The baselines a run without `--ignore-snapshots` will write: every name a
+ * `toHaveScreenshot` call asks for that is absent from the tree, as
+ * `directory/name`.
+ *
+ * Deliberately read from the specs and the disk rather than from the inventory.
+ * `pending` records what the operator was told they owe; whether that matches the
+ * tree is the question `findBaselineViolations` exists to settle, so using it to
+ * decide when that reconciliation may run would assume its own answer. A stale
+ * PNG deleted by hand to force a re-render, or an assertion added without a
+ * `pending` entry, is invisible to the inventory and caught here.
+ */
+export function unrenderedBaselines(e2eDir: string, projectNames: readonly string[]): string[] {
+  const present = readSnapshotDirectories(e2eDir);
+  const asserted = readAssertedBaselines(e2eDir, projectNames);
+
+  return namesMissingFrom(asserted, present)
+    .map(({ directory, name }) => `${directory}/${name}`)
+    .sort();
+}
+
+/**
  * Whether `findBaselineViolations` can trust the repository tree in this run.
  *
  * `toHaveScreenshot` writes any baseline it does not find unless the run passes
@@ -220,21 +241,24 @@ export function findBaselineViolations(e2eDir: string, projectNames: readonly st
  * names into `directories` — would depend on which worker got there first.
  *
  * Two runs leave the tree settled. One passes `--ignore-snapshots`, as the
- * validation set does. The other is any run with nothing left to render: a
- * baseline is only written when it is absent, so once `pending` is empty the
- * reconciliation is authoritative regardless of the flag. That second case is
- * what keeps this guard live for the reader `apps/web/AGENTS.md` sends to
+ * validation set does. The other is a run with nothing absent to write:
+ * `unrendered` is empty exactly when every asserted baseline is already on disk,
+ * and a baseline is only written when it is missing. That second case is what
+ * keeps this guard live for the reader `apps/web/AGENTS.md` sends to
  * `npx playwright test <file>`, which passes no flags — a run that skipped here
  * would report success on the very check that catches an agent-rendered PNG.
  *
- * `owed` is `pendingBaselines`, read from the inventory alone, so it is itself
- * unaffected by whatever the other workers are writing.
+ * The specs `unrendered` reads are not rewritten by the concurrent workers, and
+ * a worker can only remove a name from it, by creating the file. Every fact this
+ * guard checks is a name rather than an image, and the name exists from the
+ * moment the file does, so an empty `unrendered` means the names are already
+ * final even if bytes are still landing.
  */
 export function treeIsStableDuring(
   project: { ignoreSnapshots?: boolean },
-  owed: readonly string[],
+  unrendered: readonly string[],
 ): boolean {
-  return project.ignoreSnapshots === true || owed.length === 0;
+  return project.ignoreSnapshots === true || unrendered.length === 0;
 }
 
 /** The baselines the inventory records as still owed, as `directory/name`. */
