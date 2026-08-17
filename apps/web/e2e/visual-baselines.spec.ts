@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import config from '../playwright.config';
-import { findBaselineViolations, inventoryFileName, pendingBaselines } from './visual-baselines';
+import {
+  findBaselineViolations,
+  inventoryFileName,
+  pendingBaselines,
+  treeIsStableDuring,
+} from './visual-baselines';
 
 const e2eDir = __dirname;
 const projectNames = (config.projects ?? []).map((project) => project.name ?? '');
@@ -71,14 +76,32 @@ test.describe('committed visual baselines', () => {
   }
 
   test('every baseline in this repository is one the operator recorded', () => {
-    // `reporter: 'list'` prints test stdout, so the run that checks the tree also
-    // states what `npm run test:e2e:web:visual` still owes it.
+    // `reporter: 'list'` prints test stdout, so the run states what
+    // `npm run test:e2e:web:visual` still owes it. This reads the inventory alone,
+    // so it holds even in the run that rewrites the tree.
     const owed = pendingBaselines(e2eDir);
     if (owed.length > 0) {
       console.log(`Baselines awaiting the operator's validation image:\n  ${owed.join('\n  ')}`);
     }
 
+    // That rewriting run is why the reconciliation below stands aside there: it
+    // would read `e2e/` while another worker is still writing baselines into it.
+    test.skip(
+      !treeIsStableDuring(test.info().project),
+      'This run regenerates baselines, so the tree it would reconcile is still being written.',
+    );
+
     expect(findBaselineViolations(e2eDir, projectNames)).toEqual([]);
+  });
+
+  // Playwright spreads spec files across workers even with `fullyParallel: false`,
+  // so during `npm run test:e2e:web:visual` this guard and the `toHaveScreenshot`
+  // call that writes the pending PNGs run at the same time. Only a run told to
+  // ignore snapshots leaves the tree settled enough to reconcile.
+  test('reconciles the repository tree only in a run that writes no baselines', () => {
+    expect(treeIsStableDuring({ ignoreSnapshots: true })).toBe(true);
+    expect(treeIsStableDuring({ ignoreSnapshots: false })).toBe(false);
+    expect(treeIsStableDuring({})).toBe(false);
   });
 
   // The failure this guard exists for: a session adds a visual assertion and

@@ -209,6 +209,22 @@ export function findBaselineViolations(e2eDir: string, projectNames: readonly st
   ].sort();
 }
 
+/**
+ * Whether `findBaselineViolations` can trust the repository tree in this run.
+ *
+ * `toHaveScreenshot` writes any baseline it does not find unless the run passes
+ * `--ignore-snapshots`, and Playwright distributes spec files across workers even
+ * under `fullyParallel: false`. So during `npm run test:e2e:web:visual` the guard
+ * would read `e2e/` while the specs it reconciles are still writing into it, and
+ * the "regenerated, but still pending" message — the operator's cue to move those
+ * names into `directories` — would depend on which worker got there first. The
+ * validation set runs with `--ignore-snapshots`, which is where the tree is
+ * settled and the reconciliation is authoritative.
+ */
+export function treeIsStableDuring(project: { ignoreSnapshots?: boolean }): boolean {
+  return project.ignoreSnapshots === true;
+}
+
 /** The baselines the inventory records as still owed, as `directory/name`. */
 export function pendingBaselines(e2eDir: string): string[] {
   const { pending } = readInventory(e2eDir);
