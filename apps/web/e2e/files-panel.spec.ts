@@ -479,7 +479,26 @@ test('owner navigates to files, downloads metadata, and deletes with feedback', 
   await page.keyboard.press('Escape');
   await expect(deleteButton).toBeFocused();
 
+  // A rejection the server answers in HTML is still an answer: the screen says
+  // the deletion failed, not that the connection did.
+  const deleteRoute = `**/meetings/${meeting.id}/files/*`;
+  await page.route(deleteRoute, async (route) => {
+    if (route.request().method() !== 'DELETE') {
+      await route.fallback();
+      return;
+    }
+
+    await route.fulfill({ status: 500, contentType: 'text/html', body: '<html>500</html>' });
+  });
   await deleteButton.click();
+  await page.getByRole('button', { name: 'Подтвердить удаление phase-3-notes.pdf' }).click();
+
+  await expect(page.locator('main').getByRole('alert')).toHaveText(
+    'Не удалось удалить «phase-3-notes.pdf».',
+  );
+  await expect(page.getByRole('button', { name: 'Удалить phase-3-notes.pdf' })).toBeVisible();
+
+  await page.unroute(deleteRoute);
   await page.getByRole('button', { name: 'Подтвердить удаление phase-3-notes.pdf' }).click();
 
   await expect(page.getByRole('button', { name: 'Удалить phase-3-notes.pdf' })).toHaveCount(0);

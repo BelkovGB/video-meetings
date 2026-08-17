@@ -8,13 +8,15 @@
  * here.
  *
  * Reading the body is only shared with the callers that hand over the whole
- * response. `create-meeting-dialog.tsx`, `register/page.tsx` and
- * `use-meeting-files.ts` parse the body inside their own request `try` — mostly
- * because one parse has to serve a payload that may be either a success or an
- * error — and pass the result to `apiErrorMessage`. A body that is not JSON
- * therefore never reaches this module from them: it throws into their `catch`,
- * which words it as a connection failure. Passing a body to `apiErrorMessage`
- * does not settle the malformed case; only `readApiErrorBody` does.
+ * response. `create-meeting-dialog.tsx`, `register/page.tsx` and the
+ * download-ticket call in `use-meeting-files.ts` parse the body inside their own
+ * request `try`, because that one parse has to serve a payload that may be
+ * either a success or an error, and pass the result to `apiErrorMessage`. A body
+ * that is not JSON therefore never reaches this module from them: it throws into
+ * their `catch`, which words it as a connection failure. Passing a body to
+ * `apiErrorMessage` does not settle the malformed case; only `readApiErrorBody`
+ * does, so a call that only ever reads an error belongs on
+ * `readApiErrorMessage`.
  *
  * A screen that words its text from `code` still routes it itself, because the
  * mapping is per screen, but it parses through `readApiErrorBody` so there is
