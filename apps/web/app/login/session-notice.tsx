@@ -4,7 +4,30 @@ import { Alert } from '@heroui/react';
 import { useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
-import { loginNoticeParam, passwordChangedNotice } from '../../lib/auth/login-notice';
+import {
+  loginNoticeParam,
+  passwordChangedNotice,
+  sessionRejectedNotice,
+} from '../../lib/auth/login-notice';
+
+type Notice = { status: 'success' | 'warning'; message: string };
+
+// A `Map` rather than an object literal: the reason comes off the URL, and a
+// crafted `constructor` or `toString` would resolve to an inherited function in
+// a literal and render as an unreadable notice.
+const noticesByReason = new Map<string, Notice>([
+  [
+    passwordChangedNotice,
+    { status: 'success', message: 'Пароль изменён. Войдите заново с новым паролем.' },
+  ],
+  [
+    sessionRejectedNotice,
+    {
+      status: 'warning',
+      message: 'Пароль не изменён: сессия устарела. Войдите заново и повторите попытку.',
+    },
+  ],
+]);
 
 /**
  * Explains why the session ended when the sign-in screen was reached on purpose.
@@ -16,16 +39,16 @@ import { loginNoticeParam, passwordChangedNotice } from '../../lib/auth/login-no
  * notice, and a keyboard user tabs from it straight into the sign-in form.
  */
 export function SessionNotice() {
-  const notice = useSearchParams().get(loginNoticeParam);
-  const isPasswordChanged = notice === passwordChangedNotice;
+  const reason = useSearchParams().get(loginNoticeParam);
+  const notice = reason === null ? undefined : noticesByReason.get(reason);
   const [isAnnounced, setIsAnnounced] = useState(false);
   const noticeRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (isPasswordChanged) {
+    if (notice) {
       setIsAnnounced(true);
     }
-  }, [isPasswordChanged]);
+  }, [notice]);
 
   useEffect(() => {
     if (isAnnounced) {
@@ -33,7 +56,7 @@ export function SessionNotice() {
     }
   }, [isAnnounced]);
 
-  if (!isPasswordChanged) {
+  if (!notice) {
     return null;
   }
 
@@ -45,8 +68,8 @@ export function SessionNotice() {
       className="mt-6 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-700 focus:ring-offset-2"
     >
       {isAnnounced ? (
-        <Alert status="success" className="rounded-xl">
-          Пароль изменён. Войдите заново с новым паролем.
+        <Alert status={notice.status} className="rounded-xl">
+          {notice.message}
         </Alert>
       ) : null}
     </div>

@@ -926,6 +926,70 @@ test('validates and recovers from password-change failures without clearing the 
   }
 });
 
+test('explains the sign-out when the password endpoint rejects the session', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'profile-password-session');
+
+  // Seeded once instead of through `authenticate`: an init script would restore
+  // the token on every later navigation and hide a session that failed to end.
+  await page.goto('/login');
+  await page.evaluate(({ accessToken, email }) => {
+    window.sessionStorage.setItem('accessToken', accessToken);
+    window.sessionStorage.setItem('userEmail', email);
+  }, session);
+  await page.goto('/profile');
+
+  // The documented `401` of a session the endpoint will not act on: a token
+  // minted before the session migration carries no `sid`, and the body has no
+  // `code` to route on. The current password is correct and stays in force.
+  await page.route('**/users/me/password', async (route) => {
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        statusCode: 401,
+        message: 'Sign in again before changing your password',
+      }),
+    });
+  });
+
+  await page.getByLabel('Текущий пароль', { exact: true }).fill(password);
+  await page.getByLabel('Новый пароль', { exact: true }).fill('unchanged-secure-password-789');
+  await page
+    .getByLabel('Подтвердите новый пароль', { exact: true })
+    .fill('unchanged-secure-password-789');
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+
+  // The eject is unavoidable, but it must not look like the successful sign-out
+  // with the notice missing: the reason says the password is still the old one.
+  await expect(page).toHaveURL('/login?reason=session-rejected');
+  await expect(page.getByRole('status')).toHaveText(
+    'Пароль не изменён: сессия устарела. Войдите заново и повторите попытку.',
+  );
+  await expect(page.getByRole('status')).toBeFocused();
+  await expect(
+    page.evaluate(() => window.sessionStorage.getItem('accessToken')),
+  ).resolves.toBeNull();
+  await expect(page.evaluate(() => window.sessionStorage.getItem('userEmail'))).resolves.toBeNull();
+
+  // The notice is honest: the account still takes the password the user typed in
+  // the current-password field, because nothing was changed.
+  await page.unroute('**/users/me/password');
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Email')).toBeFocused();
+  await page.keyboard.type(session.email);
+  await page.keyboard.press('Tab');
+  await page.keyboard.type(password);
+  await page.keyboard.press('Enter');
+
+  await expect(page).toHaveURL('/');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText(
+    session.email,
+  );
+});
+
 test('changes the password by keyboard, signs out, blocks protected routes, and requires the new password', async ({
   page,
   request,

@@ -1,6 +1,5 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { FormEvent, forwardRef, useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
@@ -11,7 +10,8 @@ const minimumPasswordLength = 9;
 const maximumPasswordBytes = 72;
 
 type PasswordChangeFormProps = {
-  onUnauthorized: () => void;
+  /** The session cannot authorize the change; the password is unchanged. */
+  onSessionRejected: () => void;
   onPasswordChanged: () => void;
 };
 
@@ -130,8 +130,10 @@ async function readServerError(response: Response): Promise<ServerError> {
 }
 
 /** Changes the signed-in user's password while retaining field-level recovery feedback. */
-export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: PasswordChangeFormProps) {
-  const router = useRouter();
+export function PasswordChangeForm({
+  onSessionRejected,
+  onPasswordChanged,
+}: PasswordChangeFormProps) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
@@ -186,7 +188,7 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
 
     const token = readAccessToken();
     if (!token) {
-      router.replace('/login');
+      onSessionRejected();
       return;
     }
 
@@ -205,8 +207,12 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
         body: JSON.stringify({ currentPassword, newPassword, confirmation }),
       });
 
+      // A `401` here is not only an expired token: the endpoint answers it for a
+      // legacy session too, so a correct current password can land on it while
+      // the password stays unchanged. Signing out is still the only recovery,
+      // but it has to say so instead of dropping the user on a bare /login.
       if (response.status === 401) {
-        onUnauthorized();
+        onSessionRejected();
         return;
       }
 
@@ -230,7 +236,7 @@ export function PasswordChangeForm({ onUnauthorized, onPasswordChanged }: Passwo
     } finally {
       // A successful change leaves the form submitted while the router leaves
       // the page: re-enabling it would let a repeated Enter run again without a
-      // token and replace the sign-out notice with a bare /login.
+      // token and replace the sign-out notice with the unchanged-password one.
       if (!hasChanged) {
         setIsSubmitting(false);
       }

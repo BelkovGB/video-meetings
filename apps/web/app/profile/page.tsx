@@ -16,6 +16,7 @@ export default function ProfilePage() {
     loadError,
     handleUnauthorized,
     handlePasswordChanged,
+    handleSessionRejected,
     retryLoad,
   } = useCurrentProfile();
 
@@ -105,7 +106,7 @@ export default function ProfilePage() {
               onUnauthorized={handleUnauthorized}
             />
             <PasswordChangeForm
-              onUnauthorized={handleUnauthorized}
+              onSessionRejected={handleSessionRejected}
               onPasswordChanged={handlePasswordChanged}
             />
             <div className="grid gap-2 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center">

@@ -5,7 +5,7 @@ import { Dispatch, SetStateAction, useCallback, useEffect, useState } from 'reac
 
 import { apiUrl } from '../../lib/api/config';
 import type { CurrentUserProfile } from '../../lib/api/contracts';
-import { passwordChangedLoginPath } from '../../lib/auth/login-notice';
+import { passwordChangedLoginPath, sessionRejectedLoginPath } from '../../lib/auth/login-notice';
 import { clearSession, readAccessToken } from '../../lib/auth/session';
 import { useRestoredSessionGuard } from '../../lib/auth/use-restored-session-guard';
 
@@ -18,6 +18,8 @@ type CurrentProfile = {
   handleUnauthorized: () => void;
   /** Clears the session and returns to the login screen explaining the new sign-in. */
   handlePasswordChanged: () => void;
+  /** Clears the session and returns to the login screen saying the password is unchanged. */
+  handleSessionRejected: () => void;
   retryLoad: () => void;
 };
 
@@ -37,6 +39,11 @@ export function useCurrentProfile(): CurrentProfile {
   const handlePasswordChanged = useCallback(() => {
     clearSession();
     router.replace(passwordChangedLoginPath);
+  }, [router]);
+
+  const handleSessionRejected = useCallback(() => {
+    clearSession();
+    router.replace(sessionRejectedLoginPath);
   }, [router]);
 
   useRestoredSessionGuard(clearSession);
@@ -101,6 +108,7 @@ export function useCurrentProfile(): CurrentProfile {
     loadError,
     handleUnauthorized,
     handlePasswordChanged,
+    handleSessionRejected,
     retryLoad,
   };
 }
