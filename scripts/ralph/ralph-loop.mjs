@@ -155,7 +155,16 @@ export function incompleteIssueOutcome(result) {
  * существует, но ревью его уже отклонило: продолжение без сессии агента
  * означало бы бесконечный повтор того же ревью над тем же деревом.
  */
-export const committedRecoveryPhases = ['committed', 'pushed', 'reviewing'];
+export const committedRecoveryPhases = ['committed', 'pushed', 'reviewing', 'closing'];
+
+/**
+ * Фаза между вердиктом PASS и закрытием issue.
+ *
+ * Пишется только после успешного ревью, поэтому отличает «этот commit проверен
+ * и признан годным» от `review-failed`, где `reviewedCommit` тот же, а вердикт
+ * противоположный.
+ */
+const reviewPassedPhase = 'closing';
 
 function reportIssueMetrics(outcome) {
   const record = finishIssueMetrics(outcome);
@@ -300,7 +309,24 @@ function closeIssue(config, repository, issue, commit) {
   }
 }
 
+/**
+ * Прошло ли ревью этого самого commit на прошлом прогоне.
+ *
+ * Читается до первого updateIssue: тот сразу перезаписывает фазу, и после него
+ * отличить прерванное закрытие от обычного продолжения уже нечем.
+ */
+export function reviewAlreadyPassed(issue, commit) {
+  const storedIssue = activeStateStore()?.issue;
+
+  return (
+    storedIssue?.number === issue.number &&
+    storedIssue?.phase === reviewPassedPhase &&
+    storedIssue?.reviewedCommit === commit
+  );
+}
+
 async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
+  const passedOnPreviousRun = reviewAlreadyPassed(issue, commit);
   const pushedHead = pushBranchAndVerify(config);
   activeStateStore()?.updateIssue({
     phase: 'pushed',
@@ -317,6 +343,29 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
       completed: true,
       commit,
       review: { verdict: 'pass', summary: 'Independent review is disabled.', findings: [] },
+    };
+  }
+
+  if (passedOnPreviousRun) {
+    // Прошлый прогон дошёл до PASS и упал на закрытии issue. Вердикт относится
+    // к дереву, а не к попытке записи в GitHub, а дерево с тех пор не менялось:
+    // повторное ревью того же commit стоило бы трёх минут и 150k токенов и
+    // ответило бы то же самое.
+    console.log(
+      `Issue #${issue.number}: ревью commit ${commit} прошло на прошлом прогоне; ` +
+        'повтор пропущен, осталось закрыть issue.',
+    );
+    verifyPushedHead(config, pushedHead);
+    closeIssue(config, repository, issue, commit);
+    activeStateStore()?.clearIssue();
+    return {
+      completed: true,
+      commit,
+      review: {
+        verdict: 'pass',
+        summary: 'Review passed on a previous run; the reviewed commit is unchanged.',
+        findings: [],
+      },
     };
   }
 
@@ -375,6 +424,10 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
     return { completed: false, commit, review };
   }
 
+  // Вердикт записывается до обращения к GitHub. Публикация комментария и
+  // закрытие issue — сетевые операции, и падение на них уже трижды за день
+  // стоило повторного ревью того же самого дерева на следующем прогоне.
+  activeStateStore()?.updateIssue({ phase: reviewPassedPhase, reviewedCommit: commit });
   verifyPushedHead(config, pushedHead);
   closeIssue(config, repository, issue, commit);
   activeStateStore()?.clearIssue();

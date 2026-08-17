@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { runPhasePlan } from './ralph-loop.mjs';
+import { reviewAlreadyPassed, runPhasePlan } from './ralph-loop.mjs';
 import { configForPhase, normalizePhases } from './ralph-config.mjs';
 import { githubPagedArray } from './ralph-github-client.mjs';
-import { createStateStore } from './ralph-state-store.mjs';
+import { createStateStore, setActiveStateStore } from './ralph-state-store.mjs';
 
 test('persistent state survives restart and enforces branch identity', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'ralph-state-'));
@@ -272,4 +272,40 @@ test('GitHub pagination combines pages and fails instead of silently truncating'
       }),
     /достиг лимита 200 объектов/,
   );
+});
+
+test('вердикт PASS переживает падение на закрытии issue и не повторяет ревью', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-passed-'));
+  const statePath = path.join(directory, 'state.json');
+  const config = { branch: 'feature/pass', baseBranch: 'master', milestone: 'Pass milestone' };
+  const issue = {
+    number: 81,
+    title: 'Reviewed already',
+    body: 'Requirements',
+    url: 'https://example.test/issues/81',
+  };
+
+  try {
+    const store = createStateStore(config, '--run', statePath);
+    store.reserveIteration();
+    store.beginIssue(issue, 'a'.repeat(40));
+    setActiveStateStore(store);
+
+    // Фаза после PASS: тот же commit повторно ревьюить незачем.
+    store.updateIssue({ phase: 'closing', commit: 'b'.repeat(40), reviewedCommit: 'b'.repeat(40) });
+    assert.equal(reviewAlreadyPassed(issue, 'b'.repeat(40)), true);
+
+    // Другой commit — другое дерево, вердикт к нему не относится.
+    assert.equal(reviewAlreadyPassed(issue, 'c'.repeat(40)), false);
+    assert.equal(reviewAlreadyPassed({ ...issue, number: 82 }, 'b'.repeat(40)), false);
+
+    // Ключевое различие: review-failed хранит тот же reviewedCommit, но вердикт
+    // там противоположный. Пропуск ревью по одному лишь совпадению commit
+    // закрыл бы issue, которую ревью отклонило.
+    store.updateIssue({ phase: 'review-failed' });
+    assert.equal(reviewAlreadyPassed(issue, 'b'.repeat(40)), false);
+  } finally {
+    setActiveStateStore(null);
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

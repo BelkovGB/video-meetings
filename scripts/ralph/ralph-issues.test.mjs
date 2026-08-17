@@ -279,7 +279,10 @@ test('a rejected review never resumes without a new agent session', () => {
   // На фазе review-failed commit существует, и попадание её в этот список
   // означало бы бесконечный повтор того же ревью над тем же деревом.
   assert.equal(committedRecoveryPhases.includes('review-failed'), false);
-  assert.deepEqual(committedRecoveryPhases, ['committed', 'pushed', 'reviewing']);
+  assert.deepEqual(committedRecoveryPhases, ['committed', 'pushed', 'reviewing', 'closing']);
+  // `closing` наступает после PASS: прогон, упавший на закрытии issue, обязан
+  // продолжиться без новой сессии агента, иначе работа делается заново.
+  assert.equal(committedRecoveryPhases.includes('closing'), true);
 });
 
 test('review context is separable from the issue body so the next review can be asked about it', () => {
