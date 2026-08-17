@@ -15,6 +15,8 @@ import test from 'node:test';
 import {
   acquireRunLock,
   initializePersistentLog,
+  logDetail,
+  logDetailError,
   rotatePersistentLog,
   isTransientFailure,
   readJsonFile,
@@ -476,3 +478,55 @@ test(
     });
   },
 );
+
+test('подробности идут в журнал, а объёмный повтор — ссылкой', () => {
+  withTemporaryDirectory((directory) => {
+    const logPath = path.join(directory, 'run.log');
+    const printed = [];
+    // Вывод контейнера длиннее порога: именно такие куски и повторялись.
+    const containerOutput = `RALPH_VALIDATION_SCRIPT=lint\n${'x'.repeat(600)}`;
+
+    let restore;
+    try {
+      restore = initializePersistentLog(logPath, { mode: '--run' });
+      // Перехват ставится поверх журнального: если подробности всё же уйдут в
+      // консоль, они окажутся здесь.
+      console.log = (...args) => printed.push(args.join(' '));
+      console.error = (...args) => printed.push(args.join(' '));
+      logDetail(containerOutput);
+      logDetail(containerOutput);
+      logDetailError('короткая строка ошибки');
+    } finally {
+      restore?.();
+    }
+
+    const log = readFileSync(logPath, 'utf8');
+    // Консоль не получила ничего: за ходом прогона в ней видно шаги, а не
+    // десятки тысяч строк вывода контейнера.
+    assert.deepEqual(printed, []);
+    assert.match(log, /RALPH_VALIDATION_SCRIPT=lint/);
+    assert.match(log, /ERROR короткая строка ошибки/);
+
+    const digest = log.match(/<сообщение ([0-9a-f]{12})>/)?.[1];
+    assert.ok(digest, 'первое появление обязано получить метку');
+    // Второй раз тот же текст занимает строку вместо шестисот символов, но
+    // остаётся в хронологии и находится поиском по той же метке.
+    assert.equal(log.match(/x{600}/g)?.length, 1);
+    assert.match(log, new RegExp(`<повтор сообщения ${digest} от `));
+  });
+});
+
+test('вне прогона подробности всё же попадают в консоль', () => {
+  // `--check` и тесты работают без журнала: единственный доступный вывод —
+  // консоль, и молчание там означало бы потерю сообщения.
+  const printed = [];
+  const original = console.log;
+  console.log = (...args) => printed.push(args.join(' '));
+  try {
+    logDetail('вывод без журнала');
+  } finally {
+    console.log = original;
+  }
+
+  assert.deepEqual(printed, ['вывод без журнала']);
+});

@@ -4,7 +4,12 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { commandTimeoutError, retryTransientOperation } from './ralph-runtime.mjs';
+import {
+  commandTimeoutError,
+  logDetail,
+  logDetailError,
+  retryTransientOperation,
+} from './ralph-runtime.mjs';
 
 /**
  * Запуск внешних команд: Git, GitHub CLI, npm и Codex CLI.
@@ -275,9 +280,13 @@ export function run(name, args, options = {}) {
     throw error;
   }
 
+  // Вывод команды идёт в журнал, а не в консоль. Живым он всё равно не был:
+  // spawnSync отдаёт его целиком по завершении, то есть контейнер валидации
+  // выплёскивал в консоль десятки тысяч строк разом, и ход прогона в ней
+  // терялся. В `run.log` вывод сохраняется полностью.
   if (options.echoOutput) {
-    if (result.stdout?.trim()) console.log(outputTail(result.stdout, 100_000));
-    if (result.stderr?.trim()) console.error(outputTail(result.stderr, 100_000));
+    if (result.stdout?.trim()) logDetail(outputTail(result.stdout, 100_000));
+    if (result.stderr?.trim()) logDetailError(outputTail(result.stderr, 100_000));
   }
   console.log(`Команда ${name} завершена за ${Date.now() - startedAt} ms.`);
 

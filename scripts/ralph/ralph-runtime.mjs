@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   closeSync,
@@ -198,6 +198,59 @@ function rotatePersistentLog(logPath, startedAt, uniqueSuffix = randomUUID().sli
   }
 }
 
+// Ноль-байт из вывода команды ломает построчный журнал: редакторы и grep
+// считают файл двоичным и перестают его показывать.
+const nullCharacter = String.fromCharCode(0);
+
+/**
+ * С какой длины сообщение считается объёмным и проверяется на повтор.
+ *
+ * Один и тот же текст попадает в журнал несколько раз: вывод команды печатается
+ * по завершении, затем он же уходит в сообщение об ошибке, затем в сводку для
+ * агента, а при повторной попытке — ещё раз целиком. На упавшей validation это
+ * давало мегабайты одинаковых строк, из-за которых журнал прогона нечитаем.
+ * Короткие строки не проверяются: повтор «Команда git завершена» — это полезная
+ * хронология, а не дубликат.
+ */
+const repeatedMessageThreshold = 500;
+
+// Верхняя граница на число запомненных сообщений: журнал живёт весь AFK-прогон,
+// и неограниченная таблица хэшей растёт вместе с ним.
+const repeatedMessageMemory = 2_000;
+
+function collapseRepeatedMessage(firstSeen, stamp, text) {
+  if (text.length < repeatedMessageThreshold) return text;
+  const digest = createHash('sha256').update(text).digest('hex').slice(0, 12);
+  const previous = firstSeen.get(digest);
+  // Ссылка вместо текста: повтор остаётся видимым в хронологии и находится
+  // поиском по тому же digest, но занимает строку вместо мегабайта.
+  if (previous) return `<повтор сообщения ${digest} от ${previous}, ${text.length} символов>`;
+  if (firstSeen.size >= repeatedMessageMemory) firstSeen.clear();
+  firstSeen.set(digest, stamp);
+  return `${text}\n<сообщение ${digest}>`;
+}
+
+// Куда писать подробности, минуя консоль. Ставится на время прогона: вне его
+// (тесты, `--check`) единственный доступный вывод — консоль.
+let detailAppend = null;
+
+/**
+ * Полный вывод команды: в журнал, но не в консоль.
+ *
+ * Контейнер валидации печатает десятки тысяч строк, и на их фоне в консоли не
+ * видно, на каком шаге цикл. Оператору нужен ход прогона; разбор падения идёт
+ * по `run.log`, куда вывод попадает целиком.
+ */
+export function logDetail(...args) {
+  if (detailAppend) detailAppend('INFO', args);
+  else console.log(...args);
+}
+
+export function logDetailError(...args) {
+  if (detailAppend) detailAppend('ERROR', args);
+  else console.error(...args);
+}
+
 function initializePersistentLog(logPath, metadata = {}) {
   mkdirSync(path.dirname(logPath), { recursive: true });
   rotatePersistentLog(logPath, new Date().toISOString());
@@ -207,13 +260,17 @@ function initializePersistentLog(logPath, metadata = {}) {
     'utf8',
   );
   const original = { log: console.log, error: console.error };
+  const firstSeen = new Map();
   const append = (level, args) => {
+    const stamp = new Date().toISOString();
+    const text = format(...args).replaceAll(nullCharacter, '');
     appendFileSync(
       logPath,
-      `${new Date().toISOString()} ${level} ${format(...args).replaceAll('\u0000', '')}\n`,
+      `${stamp} ${level} ${collapseRepeatedMessage(firstSeen, stamp, text)}\n`,
       'utf8',
     );
   };
+  detailAppend = append;
   console.log = (...args) => {
     original.log(...args);
     append('INFO', args);
@@ -225,6 +282,7 @@ function initializePersistentLog(logPath, metadata = {}) {
   return () => {
     console.log = original.log;
     console.error = original.error;
+    detailAppend = null;
   };
 }
 
