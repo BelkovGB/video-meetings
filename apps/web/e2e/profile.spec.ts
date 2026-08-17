@@ -974,8 +974,11 @@ test('explains the sign-out when the password endpoint rejects the session', asy
   ).resolves.toBeNull();
   await expect(page.evaluate(() => window.sessionStorage.getItem('userEmail'))).resolves.toBeNull();
 
-  // The notice is honest: the account still takes the password the user typed in
-  // the current-password field, because nothing was changed.
+  // The eject leaves a usable sign-in screen: the session really was cleared, so
+  // no stale token short-circuits the form, and the focused notice does not trap
+  // the keyboard on the way into it. Whether the password survived is not on
+  // trial here — the stub answers before the API sees the request; the real `401`
+  // for a session-less token is pinned in `apps/api/test/profile.e2e-spec.ts`.
   await page.unroute('**/users/me/password');
   await page.keyboard.press('Tab');
   await expect(page.getByLabel('Email')).toBeFocused();
