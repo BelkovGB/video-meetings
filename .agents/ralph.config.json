@@ -3,7 +3,7 @@
   "agentCli": "claude",
   "baseBranch": "master",
   "draftPullRequest": true,
-  "stopAfterFirstIssue": true,
+  "stopAfterFirstIssue": false,
   "phases": [
     {
       "milestone": "Phase 8: Password Change Screen",
