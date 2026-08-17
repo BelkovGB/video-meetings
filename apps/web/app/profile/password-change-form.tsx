@@ -354,7 +354,10 @@ const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(function 
   ref,
 ) {
   const errorId = `${id}-error`;
-  const describedBy = [error ? errorId : 'password-change-help', requestErrorId]
+  // The refusal leads: a description is read after the label and can be cut
+  // short, so the one new sentence must not sit behind guidance the user has
+  // already heard on every earlier visit to this field.
+  const describedBy = [requestErrorId, error ? errorId : 'password-change-help']
     .filter(Boolean)
     .join(' ');
 

@@ -879,17 +879,25 @@ test('validates and recovers from password-change failures without clearing the 
   // description of the control it lands on, and an alert that mounts already
   // filled is announced unreliably. Hearing only the label and the generic help
   // text would present the attempt as if nothing had happened.
+  // The assertion is on the computed description rather than on the id list,
+  // because the id list stays byte-identical if the referenced node is renamed
+  // or hidden — exactly the regressions that would silence the refusal. The
+  // refusal comes first: a description is announced after the label, is
+  // interruptible, and the guidance is what the user has already heard.
   await expect(currentPassword).toBeFocused();
-  await expect(currentPassword).toHaveAttribute(
-    'aria-describedby',
-    'password-change-help password-change-error',
+  await expect(currentPassword).toHaveAccessibleDescription(
+    'Слишком много попыток изменить пароль. Повторите через несколько минут.' +
+      ' Не менее 9 символов и не более 72 байт UTF-8.' +
+      ' После изменения потребуется войти снова.',
   );
   await expect(page).toHaveURL('/profile');
 
   // The description is not permanent: typing clears the refusal, and the field
-  // goes back to pointing at the help text alone.
+  // goes back to the help text alone.
   await currentPassword.fill('retyped-current-password');
-  await expect(currentPassword).toHaveAttribute('aria-describedby', 'password-change-help');
+  await expect(currentPassword).toHaveAccessibleDescription(
+    'Не менее 9 символов и не более 72 байт UTF-8. После изменения потребуется войти снова.',
+  );
   await currentPassword.fill(password);
 
   // A failure the browser does not recognise still says something in Russian
