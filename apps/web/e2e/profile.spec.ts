@@ -726,12 +726,33 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
   await page.keyboard.type(newPassword);
   await page.keyboard.press('Tab');
   await expect(page.getByRole('button', { name: 'Изменить пароль' })).toBeFocused();
-  // Pressed twice the way a held Enter repeats: the form must stay submitted so
-  // that a second run cannot replace the notice URL with a bare /login.
+
+  // The re-submit window opens after the API answers and closes when the router
+  // leaves /profile, so the sign-in payload is held to keep it open: without it
+  // the assertion below would race the route change instead of observing it.
+  const isSignInPage = (url: URL) => url.pathname === '/login';
+  let releaseSignInPage = () => {};
+  const heldSignInPage = new Promise<void>((resolve) => {
+    releaseSignInPage = resolve;
+  });
+  await page.route(isSignInPage, async (route) => {
+    await heldSignInPage;
+    await route.continue();
+  });
+  const passwordChanged = page.waitForResponse(
+    (response) => response.url().endsWith('/users/me/password') && response.ok(),
+  );
+
   await page.keyboard.press('Enter');
-  await page.keyboard.press('Enter');
+  await passwordChanged;
+  // The password is already changed and the page is still /profile: the form has
+  // to stay submitted, or a repeated Enter would run again without a token and
+  // replace the notice URL with a bare /login.
+  await expect(page.getByRole('button', { name: 'Изменяем пароль…' })).toBeDisabled();
+  releaseSignInPage();
 
   await expect(page).toHaveURL('/login?reason=password-changed');
+  await page.unroute(isSignInPage);
   await expect(page.getByRole('heading', { name: 'С возвращением' })).toBeVisible();
   await expect(page.getByRole('status')).toHaveText(
     'Пароль изменён. Войдите заново с новым паролем.',
@@ -743,6 +764,24 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
     page.evaluate(() => window.sessionStorage.getItem('accessToken')),
   ).resolves.toBeNull();
   await expect(page.evaluate(() => window.sessionStorage.getItem('userEmail'))).resolves.toBeNull();
+
+  // The notice must not trap the keyboard: Tab leads out of it into the form,
+  // where the old password is now rejected without leaving the sign-in screen.
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Email')).toBeFocused();
+  await page.keyboard.type(session.email);
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Пароль')).toBeFocused();
+  await page.keyboard.type(password);
+  await page.keyboard.press('Enter');
+  await expect(
+    // Filtered because Next keeps its own route announcer under the alert role.
+    page.getByRole('alert').filter({ hasText: 'Не удалось войти. Проверьте email и пароль.' }),
+  ).toBeVisible();
+  await expect(page).toHaveURL('/login?reason=password-changed');
+  await expect(
+    page.evaluate(() => window.sessionStorage.getItem('accessToken')),
+  ).resolves.toBeNull();
 
   await page.goBack();
   await expect(page).toHaveURL('/login');
@@ -756,15 +795,18 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
   await expect(page).toHaveURL('/login');
   await expect(page.getByText(session.email)).toHaveCount(0);
 
-  const oldPasswordLogin = await request.post(`${apiUrl}/auth/login`, {
-    data: { email: session.email, password },
-  });
-  expect(oldPasswordLogin.status()).toBe(401);
+  // The transition ends where the issue expects it: the new password signs the
+  // user back in from the sign-in screen the revoked session led to.
+  await page.getByLabel('Email').focus();
+  await page.keyboard.type(session.email);
+  await page.keyboard.press('Tab');
+  await page.keyboard.type(newPassword);
+  await page.keyboard.press('Enter');
 
-  const newPasswordLogin = await request.post(`${apiUrl}/auth/login`, {
-    data: { email: session.email, password: newPassword },
-  });
-  expect(newPasswordLogin.ok()).toBeTruthy();
+  await expect(page).toHaveURL('/');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toContainText(
+    session.email,
+  );
 });
 
 test('sends a meeting page restored by Back to sign-in after the password change', async ({
