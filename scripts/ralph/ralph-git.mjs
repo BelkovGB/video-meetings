@@ -102,7 +102,12 @@ export function workingTreePaths(status) {
       String(status ?? '')
         .split(/\r?\n/)
         .filter(Boolean)
-        .map((line) => line.slice(3).trim().split(' -> ').at(-1))
+        // Отрезать ровно три символа нельзя: `run` обрезает пробелы по краям
+        // вывода, и первая строка приходит без ведущего пробела статуса. Срез
+        // съедал первый символ её пути, `apps/web/...` превращался в
+        // `pps/web/...`, и путь переставал совпадать с чем бы то ни было.
+        .map((line) => line.trim().replace(/^\S{1,2}\s+/, ''))
+        .map((line) => line.split(' -> ').at(-1))
         .filter(Boolean),
     ),
   ];

@@ -508,7 +508,24 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     fail(`Issue #${issue.number}: ${violations.join('; ')}. Цикл остановлен.`);
   }
 
-  if (changes === '') {
+  // Что в дереве принадлежит агенту, а что лежало там до начала issue.
+  //
+  // Раньше стадировалось всё подряд, и в коммит про снимки Playwright уехали
+  // правка `maxIterations` и черновик дизайна на 248 КБ — а следующий коммит
+  // агента черновик удалил вместе с рабочей копией. Ревьюер, увидев в диффе
+  // задачи чужой конфиг, справедливо отклонял работу заход за заходом.
+  const foreignPaths = new Set(activeStateStore()?.issue?.foreignPaths ?? []);
+  const agentPaths = workingTreePaths(changes).filter((file) => !foreignPaths.has(file));
+  const untouchedForeign = workingTreePaths(changes).filter((file) => foreignPaths.has(file));
+  if (untouchedForeign.length > 0) {
+    console.log(
+      `Issue #${issue.number}: вне коммита оставлено ${untouchedForeign.length} файлов, ` +
+        `изменённых до начала задачи: ${untouchedForeign.slice(0, 5).join(', ')}` +
+        `${untouchedForeign.length > 5 ? ' и другие' : ''}.`,
+    );
+  }
+
+  if (agentPaths.length === 0) {
     const alreadyFixedCommit = alreadyFixedCommitFromAgent(lastAgentMessage);
     if (!alreadyFixedCommit) {
       fail(`Issue #${issue.number}: агент не оставил изменений и не указал ALREADY_FIXED commit.`);
@@ -532,7 +549,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       return { completed: false, validationFailed: true };
     }
     assertValidationLeftTree(
-      '',
+      changes,
       `Issue #${issue.number}: проверки already-fixed решения изменили рабочее дерево.`,
     );
     return reviewAndCloseCommittedIssue(config, repository, issue, commit);
@@ -540,7 +557,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 
   activeStateStore()?.updateIssue({ phase: 'validating' });
   try {
-    measuredValidation(() => runConfiguredValidation(config, workingTreePaths(changes)));
+    measuredValidation(() => runConfiguredValidation(config, agentPaths));
   } catch (error) {
     const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
     activeStateStore()?.updateIssue({
@@ -561,7 +578,9 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       'Проверьте generated-файлы перед повторным запуском.',
   );
   activeStateStore()?.updateIssue({ phase: 'staging' });
-  run('git', ['add', '--all']);
+  // Именно пути агента, а не `--all`: остальное в дереве принадлежит оператору
+  // и обязано остаться незакоммиченным.
+  run('git', ['add', '--all', '--', ...agentPaths]);
 
   const stagedDiff = run('git', ['diff', '--cached', '--quiet'], {
     allowFailure: true,
@@ -588,11 +607,16 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   commitStagedChanges(commitMessage, issue, config.runtime.validationTimeoutMs);
 
   const commitCount = Number(run('git', ['rev-list', '--count', `${startingCommit}..HEAD`]).stdout);
-  const remainingChanges = run('git', ['status', '--porcelain']).stdout;
-  if (commitCount !== 1 || remainingChanges !== '') {
+  // Чистым дерево быть больше не обязано: файлы оператора намеренно остались
+  // вне коммита. Обязано другое — чтобы после коммита не осталось ничего, что
+  // агент изменил сам.
+  const leftBehind = workingTreePaths(run('git', ['status', '--porcelain']).stdout).filter(
+    (file) => !foreignPaths.has(file),
+  );
+  if (commitCount !== 1 || leftBehind.length > 0) {
     fail(
-      `Issue #${issue.number}: оркестратор ожидал один commit и чистое дерево, ` +
-        `получено commits=${commitCount}, changes=${remainingChanges ? 'yes' : 'no'}.`,
+      `Issue #${issue.number}: оркестратор ожидал один commit и никаких своих изменений вне него, ` +
+        `получено commits=${commitCount}, вне коммита: ${leftBehind.join(', ') || 'нет'}.`,
     );
   }
 
@@ -690,7 +714,7 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
       `Issue #${issue.number}: recovery ожидал HEAD ${startingCommit}, но найден ${currentHead}.`,
     );
   }
-  activeStateStore()?.beginIssue(issue, startingCommit);
+  activeStateStore()?.beginIssue(issue, startingCommit, workingTreePaths(workingTreeStatus()));
 
   const linkedCommit = issue.linkedCommit ?? linkedCommitForIssue(issue);
   if (!continuation && linkedCommit) {

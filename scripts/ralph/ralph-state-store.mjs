@@ -105,7 +105,11 @@ export function createStateStore(config, selectedMode, statePath = runtimeStateP
       persist();
       return snapshot;
     },
-    beginIssue(issue, startingCommit) {
+    // `foreignPaths` — то, что уже лежало в рабочем дереве, когда issue
+    // началась. Записывается один раз, при заведении записи: на продолжении
+    // дерево грязное собственной работой агента, и пересчёт объявил бы её
+    // чужой.
+    beginIssue(issue, startingCommit, foreignPaths = []) {
       if (!state) return;
       if (state.issue && state.issue.number !== issue.number) {
         fail(`State ожидает issue #${state.issue.number}, но очередь выбрала #${issue.number}.`);
@@ -118,6 +122,7 @@ export function createStateStore(config, selectedMode, statePath = runtimeStateP
         authorLogin: issue.authorLogin ?? null,
         authorAssociation: issue.authorAssociation ?? null,
         startingCommit,
+        foreignPaths: [...foreignPaths],
         phase: 'agent-running',
         validationFixAttempts: 0,
         lastFailure: null,

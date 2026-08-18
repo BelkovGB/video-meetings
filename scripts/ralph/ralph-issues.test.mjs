@@ -25,6 +25,7 @@ import {
   isAncestorCommit,
   issueChangeInventory,
   linkedCommitForIssue,
+  workingTreePaths,
 } from './ralph-git.mjs';
 import {
   issueBodyWithReviewContext,
@@ -912,4 +913,22 @@ test('после отказа ревью база следующей сесси�
     }),
     commit,
   );
+});
+
+test('разбор git status переживает обрезку пробелов и переименование', () => {
+  // `run` обрезает пробелы по краям вывода, поэтому первая строка приходит без
+  // ведущего пробела статуса. Срез на три символа съедал первый символ её пути.
+  const raw = ' M apps/web/app/profile/password-change-form.tsx\n M apps/web/e2e/profile.spec.ts\n';
+
+  assert.deepEqual(workingTreePaths(raw), workingTreePaths(raw.trim()));
+  assert.deepEqual(workingTreePaths(raw.trim()), [
+    'apps/web/app/profile/password-change-form.tsx',
+    'apps/web/e2e/profile.spec.ts',
+  ]);
+
+  // Непрослеженные файлы и переименования: из `R old -> new` нужен новый путь.
+  assert.deepEqual(workingTreePaths('?? design/videoMeeting.pen\nR  a.ts -> b.ts'), [
+    'design/videoMeeting.pen',
+    'b.ts',
+  ]);
 });
