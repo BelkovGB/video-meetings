@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 
 import { fail, isRalphInfrastructurePath, scopeMilestoneReviewToProduct } from './ralph-scope.mjs';
-import { run } from './ralph-process-runner.mjs';
+import { run, runtimeSettings } from './ralph-process-runner.mjs';
+import { retryTransientOperation } from './ralph-runtime.mjs';
 import { runReviewWithRetries } from './ralph-agent-session.mjs';
 import { runReviewSession } from './ralph-agent-backends.mjs';
 import { parseJson } from './ralph-config.mjs';
@@ -335,16 +336,48 @@ ${checklist}
 Fix the root cause of every finding above and add regression coverage for each failure path, without weakening existing tests. The issue is not done until every box is ticked.`;
 }
 
+/**
+ * Создание задачи повторяется вместе с проверкой, а не само по себе.
+ *
+ * Без повтора один таймаут TLS-рукопожатия обрывал прогон после того, как
+ * milestone-ревью уже отработало — а это самая дорогая сессия цикла. Слепой
+ * повтор был бы хуже: POST не идемпотентен, и попытка после дошедшего запроса
+ * завела бы вторую задачу с тем же замечанием. Поэтому внутри повтора список
+ * задач milestone перечитывается, и задача с тем же marker принимается как уже
+ * созданная.
+ */
 function createReviewFindingIssue(config, repository, milestone, pullRequest, batch) {
-  const issue = parseJson(
-    run('gh', ['api', `repos/${repository}/issues`, '--method', 'POST', '--input', '-'], {
-      input: JSON.stringify({
-        title: findingIssueTitle(batch),
-        body: findingIssueBody(config, pullRequest, batch),
-        milestone: milestone.number,
-      }),
-    }).stdout,
-    'GitHub issue creation',
+  const issue = retryTransientOperation(
+    () => {
+      const existing = milestoneIssues(repository, milestone).find((candidate) =>
+        batch.some((finding) =>
+          String(candidate.body ?? '').includes(reviewFindingMarker(pullRequest, finding)),
+        ),
+      );
+      if (existing) {
+        console.log(`Задача из этого замечания уже создана: #${existing.number}.`);
+        return existing;
+      }
+      return parseJson(
+        run('gh', ['api', `repos/${repository}/issues`, '--method', 'POST', '--input', '-'], {
+          input: JSON.stringify({
+            title: findingIssueTitle(batch),
+            body: findingIssueBody(config, pullRequest, batch),
+            milestone: milestone.number,
+          }),
+        }).stdout,
+        'GitHub issue creation',
+      );
+    },
+    {
+      attempts: runtimeSettings().networkRetryAttempts,
+      baseDelayMs: runtimeSettings().networkRetryBaseDelayMs,
+      onRetry: (error, attempt, delay) =>
+        console.error(
+          `Временная ошибка создания задачи (попытка ${attempt}): ${error.message}. ` +
+            `Повтор через ${delay} ms.`,
+        ),
+    },
   );
   console.log(`Создана issue #${issue.number} из milestone finding: ${issue.html_url}`);
   return {

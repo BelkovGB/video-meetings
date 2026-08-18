@@ -961,3 +961,41 @@ test('пределы повторов разведены по цене одно�
     /от 1 до 5/,
   );
 });
+
+test('повторное создание задачи не заводит дубликат после дошедшего запроса', () => {
+  const pullRequest = { number: 77, headRefOid: 'head-1' };
+  const finding = { severity: 'P2', title: 'Notice lies', body: 'x', file: 'form.tsx', line: 220 };
+  const milestone = { number: 8, title: 'Phase 8' };
+  const created = [];
+
+  // Первый POST дошёл, но ответ потерялся: повтор обязан найти уже созданную
+  // задачу по marker, а не завести вторую с тем же замечанием.
+  const landed = {
+    number: 85,
+    state: 'OPEN',
+    body: reviewFindingMarker(pullRequest, finding),
+  };
+
+  const queued = createOrReopenReviewIssues(
+    { milestone: 'Phase 8' },
+    'owner/repository',
+    milestone,
+    pullRequest,
+    { verdict: 'fail', findings: [finding] },
+    {
+      milestoneIssues: () => [landed],
+      createReviewFindingIssue: () => {
+        created.push('POST');
+        return { number: 999, state: 'OPEN', body: '' };
+      },
+      updateReviewFindingIssue: () => {},
+      reopenReviewFindingIssue: () => {},
+    },
+  );
+
+  assert.deepEqual(created, []);
+  assert.deepEqual(
+    queued.map((issue) => issue.number),
+    [85],
+  );
+});
