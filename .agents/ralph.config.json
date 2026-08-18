@@ -6,8 +6,8 @@
   "stopAfterFirstIssue": false,
   "phases": [
     {
-      "milestone": "Phase 8: Password Change Screen",
-      "branch": "features/profile-phase-8",
+      "milestone": ["Phase 5: User Identity in Shared Activity API", "Phase 6: User Identity in Shared Activity UI"],
+      "branch": "features/profile-phase-5-6",
       "baseBranch": "master"
     }
   ],
@@ -20,7 +20,7 @@
     "validationRunTimeoutMs": 3600000,
     "agentTimeoutMs": 5400000,
     "networkRetryAttempts": 30,
-    "networkRetryBaseDelayMs": 2000,
+    "networkRetryBaseDelayMs": 20000,
     "maxPages": 20,
     "reviewRetryAttempts": 3
   },
