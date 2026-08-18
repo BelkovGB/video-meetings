@@ -207,6 +207,46 @@ export function scopeReviewToProduct(review, label = 'Review') {
   };
 }
 
+/**
+ * Порог важности, ниже которого замечание не блокирует работу.
+ *
+ * Ревьюер с `effort=high` на растущем изменении всегда найдёт ещё один P3:
+ * каждое исправление трогает больше кода и даёт ему больше поверхности. За
+ * ночь это дало десять заходов на одной задаче и три на другой, ни разу не
+ * сойдясь, — при том что ни одно замечание не было важнее P3.
+ *
+ * Замечания ниже порога не исчезают: они остаются в сводке ревью и в
+ * комментарии к PR. Они лишь перестают отклонять работу и заводить задачи.
+ */
+const severityOrder = ['P0', 'P1', 'P2', 'P3'];
+
+export function findingBlocks(finding, floor) {
+  const rank = severityOrder.indexOf(String(finding?.severity ?? '').toUpperCase());
+  const limit = severityOrder.indexOf(String(floor ?? 'P3').toUpperCase());
+
+  // Незнакомая важность считается блокирующей: молча пропустить замечание
+  // опаснее, чем лишний раз остановить работу.
+  return rank === -1 || limit === -1 || rank <= limit;
+}
+
+export function applySeverityFloor(review, floor, label = 'Review') {
+  const blocking = review.findings.filter((finding) => findingBlocks(finding, floor));
+  const belowFloor = review.findings.length - blocking.length;
+  if (belowFloor === 0) return review;
+
+  console.log(
+    `${label}: ${belowFloor} замечаний ниже порога ${floor} не блокируют работу и остаются в отчёте.`,
+  );
+  return {
+    ...review,
+    verdict: blocking.length > 0 ? 'fail' : 'pass',
+    summary:
+      `${review.summary} ${belowFloor} finding(s) below the ${floor} severity floor are reported ` +
+      'but do not block the work.',
+    findings: blocking,
+  };
+}
+
 export function scopeMilestoneReviewToProduct(review) {
   return scopeReviewToProduct(review, 'Milestone review');
 }

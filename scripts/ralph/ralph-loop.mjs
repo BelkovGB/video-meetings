@@ -7,7 +7,12 @@ import { fileURLToPath } from 'node:url';
 
 import { acquireRunLock, initializePersistentLog, readJsonFile } from './ralph-runtime.mjs';
 
-import { fail, isRalphInfrastructureIssue, scopeReviewToProduct } from './ralph-scope.mjs';
+import {
+  applySeverityFloor,
+  fail,
+  isRalphInfrastructureIssue,
+  scopeReviewToProduct,
+} from './ralph-scope.mjs';
 
 import { run, runNetwork } from './ralph-process-runner.mjs';
 
@@ -264,7 +269,12 @@ async function runIndependentReview(config, repository, issue, commit) {
   let review = parseJson(readFileSync(config.review.outputPath, 'utf8'), config.review.outputPath);
 
   assertReviewPayloadShape(review, `Review issue #${issue.number}`);
-  review = scopeReviewToProduct(normalizeReviewResult(review), `Review issue #${issue.number}`);
+  const reviewLabel = `Review issue #${issue.number}`;
+  review = applySeverityFloor(
+    scopeReviewToProduct(normalizeReviewResult(review), reviewLabel),
+    config.reviewSeverityFloor,
+    reviewLabel,
+  );
 
   const changes = run('git', ['status', '--porcelain']).stdout;
   const headAfterReview = run('git', ['rev-parse', 'HEAD']).stdout;

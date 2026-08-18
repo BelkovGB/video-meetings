@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 
-import { fail, isRalphInfrastructurePath, scopeMilestoneReviewToProduct } from './ralph-scope.mjs';
+import {
+  applySeverityFloor,
+  fail,
+  isRalphInfrastructurePath,
+  scopeMilestoneReviewToProduct,
+} from './ralph-scope.mjs';
 import { run, runtimeSettings } from './ralph-process-runner.mjs';
 import { retryTransientOperation } from './ralph-runtime.mjs';
 import { runReviewWithRetries } from './ralph-agent-session.mjs';
@@ -214,7 +219,11 @@ export async function runMilestoneReview(config, repository, milestone, pullRequ
     }
     fail(`Milestone review PR #${pullRequest.number} не завершился: ${error.message}`);
   }
-  review = scopeMilestoneReviewToProduct(review);
+  review = applySeverityFloor(
+    scopeMilestoneReviewToProduct(review),
+    config.reviewSeverityFloor,
+    'Milestone review',
+  );
   review = limitMilestoneReviewFindings(review, pullRequest, config.milestoneReview.maxFindings);
 
   postPullRequestReview(

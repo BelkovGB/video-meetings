@@ -16,6 +16,8 @@ import {
 import {
   isRalphInfrastructureIssue,
   isRalphInfrastructurePath,
+  applySeverityFloor,
+  findingBlocks,
   scopeMilestoneReviewToProduct,
   scopeReviewToProduct,
 } from './ralph-scope.mjs';
@@ -603,4 +605,40 @@ test('замечания к control plane выбрасываются из рев
   );
   assert.equal(infrastructureOnly.verdict, 'pass');
   assert.deepEqual(infrastructureOnly.findings, []);
+});
+
+test('порог важности убирает право останавливать работу, но не сам отчёт', () => {
+  const review = {
+    verdict: 'fail',
+    summary: 'Three findings.',
+    findings: [
+      { severity: 'P1', file: 'a.ts', line: 1, title: 'Real defect' },
+      { severity: 'P3', file: 'b.ts', line: 2, title: 'Missing coverage' },
+      { severity: 'P2', file: 'c.ts', line: 3, title: 'Hardcoded number' },
+    ],
+  };
+
+  const blocking = applySeverityFloor(review, 'P1', 'Review issue #86');
+  assert.deepEqual(
+    blocking.findings.map((finding) => finding.severity),
+    ['P1'],
+  );
+  assert.equal(blocking.verdict, 'fail');
+  // Отброшенные не исчезают бесследно: сводка называет их число.
+  assert.match(blocking.summary, /2 finding\(s\) below the P1 severity floor/);
+
+  // Ничего выше порога — работать не над чем, и отклонять нечего. Именно этот
+  // случай крутил цикл всю ночь: замечания были, но ни одного важнее P3.
+  const belowOnly = applySeverityFloor(
+    { ...review, findings: review.findings.filter((finding) => finding.severity !== 'P1') },
+    'P1',
+  );
+  assert.equal(belowOnly.verdict, 'pass');
+  assert.deepEqual(belowOnly.findings, []);
+
+  // Порог P3 пропускает всё: поведение до этой правки.
+  assert.equal(applySeverityFloor(review, 'P3').findings.length, 3);
+
+  // Незнакомая важность считается блокирующей: молча пропустить опаснее.
+  assert.equal(findingBlocks({ severity: 'critical' }, 'P1'), true);
 });

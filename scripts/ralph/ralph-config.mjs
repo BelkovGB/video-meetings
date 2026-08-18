@@ -265,6 +265,10 @@ function applyLoopDefaults(config) {
   // из очереди прогона. Меньше, чем у тестов: провал теста называет конкретную
   // строку, а отказ ревью — суждение, и повтор суждения сходится хуже.
   config.maxReviewFixAttempts ??= 3;
+  // Важность, ниже которой замечание не отклоняет работу и не заводит задачу.
+  // Оно остаётся в отчёте ревью и в комментарии к PR — меняется не видимость,
+  // а право останавливать цикл.
+  config.reviewSeverityFloor ??= 'P1';
   config.runtime ??= {};
   // Значения живут в ralph-process-runner.mjs: тот же набор действует до
   // loadConfig, и раздвоение дефолтов расходилось бы молча.
@@ -448,6 +452,9 @@ function validateScriptNames(config) {
     fail(
       'Поля "preflightScripts" и "validationScripts" должны быть массивами безопасных имён npm scripts.',
     );
+  }
+  if (!['P0', 'P1', 'P2', 'P3'].includes(config.reviewSeverityFloor)) {
+    fail('Поле "reviewSeverityFloor" должно быть одним из: P0, P1, P2, P3.');
   }
   if (typeof config.scopedValidation !== 'boolean') {
     fail('Поле "scopedValidation" должно быть true или false.');
