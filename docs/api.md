@@ -440,9 +440,23 @@ Successful requests return `201 Created`:
   "category": "video",
   "mimeType": "video/mp4",
   "sizeBytes": 734003200,
-  "uploadedAt": "2026-08-11T10:00:00.000Z"
+  "uploadedAt": "2026-08-11T10:00:00.000Z",
+  "uploadedBy": {
+    "displayName": "Ada Lovelace",
+    "avatar": { "updatedAt": "2026-08-11T09:00:00.000Z" }
+  }
 }
 ```
+
+`uploadedBy` is the uploader's safe identity, read from the user record on every
+request, so a renamed uploader or a replaced avatar shows the current value
+without rewriting stored files. It carries only a display name and the avatar
+state: email, the user ID, and every other private profile value stay out, and
+the avatar bytes remain private to their owner. `displayName` is `null` until the
+uploader sets one, `avatar` is `null` while the uploader has none, and
+`uploadedBy` itself is `null` when the uploading account no longer exists — the
+file stays listed and downloadable. Only the meeting owner and its participants
+ever see it; an outsider receives the same `404 Meeting not found` as before.
 
 Invalid multipart requests return `400` with `INVALID_MULTIPART_UPLOAD`; a
 missing file returns `400` with `MISSING_UPLOAD`; files larger than the limit

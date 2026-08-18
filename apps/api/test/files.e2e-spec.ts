@@ -12,11 +12,18 @@ import { PrismaService } from '../src/prisma/prisma.service';
 
 type Meeting = { id: string };
 type UserSession = { accessToken: string };
-type UploadedFile = { id: string };
+type UploadedFile = {
+  id: string;
+  uploadedBy: { displayName: string | null; avatar: { updatedAt: string } | null } | null;
+};
 
 const validPassword = 'secure-password-123';
 const validDate = '2026-08-03T10:00:00.000Z';
 const uploadRoot = join(tmpdir(), 'video-meetings-api-e2e-uploads');
+const validPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4z8AAAAMBAQCc479ZAAAAAElFTkSuQmCC',
+  'base64',
+);
 
 function createUniqueValue(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -82,6 +89,22 @@ describe('Meeting files (e2e)', () => {
     await prisma.meetingParticipant.create({
       data: { meetingId, userId: getUserId(participant.accessToken) },
     });
+  }
+
+  async function setDisplayName(user: UserSession, displayName: string): Promise<void> {
+    await request(app.getHttpServer())
+      .patch('/users/me')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ displayName })
+      .expect(200);
+  }
+
+  async function uploadAvatar(user: UserSession): Promise<void> {
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
   }
 
   async function uploadPdf(meetingId: string, owner: UserSession): Promise<UploadedFile> {
@@ -392,5 +415,128 @@ describe('Meeting files (e2e)', () => {
     await expect(
       prisma.meetingFile.findUnique({ where: { id: uploaded.id } }),
     ).resolves.not.toBeNull();
+  });
+
+  it('returns the uploader current display name and avatar state to owners and participants', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await setDisplayName(participant, 'Ada Lovelace');
+    await uploadAvatar(participant);
+
+    const uploaded = await uploadPdf(meeting.id, participant);
+
+    expect(uploaded.uploadedBy).toEqual({
+      displayName: 'Ada Lovelace',
+      avatar: { updatedAt: expect.any(String) },
+    });
+
+    for (const viewer of [owner, participant]) {
+      const listed = await request(app.getHttpServer())
+        .get(`/meetings/${meeting.id}/files`)
+        .set('Authorization', `Bearer ${viewer.accessToken}`)
+        .expect(200);
+
+      expect(listed.body).toEqual([
+        expect.objectContaining({
+          id: uploaded.id,
+          uploadedBy: { displayName: 'Ada Lovelace', avatar: { updatedAt: expect.any(String) } },
+        }),
+      ]);
+    }
+  });
+
+  it('never exposes the uploader email, identifier, or avatar storage details', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Grace Hopper');
+    await uploadAvatar(owner);
+    await uploadPdf(meeting.id, owner);
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const serialized = JSON.stringify(listed.body);
+    expect(serialized).not.toContain('@example.com');
+    expect(serialized).not.toContain(getUserId(owner.accessToken));
+    expect(Object.keys(listed.body[0].uploadedBy)).toEqual(['displayName', 'avatar']);
+    expect(Object.keys(listed.body[0].uploadedBy.avatar)).toEqual(['updatedAt']);
+  });
+
+  it('reports the display name the uploader has now, not the one stored at upload time', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Original Name');
+    const uploaded = await uploadPdf(meeting.id, owner);
+    await setDisplayName(owner, 'Renamed Owner');
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(listed.body).toEqual([
+      expect.objectContaining({
+        id: uploaded.id,
+        uploadedBy: { displayName: 'Renamed Owner', avatar: null },
+      }),
+    ]);
+  });
+
+  it('reports an absent avatar and an unset display name as null', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    await request(app.getHttpServer())
+      .delete('/users/me/avatar')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(listed.body).toEqual([
+      expect.objectContaining({ id: uploaded.id, uploadedBy: { displayName: null, avatar: null } }),
+    ]);
+  });
+
+  it('keeps listing a file whose uploader account is gone, without an uploader identity', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await setDisplayName(participant, 'Departing Participant');
+    const uploaded = await uploadPdf(meeting.id, participant);
+
+    await prisma.user.delete({ where: { id: getUserId(participant.accessToken) } });
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(listed.body).toEqual([expect.objectContaining({ id: uploaded.id, uploadedBy: null })]);
+  });
+
+  it('does not reveal the uploader identity to a user outside the meeting', async () => {
+    const owner = await registerUser();
+    const outsider = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Hidden Owner');
+    await uploadPdf(meeting.id, owner);
+
+    const denied = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`)
+      .expect(404);
+
+    expect(JSON.stringify(denied.body)).not.toContain('Hidden Owner');
   });
 });

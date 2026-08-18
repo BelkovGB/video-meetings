@@ -1,5 +1,11 @@
 import { MeetingFile, Prisma } from '@prisma/client';
 
+import {
+  UserIdentityResponse,
+  toUserIdentityResponse,
+  userIdentitySelect,
+} from '../../users/models/user-identity.response';
+
 export const meetingFileSelect = {
   id: true,
   originalName: true,
@@ -7,6 +13,7 @@ export const meetingFileSelect = {
   mimeType: true,
   sizeBytes: true,
   createdAt: true,
+  uploadedBy: { select: userIdentitySelect },
 } satisfies Prisma.MeetingFileSelect;
 
 export type MeetingFileResponse = {
@@ -16,6 +23,7 @@ export type MeetingFileResponse = {
   mimeType: string;
   sizeBytes: number;
   uploadedAt: Date;
+  uploadedBy: UserIdentityResponse | null;
 };
 
 type SelectedMeetingFile = Prisma.MeetingFileGetPayload<{ select: typeof meetingFileSelect }>;
@@ -28,5 +36,6 @@ export function toMeetingFileResponse(file: SelectedMeetingFile): MeetingFileRes
     mimeType: file.mimeType,
     sizeBytes: file.sizeBytes,
     uploadedAt: file.createdAt,
+    uploadedBy: toUserIdentityResponse(file.uploadedBy),
   };
 }
