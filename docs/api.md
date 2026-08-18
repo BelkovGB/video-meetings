@@ -26,6 +26,30 @@ JSON except for the multipart file-upload endpoint.
 
 `UsersModule` is an internal API module and does not expose HTTP routes.
 
+## Request validation errors
+
+Any endpoint that rejects a request body because it broke a DTO rule answers
+with the same shape:
+
+```json
+{
+  "statusCode": 400,
+  "message": ["displayName must contain between 1 and 100 Unicode characters"],
+  "error": "Bad Request",
+  "code": "VALIDATION_FAILED",
+  "fields": ["displayName"]
+}
+```
+
+`message` is English prose for developers and is free to be reworded. A client
+that shows its own text routes the failure by `code` and `fields`. A property of a
+nested object is named by its dotted path, as in `parent.child`.
+
+Rejections raised by a handler, a service or a guard instead of by validation
+carry only the keys that code sets, usually just `{"message": …, "code": …}`.
+Neither `statusCode` nor `error` is guaranteed outside the shape above, so route
+those failures by `code` and the HTTP status alone.
+
 ## Authentication
 
 Create an account or log in to obtain a JWT access token.
@@ -177,13 +201,48 @@ returns `400 Bad Request`; the password and the caller session remain valid.
 
 Password-change attempts are limited to five per account in fifteen minutes and
 thirty per client IP per minute. A rejected excess attempt returns `429 Too Many
-Requests` with `Retry-After`; it does not change the password or revoke the
-caller session.
+Requests`; it does not change the password or revoke the caller session. The
+wait is carried twice: in the `Retry-After` header and in the `retryAfterSeconds`
+body field, both holding the number of whole seconds until the relevant window
+resets.
 
-On success, the password replacement and revocation of the calling JWT session
-are atomic. That JWT can no longer access protected routes, while the user's
-other existing sessions remain valid. Passwords and password hashes are never
-included in responses or application logs.
+```json
+{
+  "statusCode": 429,
+  "message": "Too many password-change attempts. Please try again later.",
+  "code": "PASSWORD_CHANGE_RATE_LIMITED",
+  "retryAfterSeconds": 900
+}
+```
+
+Browser clients read `retryAfterSeconds`, because the API exposes no custom
+response headers through CORS and `Retry-After` is therefore unreadable from
+page scripts. Dropping or renaming the field silently degrades the wait a client
+can show to a guess.
+
+These five codes are exhaustive for the `400` and `429` rejections of this
+endpoint, because `message` is English prose that a localized client must not
+parse. The `401` of a missing, legacy or revoked session and the `404` of a
+deleted account carry no `code`:
+
+| `code`                           | Status | Meaning                                             |
+| -------------------------------- | ------ | --------------------------------------------------- |
+| `VALIDATION_FAILED`              | 400    | A field broke a rule above; see request validation. |
+| `CURRENT_PASSWORD_INCORRECT`     | 400    | `currentPassword` does not match the account.       |
+| `NEW_PASSWORD_NOT_DIFFERENT`     | 400    | `newPassword` equals the current password.          |
+| `PASSWORD_CONFIRMATION_MISMATCH` | 400    | `confirmation` differs from `newPassword`.          |
+| `PASSWORD_CHANGE_RATE_LIMITED`   | 429    | The attempt limit above was exceeded.               |
+
+On success, the password replacement and revocation of the account's JWT
+sessions are atomic. Every session is revoked, not only the calling one: the
+usual reason to change a password is a suspected compromise, and the API offers
+no reset flow and no separate "sign out everywhere", so a token the user no
+longer holds could not otherwise be evicted. Each of those JWTs is refused on
+protected routes from the moment the change commits, and every device has to
+sign in again with the new password. A legacy token without `sid` is the one
+exception below: it has no session row, so it survives until it expires.
+Passwords and password hashes are never included in responses or application
+logs.
 
 ### JWT session migration rollout
 
@@ -193,14 +252,15 @@ without globally invalidating still-valid tokens issued before `sid` existed,
 the API accepts those legacy tokens by default (`ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true`).
 They continue to work on protected routes until their normal JWT expiry, but
 cannot call `POST /users/me/password`: that operation returns `401` and requires
-the user to sign in again, because a legacy token has no session row that can be
-selectively revoked.
+the user to sign in again, because a legacy token has no session row to revoke.
+For the same reason a password change cannot evict a legacy token held by
+someone else; that gap closes when the flag is turned off below.
 
 Keep this compatibility setting enabled for at least the maximum JWT lifetime
 (currently one hour) after deploying the version that starts issuing `sid`
 tokens. Then set `ACCEPT_LEGACY_JWT_WITHOUT_SESSION=false` and redeploy. From
-that point the guard rejects missing session IDs and all protected JWTs support
-selective current-session revocation.
+that point the guard rejects missing session IDs, and every protected JWT is
+backed by a session row that a password change revokes.
 
 ## Meetings
 

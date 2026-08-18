@@ -12,26 +12,38 @@ import {
   verifyAgentSkills,
 } from './ralph-config.mjs';
 import {
+  failingScriptOutput,
   formatFailureSummary,
   recoveryPrompt,
   summarizeCommandFailure,
   uniqueFailedTests,
 } from './ralph-failure-summary.mjs';
-import { alreadyFixedCommitFromAgent, linkedCommitForIssue } from './ralph-git.mjs';
+import { baseForNextSession, committedRecoveryPhases } from './ralph-loop.mjs';
+import {
+  alreadyFixedCommitFromAgent,
+  filesChangedBetween,
+  isAncestorCommit,
+  issueChangeInventory,
+  linkedCommitForIssue,
+  workingTreePaths,
+} from './ralph-git.mjs';
 import {
   issueBodyWithReviewContext,
+  issueBodyWithoutRalphMetadata,
   issueCompletionState,
   normalizeReviewResult,
+  reviewContextFromIssueBody,
 } from './ralph-issue-contract.mjs';
 import {
   createOrReopenReviewIssues,
+  groupFindingsIntoBatches,
   limitMilestoneReviewFindings,
   milestonePassReviewIsClean,
   milestoneReviewMarker,
   reviewFindingFingerprint,
   reviewFindingMarker,
 } from './ralph-milestone-review.mjs';
-import { verifyRepositoryWriteAccess } from './ralph-github-client.mjs';
+import { reopenIssueWithComment, verifyRepositoryWriteAccess } from './ralph-github-client.mjs';
 import { ralphConfigPath, withPatchedRalphConfig } from './ralph-test-support.mjs';
 
 test('finding fingerprint is stable for Unicode titles and changes with location', () => {
@@ -89,8 +101,14 @@ test('review findings create, reuse, and reopen milestone issues without duplica
     { verdict: 'fail', findings: [...findings, findings[0]] },
     {
       milestoneIssues: () => existing,
-      createReviewFindingIssue: (_config, _repository, _milestone, _pr, finding) => {
-        const issue = { number: 3, state: 'OPEN', body: reviewFindingMarker(pullRequest, finding) };
+      // Дублёр получает группу замечаний, а не одно: тело задачи несёт по
+      // маркеру на каждое, иначе дедупликация следующего раунда их не найдёт.
+      createReviewFindingIssue: (_config, _repository, _milestone, _pr, batch) => {
+        const issue = {
+          number: 3,
+          state: 'OPEN',
+          body: batch.map((finding) => reviewFindingMarker(pullRequest, finding)).join('\n'),
+        };
         created.push(issue.number);
         return issue;
       },
@@ -104,8 +122,45 @@ test('review findings create, reuse, and reopen milestone issues without duplica
     [1, 2, 3],
   );
   assert.deepEqual(created, [3]);
-  assert.deepEqual(updated, [1, 2, 1]);
+  // Повторно пришедшее замечание попадает в свою же группу, а не обрабатывается
+  // вторым проходом: раньше та же задача обновлялась дважды подряд.
+  assert.deepEqual(updated, [1, 2]);
   assert.deepEqual(reopened, [2]);
+});
+
+test('findings are batched by file and severity band, not one issue each', () => {
+  const findings = [
+    { severity: 'P1', title: 'Focus jumps', file: 'form.tsx', line: 106, body: 'a' },
+    { severity: 'P2', title: 'Empty password', file: 'form.tsx', line: 32, body: 'b' },
+    { severity: 'P3', title: 'Not announced', file: 'form.tsx', line: 241, body: 'c' },
+    { severity: 'P3', title: 'Baselines committed', file: 'spec.ts', line: 621, body: 'd' },
+  ];
+
+  const batches = groupFindingsIntoBatches(findings);
+
+  // Три задачи вместо четырёх: P2 и P3 одного файла чинятся за один заход.
+  assert.equal(batches.length, 3);
+  assert.deepEqual(
+    batches.map((batch) => batch.map((finding) => finding.title)),
+    [['Focus jumps'], ['Empty password', 'Not announced'], ['Baselines committed']],
+  );
+
+  // Полоса важности разделяет намеренно: задача закрывается целиком, и P3, не
+  // прошедший ревью, держал бы открытым уже исправленный P1.
+  assert.equal(batches[0][0].severity, 'P1');
+
+  // Размер ограничен, иначе задача перестаёт быть обозримой на ревью.
+  const many = Array.from({ length: 7 }, (_, index) => ({
+    severity: 'P3',
+    title: `finding ${index}`,
+    file: 'form.tsx',
+    line: index,
+    body: 'x',
+  }));
+  assert.deepEqual(
+    groupFindingsIntoBatches(many).map((batch) => batch.length),
+    [5, 2],
+  );
 });
 
 test('issue review context is replaced instead of growing on every retry', () => {
@@ -132,6 +187,175 @@ test('issue review context is replaced instead of growing on every retry', () =>
   assert.doesNotMatch(second, /First review|First finding/);
   assert.match(second, /Second review/);
   assert.equal(second.match(/ralph-issue-review-context:start/g)?.length, 1);
+});
+
+test('after a rejected review the retry is told the work is already committed', () => {
+  const commit = 'a'.repeat(40);
+  const prompt = recoveryPrompt({
+    phase: 'review-failed',
+    commit,
+    startingCommit: commit,
+    lastFailure: null,
+  });
+
+  assert.match(prompt, new RegExp(`HEAD уже содержит commit ${commit}`));
+  assert.match(prompt, /не переделывай реализацию заново/);
+  // Сбоя не было: обычная формулировка восстановления здесь врала бы.
+  assert.doesNotMatch(prompt, /исправь последний сбой/);
+  assert.doesNotMatch(prompt, /процесс завершился до фиксации результата/);
+
+  // Замечания в prompt не копируются: их несёт тело issue, которое и так
+  // подставляется целиком.
+  assert.doesNotMatch(prompt, /Location:/);
+});
+
+test('the failure excerpt comes from the script that failed, not the one before it', () => {
+  const output = [
+    'RALPH_VALIDATION_SCRIPT=test:e2e:api',
+    'PASS test/profile.e2e-spec.ts',
+    'Tests:       158 passed, 158 total',
+    'RALPH_VALIDATION_SCRIPT=test:e2e:web',
+    'Error: expect(page).toHaveURL(expected) failed',
+    '  1) [desktop-chromium] › e2e/profile.spec.ts:849:5 › resumed page returns to sign-in',
+  ].join('\n');
+
+  const scoped = failingScriptOutput(output, 'test:e2e:web');
+  assert.match(scoped, /toHaveURL/);
+  // Хвост предыдущего, успешного набора в отчёт попадать не должен: на реальном
+  // прогоне про упавший web-набор были показаны строки PASS от API.
+  assert.doesNotMatch(scoped, /158 passed/);
+  assert.doesNotMatch(scoped, /RALPH_VALIDATION_SCRIPT/);
+
+  // Маркеры разошлись с атрибуцией ошибки — показываем всё, а не чужой кусок.
+  assert.equal(failingScriptOutput(output, 'lint'), stripAnsiForTest(output));
+  assert.equal(failingScriptOutput('без маркеров', 'lint'), 'без маркеров');
+});
+
+function stripAnsiForTest(text) {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\[[0-9;]*m/g, '');
+}
+
+test('a branch that moved on is judged by ancestry, not by an exact HEAD match', () => {
+  const calls = [];
+  const run = (_name, args) => {
+    calls.push(args.join(' '));
+    return { status: args.includes('--is-ancestor') && args[2] === 'old' ? 0 : 1 };
+  };
+
+  // Коммит Ralph остался предком: ветка просто ушла вперёд, и продолжать можно.
+  assert.equal(isAncestorCommit('old', 'new', run), true);
+  assert.equal(calls.at(-1), 'merge-base --is-ancestor old new');
+
+  // Чужая история — не продолжение: здесь отказ остаётся правильным ответом.
+  assert.equal(isAncestorCommit('other', 'new', run), false);
+  // Отсутствующий commit не должен превращаться в вызов git с undefined.
+  assert.equal(isAncestorCommit(null, 'new', run), false);
+  assert.equal(isAncestorCommit('old', undefined, run), false);
+  assert.equal(calls.length, 2);
+});
+
+test('the moved-branch check tells apart untouched files from contested ones', () => {
+  const run = (_name, args) => {
+    if (args[0] === 'diff' && args[1] === '--name-only') {
+      return { status: 0, stdout: 'scripts/ralph/ralph-loop.mjs\nAGENTS.md' };
+    }
+    return { status: 1, stdout: '' };
+  };
+
+  // Оператор правил control plane, агент правит спеку: пересечения нет.
+  assert.deepEqual(filesChangedBetween('old', 'new', run), [
+    'scripts/ralph/ralph-loop.mjs',
+    'AGENTS.md',
+  ]);
+  // Недостижимая база — не список из одного пустого элемента, а null: вызвавший
+  // обязан отличить «ничего не изменилось» от «сравнить не удалось».
+  assert.equal(
+    filesChangedBetween('old', 'new', () => ({ status: 128, stdout: '' })),
+    null,
+  );
+});
+
+test('a rejected review never resumes without a new agent session', () => {
+  // На фазе review-failed commit существует, и попадание её в этот список
+  // означало бы бесконечный повтор того же ревью над тем же деревом.
+  assert.equal(committedRecoveryPhases.includes('review-failed'), false);
+  assert.deepEqual(committedRecoveryPhases, ['committed', 'pushed', 'reviewing', 'closing']);
+  // `closing` наступает после PASS: прогон, упавший на закрытии issue, обязан
+  // продолжиться без новой сессии агента, иначе работа делается заново.
+  assert.equal(committedRecoveryPhases.includes('closing'), true);
+});
+
+test('review context is separable from the issue body so the next review can be asked about it', () => {
+  const body = issueBodyWithReviewContext(
+    { body: 'Original requirements' },
+    {
+      summary: 'Review summary',
+      findings: [
+        { severity: 'P2', title: 'Missing guard', file: 'guard.ts', line: 7, body: 'Add it' },
+      ],
+    },
+  );
+
+  const findings = reviewContextFromIssueBody({ body });
+  assert.match(findings, /Missing guard/);
+  assert.doesNotMatch(findings, /ralph-issue-review-context/);
+  // Тело без метаданных не должно повторять тот же блок: иначе замечания
+  // приезжают в prompt дважды и оба раза без подписи.
+  assert.equal(issueBodyWithoutRalphMetadata({ body }), 'Original requirements');
+  assert.equal(reviewContextFromIssueBody({ body: 'Original requirements' }), null);
+});
+
+function inventoryRunner(commits) {
+  const calls = [];
+  const run = (_name, args) => {
+    calls.push(args.join(' '));
+    if (args[0] === 'log') return { status: 0, stdout: commits.join('\n') };
+    if (args[0] === 'rev-parse') return { status: 0, stdout: 'd'.repeat(40) };
+    if (args.includes('--name-status')) return { stdout: 'M\tapps/api/src/profile.ts' };
+    if (args.includes('--stat')) return { stdout: ' apps/api/src/profile.ts | 4 +++-' };
+    return { stdout: 'x'.repeat(70_000) };
+  };
+
+  return { calls, run };
+}
+
+test('the change inventory reads one commit through show and marks an oversized diff', () => {
+  const commit = 'a'.repeat(40);
+  const { calls, run } = inventoryRunner([commit]);
+
+  const inventory = issueChangeInventory({ number: 57 }, commit, { run });
+
+  assert.equal(inventory.truncated, true);
+  assert.equal(inventory.diff.length, 60_000);
+  assert.match(inventory.nameStatus, /apps\/api\/src\/profile\.ts/);
+  assert.deepEqual(inventory.commits, [commit]);
+  // У `git show` нет особого случая для корневого commit, в отличие от
+  // `commit^..commit`, поэтому одиночный commit читается именно так.
+  assert.equal(calls.filter((call) => call.startsWith('show --format=')).length, 3);
+  assert.ok(!calls.some((call) => call.startsWith('rev-parse')));
+  // Lockfile исключается только из построчного diff и остаётся в списке файлов.
+  assert.ok(calls.some((call) => call.includes(':(exclude)package-lock.json')));
+});
+
+test('a second iteration shows the issue commits only, not the range between them', () => {
+  const newest = 'b'.repeat(40);
+  const oldest = 'c'.repeat(40);
+  const { calls, run } = inventoryRunner([newest, oldest]);
+
+  const inventory = issueChangeInventory({ number: 57 }, newest, { run });
+
+  assert.deepEqual(inventory.commits, [newest, oldest]);
+  // Диапазон `oldest^..newest` втянул бы всё, что легло в ветку между ними:
+  // на #57 это 31 файл вместо четырёх, включая чужие правки control plane.
+  assert.ok(!calls.some((call) => call.startsWith('rev-parse')));
+  assert.ok(!calls.some((call) => call.startsWith('diff ')));
+  // Оба commit перечислены в хронологическом порядке в одном вызове.
+  assert.equal(
+    calls.filter((call) => call.includes(`${oldest} ${newest}`)).length,
+    3,
+    'ожидались три вызова show с обоими commit',
+  );
 });
 
 test('a completion marker left by an older Ralph is read and then stripped', () => {
@@ -617,4 +841,161 @@ test('the recovery prompt carries the summary and tells the agent to rerun only 
   const withoutFailure = recoveryPrompt({});
   assert.match(withoutFailure, /процесс завершился до фиксации результата/);
   assert.equal(/Сначала повтори только упавшие проверки/.test(withoutFailure), false);
+});
+
+test('потерянный комментарий не роняет цикл, а незакрытая issue роняет', () => {
+  const failing = () => {
+    const error = new Error('gh api: HTTP 503');
+    throw error;
+  };
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+
+  try {
+    // Публикация недоступна: 17 августа именно на ней обрывался цикл, уже
+    // сделавший работу, — до пятнадцати минут за раз.
+    reopenIssueWithComment('owner/repo', { number: 82 }, 'Findings', {
+      issueState: () => 'OPEN',
+      patchIssue: () => ({}),
+      postComment: failing,
+    });
+
+    // Переоткрытие недоступно: закрытая issue выпадет из очереди, и расхождение
+    // с сохранённым состоянием обязано остановить прогон.
+    assert.throws(
+      () =>
+        reopenIssueWithComment('owner/repo', { number: 82 }, 'Findings', {
+          issueState: () => 'CLOSED',
+          patchIssue: failing,
+          postComment: () => {},
+        }),
+      /503/,
+    );
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /#82/);
+  assert.match(errors[0], /потерян только комментарий/);
+});
+
+test('после отказа ревью база следующей сессии — HEAD, а не commit issue', () => {
+  const commit = 'a'.repeat(40);
+  const head = 'b'.repeat(40);
+
+  // Обычный случай: HEAD и есть commit issue.
+  assert.equal(
+    baseForNextSession(commit, {
+      run: () => ({ status: 0, stdout: commit }),
+      isAncestorCommit: () => true,
+    }),
+    commit,
+  );
+
+  // Ветка ушла вперёд, работа issue в её истории. Так было 17 августа: между
+  // коммитом issue и HEAD легли правки Ralph, и следующая итерация потребовала
+  // HEAD, отставший на два коммита.
+  assert.equal(
+    baseForNextSession(commit, {
+      run: () => ({ status: 0, stdout: head }),
+      isAncestorCommit: () => true,
+    }),
+    head,
+  );
+
+  // История разошлась: перенос базы вперёд потерял бы работу issue.
+  assert.equal(
+    baseForNextSession(commit, {
+      run: () => ({ status: 0, stdout: head }),
+      isAncestorCommit: () => false,
+    }),
+    commit,
+  );
+});
+
+test('разбор git status переживает обрезку пробелов и переименование', () => {
+  // `run` обрезает пробелы по краям вывода, поэтому первая строка приходит без
+  // ведущего пробела статуса. Срез на три символа съедал первый символ её пути.
+  const raw = ' M apps/web/app/profile/password-change-form.tsx\n M apps/web/e2e/profile.spec.ts\n';
+
+  assert.deepEqual(workingTreePaths(raw), workingTreePaths(raw.trim()));
+  assert.deepEqual(workingTreePaths(raw.trim()), [
+    'apps/web/app/profile/password-change-form.tsx',
+    'apps/web/e2e/profile.spec.ts',
+  ]);
+
+  // Непрослеженные файлы и переименования: из `R old -> new` нужен новый путь.
+  assert.deepEqual(workingTreePaths('?? design/videoMeeting.pen\nR  a.ts -> b.ts'), [
+    'design/videoMeeting.pen',
+    'b.ts',
+  ]);
+});
+
+test('пределы повторов разведены по цене одной попытки', () => {
+  const original = JSON.parse(readFileSync(ralphConfigPath, 'utf8'));
+  const runtime = (patch) => ({ runtime: { ...original.runtime, ...patch } });
+
+  // Повтор сетевой команды стоит секунд ожидания: трёх попыток с паузами 2 и 4
+  // секунды не хватило на мигающий GitHub, и это стоило трёх прогонов, каждый
+  // из которых уже сделал всю дорогую работу.
+  withPatchedRalphConfig(runtime({ networkRetryAttempts: 30 }), (config) => {
+    assert.equal(config.runtime.networkRetryAttempts, 30);
+  });
+  assert.throws(
+    () =>
+      withPatchedRalphConfig(runtime({ networkRetryAttempts: 61 }), () => {
+        throw new Error('loadConfig должен был отказать');
+      }),
+    /от 1 до 60/,
+  );
+
+  // Повтор ревью — целая сессия агента: минуты и сотни тысяч токенов за
+  // попытку, поэтому предел остаётся жёстким.
+  assert.throws(
+    () =>
+      withPatchedRalphConfig(runtime({ reviewRetryAttempts: 6 }), () => {
+        throw new Error('loadConfig должен был отказать');
+      }),
+    /от 1 до 5/,
+  );
+});
+
+test('повторное создание задачи не заводит дубликат после дошедшего запроса', () => {
+  const pullRequest = { number: 77, headRefOid: 'head-1' };
+  const finding = { severity: 'P2', title: 'Notice lies', body: 'x', file: 'form.tsx', line: 220 };
+  const milestone = { number: 8, title: 'Phase 8' };
+  const created = [];
+
+  // Первый POST дошёл, но ответ потерялся: повтор обязан найти уже созданную
+  // задачу по marker, а не завести вторую с тем же замечанием.
+  const landed = {
+    number: 85,
+    state: 'OPEN',
+    body: reviewFindingMarker(pullRequest, finding),
+  };
+
+  const queued = createOrReopenReviewIssues(
+    { milestone: 'Phase 8' },
+    'owner/repository',
+    milestone,
+    pullRequest,
+    { verdict: 'fail', findings: [finding] },
+    {
+      milestoneIssues: () => [landed],
+      createReviewFindingIssue: () => {
+        created.push('POST');
+        return { number: 999, state: 'OPEN', body: '' };
+      },
+      updateReviewFindingIssue: () => {},
+      reopenReviewFindingIssue: () => {},
+    },
+  );
+
+  assert.deepEqual(created, []);
+  assert.deepEqual(
+    queued.map((issue) => issue.number),
+    [85],
+  );
 });

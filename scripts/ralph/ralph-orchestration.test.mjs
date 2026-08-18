@@ -758,3 +758,27 @@ test('continuous loop rejects FAIL without queued recovery issues', async () => 
 
   assert.equal(milestoneCloses, 0);
 });
+
+test('отложенная issue уходит из очереди прогона и не съедает бюджет целиком', async () => {
+  // На issue #84 ревью отклоняло работу десять раз подряд и выбрало весь бюджет
+  // фазы: около двух часов и порядка девяти миллионов токенов на одну задачу,
+  // причём число замечаний скакало и ни разу не дошло до нуля.
+  const attempts = [];
+  const stateStore = persistentState();
+
+  await runContinuousLoop(
+    context({ stateStore, config: { maxIterations: 20 } }),
+    actions({
+      openIssues: () => [{ number: 84, title: 'Отклоняется всегда' }],
+      runAgentOnIssue: async (_config, _repository, issue) => {
+        attempts.push(issue.number);
+        // Третий отказ подряд помечает issue отложенной.
+        return attempts.length >= 3 ? { completed: false, parked: true } : { completed: false };
+      },
+    }),
+  );
+
+  // Три захода, а не двадцать: остаток бюджета остался нетронутым.
+  assert.equal(attempts.length, 3);
+  assert.ok(stateStore.iterationsUsed < 20, 'бюджет не должен быть исчерпан');
+});

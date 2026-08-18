@@ -16,7 +16,10 @@ import {
 import {
   isRalphInfrastructureIssue,
   isRalphInfrastructurePath,
+  applySeverityFloor,
+  findingBlocks,
   scopeMilestoneReviewToProduct,
+  scopeReviewToProduct,
 } from './ralph-scope.mjs';
 
 test('implementation prompt delegates full validation to the outer orchestrator', () => {
@@ -50,6 +53,7 @@ test('implementation prompt delegates full validation to the outer orchestrator'
 
 test('issue review prompt requires one exhaustive in-scope audit', () => {
   const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
     {
       number: 62,
       title: 'Rate-limit authentication',
@@ -62,10 +66,194 @@ test('issue review prompt requires one exhaustive in-scope audit', () => {
   assert.match(prompt, /Return every distinct, actionable finding/);
   assert.match(prompt, /public API response contracts, documentation, configuration/);
   assert.match(prompt, /Discover documentation paths/i);
-  assert.match(prompt, /rg --files docs/);
+  // Роль запущена с `--tools Read,Glob,Grep`, поэтому поиск описан через Glob:
+  // `rg` этому ревьюеру недоступен так же, как и PowerShell.
+  assert.match(prompt, /docs\/\*\*\/\*\.md/);
+  assert.doesNotMatch(prompt, /rg --files/);
   assert.match(prompt, /guess conventional paths such as `docs\/README\.md`/i);
   assert.match(prompt, /`docs\/api\.md`.*`docs\/api-architecture\.md`/);
   assert.match(prompt, /Ignore unrelated pre-existing debt/);
+});
+
+test('issue review prompt carries the change set the reviewer cannot obtain itself', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude', validationScripts: ['lint', 'build', 'test:e2e:api'] },
+    { number: 57, title: 'End the browser session', body: 'Outcome text.' },
+    'b'.repeat(40),
+    {
+      changes: {
+        commit: 'b'.repeat(40),
+        stat: ' apps/web/app/login/page.tsx | 12 ++++--',
+        nameStatus: 'M\tapps/web/app/login/page.tsx',
+        diff: '--- a/apps/web/app/login/page.tsx\n+++ b/apps/web/app/login/page.tsx',
+        truncated: false,
+      },
+      previousFindings: '- **P2 — Missing guard** (apps/web/use-meeting-files.ts:36)',
+    },
+  );
+
+  assert.match(prompt, /M\tapps\/web\/app\/login\/page\.tsx/);
+  assert.match(prompt, /```diff/);
+  assert.match(prompt, /complete set of changes made for this issue/);
+  assert.match(prompt, /already ran lint, build, test:e2e:api/);
+  assert.match(prompt, /Do not rerun them/);
+  // Замечания прошлого ревью обязаны быть подписаны: внутри тела issue они
+  // неотличимы от критериев готовности, и требовать их проверки бессмысленно.
+  assert.match(prompt, /previous review of this issue reported the findings below/);
+  assert.match(prompt, /P2 — Missing guard/);
+  assert.doesNotMatch(prompt, /truncated/);
+});
+
+test('a truncated change set says so instead of looking complete', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 58, title: 'Large change', body: 'Outcome text.' },
+    'c'.repeat(40),
+    {
+      changes: {
+        commit: 'c'.repeat(40),
+        stat: ' 40 files changed',
+        nameStatus: 'M\tone.ts',
+        diff: '--- a/one.ts',
+        truncated: true,
+      },
+    },
+  );
+
+  assert.match(prompt, /The diff above is truncated/);
+  // Набор validationScripts не задан: утверждать, что проверки прошли, нечем.
+  assert.doesNotMatch(prompt, /already ran/);
+  assert.doesNotMatch(prompt, /previous review/);
+});
+
+test('the audit list drops directions that no changed file belongs to', () => {
+  const specOnly = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 57, title: 'Cover the keyboard path', body: 'Outcome text.' },
+    'a'.repeat(40),
+    {
+      changes: {
+        commit: 'a'.repeat(40),
+        paths: ['apps/web/e2e/profile.spec.ts'],
+        stat: ' 1 file changed',
+        nameStatus: 'M\tapps/web/e2e/profile.spec.ts',
+        diff: '--- a/apps/web/e2e/profile.spec.ts',
+        truncated: false,
+      },
+    },
+  );
+
+  assert.match(specOnly, /no changed file belongs to any other/);
+  assert.match(specOnly, /tests assert real externally observable behaviour/);
+  // Ни одного файла контрактов, миграций или деплоя в изменении нет: думать о
+  // них — та самая трата, ради которой список и сузили.
+  assert.doesNotMatch(specOnly, /migrations/);
+  assert.doesNotMatch(specOnly, /deployment/);
+  assert.doesNotMatch(specOnly, /public API response contracts/);
+  // Общие направления остаются всегда.
+  assert.match(specOnly, /every requirement and definition-of-done item/);
+
+  const apiChange = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 58, title: 'Change the contract', body: 'Outcome text.' },
+    'b'.repeat(40),
+    {
+      changes: {
+        commit: 'b'.repeat(40),
+        paths: ['apps/api/src/profile/profile.controller.ts', 'apps/api/prisma/schema.prisma'],
+        stat: ' 2 files changed',
+        nameStatus: 'M\tapps/api/src/profile/profile.controller.ts',
+        diff: '--- a/apps/api/src/profile/profile.controller.ts',
+        truncated: false,
+      },
+    },
+  );
+
+  assert.match(apiChange, /public API response contracts/);
+  assert.match(apiChange, /database schema and migrations/);
+  assert.doesNotMatch(apiChange, /tests assert real externally observable/);
+});
+
+test('without a file list the audit keeps every direction', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 59, title: 'No inventory', body: 'Outcome text.' },
+    'c'.repeat(40),
+  );
+
+  // Не зная файлов, сузить область не на чем, и молчаливое сокращение было бы
+  // потерей проверки.
+  assert.match(prompt, /Audit all of these areas:/);
+  assert.match(prompt, /migrations, and deployment\/runtime assumptions/);
+});
+
+test('a repeat review is told what the previous one already cleared', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 57, title: 'Second pass', body: 'Outcome text.' },
+    'd'.repeat(40),
+    {
+      changes: {
+        commit: 'd'.repeat(40),
+        commits: ['d'.repeat(40), 'e'.repeat(40)],
+        paths: ['apps/web/e2e/profile.spec.ts'],
+        stat: ' 1 file changed',
+        nameStatus: 'M\tapps/web/e2e/profile.spec.ts',
+        diff: '--- a/apps/web/e2e/profile.spec.ts',
+        truncated: false,
+      },
+      previousReview: { commit: 'e'.repeat(40), newCommits: ['d'.repeat(40)] },
+    },
+  );
+
+  assert.match(prompt, new RegExp(`previous review audited commit ${'e'.repeat(40)} in full`));
+  assert.match(prompt, new RegExp(`added commit ${'d'.repeat(40)}`));
+  assert.match(prompt, /Do not re-audit unchanged code that the previous review already cleared/);
+});
+
+test('a first review is not told anything was already cleared', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 60, title: 'First pass', body: 'Outcome text.' },
+    'f'.repeat(40),
+    { changes: { commit: 'f'.repeat(40), paths: ['a.ts'], stat: '', nameStatus: '', diff: '' } },
+  );
+
+  assert.doesNotMatch(prompt, /already cleared/);
+  assert.doesNotMatch(prompt, /audited commit/);
+});
+
+test('a second iteration names every commit of the issue, not just the last', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'claude' },
+    { number: 57, title: 'Second pass', body: 'Outcome text.' },
+    'e'.repeat(40),
+    {
+      changes: {
+        commit: 'e'.repeat(40),
+        commits: ['e'.repeat(40), 'f'.repeat(40)],
+        stat: ' two.ts | 2 +-',
+        nameStatus: 'M\ttwo.ts',
+        diff: '--- a/two.ts',
+        truncated: false,
+      },
+    },
+  );
+
+  assert.match(prompt, /across the 2 commits of this issue/);
+  assert.match(prompt, /complete set of changes made for this issue/);
+  assert.doesNotMatch(prompt, /exactly one commit/);
+});
+
+test('without a change set the prompt keeps its previous shape', () => {
+  const prompt = buildIndependentReviewPrompt(
+    { agentCli: 'codex' },
+    { number: 59, title: 'No inventory', body: 'Outcome text.' },
+    'd'.repeat(40),
+  );
+
+  assert.doesNotMatch(prompt, /```diff/);
+  assert.match(prompt, /Do not stop after the first problem/);
 });
 
 test('milestone review stays within milestone scope and trusts completed validations', () => {
@@ -83,11 +271,43 @@ test('milestone review stays within milestone scope and trusts completed validat
   assert.match(prompt, /diff against master as evidence, not as the definition of scope/);
   assert.match(prompt, /Do not rerun npm, npx, builds, linters, type checks, tests/);
   assert.match(prompt, /every configured preflight and validation script successfully/);
-  assert.match(prompt, /Never report findings for \.agents\/\*\*, scripts\/ralph\/\*\*/);
+  // Запрет читать, а не только сообщать: control plane занимает бо́льшую часть
+  // диффа ветки, и открытый файл оплачивается независимо от того, что ревьюер
+  // потом отбросит. AGENTS.md при этом читать нужно — там конвенции продукта.
+  assert.match(prompt, /Do not open \.agents\/\*\* or scripts\/ralph\/\*\*, and never report/);
+  assert.match(prompt, /Do read AGENTS\.md/);
+  // Без инвентаря prompt обязан остаться прежним: ревью milestone может идти по
+  // ветке, базу которой git не разрешил, и тогда инвентаря просто нет.
+  assert.doesNotMatch(prompt, /```diff/);
   assert.match(prompt, /Discover documentation paths/i);
   assert.match(prompt, /rg --files docs/);
   assert.match(prompt, /guess conventional paths such as `docs\/README\.md`/i);
   assert.match(prompt, /`docs\/api\.md`.*`docs\/api-architecture\.md`/);
+});
+
+test('the milestone reviewer is shown the branch diff without the control plane', () => {
+  const prompt = buildMilestoneReviewPrompt(
+    { agentCli: 'claude', baseBranch: 'master' },
+    { title: 'Phase 8', description: 'Password change screen.' },
+    { number: 61, url: 'https://example.test/pull/61', headRefOid: 'a'.repeat(40) },
+    {
+      changes: {
+        range: 'origin/master...' + 'a'.repeat(40),
+        commits: 'abc1234 feat: end the browser session',
+        stat: ' apps/api/src/profile.service.ts | 8 ++++',
+        nameStatus: 'M\tapps/api/src/profile.service.ts',
+        diff: '--- a/apps/api/src/profile.service.ts',
+        truncated: false,
+      },
+    },
+  );
+
+  // Диапазон с тремя точками: сравнение идёт с точкой расхождения, иначе в diff
+  // попадёт всё, что уехало в базовую ветку после ответвления.
+  assert.match(prompt, /origin\/master\.\.\.a{40}/);
+  assert.match(prompt, /abc1234 feat: end the browser session/);
+  assert.match(prompt, /```diff/);
+  assert.match(prompt, /control plane excluded/);
 });
 
 test('Ralph infrastructure is never treated as product work', () => {
@@ -258,27 +478,43 @@ test('the operator manual states that it is not the agent contract', () => {
   assert.match(operatorDoc, /\.agents\/ralph-rules\.md/);
 });
 
-test('every generated prompt teaches -LiteralPath for Next.js route segments', () => {
+test('every generated prompt protects Next.js route segments with the tools it actually has', () => {
   const rules = readFileSync(ralphRulesPath, 'utf8');
-  const reviewPrompt = buildIndependentReviewPrompt(
-    { number: 71, title: 'Issue', body: 'Body.' },
-    'a'.repeat(40),
-  );
-  const milestonePrompt = buildMilestoneReviewPrompt(
-    { baseBranch: 'master', branch: 'features/profile-phase-8' },
-    { title: 'Phase 8', description: 'Description.' },
-    { number: 61, url: 'https://example/61', headRefOid: 'b'.repeat(40) },
-  );
+  const prompts = (config) => [
+    [
+      'issue review',
+      buildIndependentReviewPrompt(
+        config,
+        { number: 71, title: 'Issue', body: 'Body.' },
+        'a'.repeat(40),
+      ),
+    ],
+    [
+      'milestone review',
+      buildMilestoneReviewPrompt(
+        { ...config, baseBranch: 'master', branch: 'features/profile-phase-8' },
+        { title: 'Phase 8', description: 'Description.' },
+        { number: 61, url: 'https://example/61', headRefOid: 'b'.repeat(40) },
+      ),
+    ],
+  ];
 
-  // The rule used to reach the implementation session only; both reviewers run
-  // the same PowerShell cmdlets against the same repository.
-  for (const [label, text] of [
-    ['rules', rules],
-    ['issue review', reviewPrompt],
-    ['milestone review', milestonePrompt],
-  ]) {
+  // Сегмент обязан быть назван везде: это единственное место, где его вообще
+  // объясняют. А вот способ его прочитать у ревьюеров разный, и подсказка
+  // обязана совпадать с тем набором инструментов, который роль получила.
+  for (const [label, text] of [['rules', rules], ...prompts({ agentCli: 'codex' })]) {
     assert.match(text, /-LiteralPath/, `${label} must require -LiteralPath`);
     assert.match(text, /\[id\]/, `${label} must name the wildcard-prone segment`);
+  }
+
+  // Claude-ревьюер запускается с `--tools Read,Glob,Grep` и Bash не имеет:
+  // инструкция про PowerShell была бы неисполнима, а защита от скобок —
+  // отсутствующей.
+  for (const [label, text] of prompts({ agentCli: 'claude' })) {
+    assert.match(text, /\[id\]/, `${label} must name the wildcard-prone segment`);
+    assert.doesNotMatch(text, /-LiteralPath|rg -n/, `${label} must not prescribe a shell`);
+    assert.match(text, /Grep, Glob and Read/, `${label} must name the available tools`);
+    assert.match(text, /character class/, `${label} must explain the bracket hazard`);
   }
 
   assert.match(rules, /Get-ChildItem/);
@@ -323,4 +559,86 @@ test('a Next.js route segment is only readable through -LiteralPath on Windows',
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('замечания к control plane выбрасываются из ревью issue, а не только milestone', () => {
+  // Агенту запрещено править .agents/**, scripts/ralph/** и AGENTS.md, поэтому
+  // ревью, требующее этого, невыполнимо: следующая сессия вернёт тот же
+  // результат, ревью — то же замечание. На issue #84 круг повторился десять раз.
+  const scoped = scopeReviewToProduct(
+    {
+      verdict: 'fail',
+      summary: 'Four findings.',
+      findings: [
+        {
+          severity: 'P2',
+          file: '.agents/ralph.config.json',
+          line: 14,
+          title: 'Budget not reverted',
+        },
+        { severity: 'P2', file: 'apps/web/AGENTS.md', line: 34, title: 'Rule not updated' },
+        {
+          severity: 'P3',
+          file: 'apps/web/e2e/visual-baselines.ts',
+          line: 37,
+          title: 'Textual scan',
+        },
+      ],
+    },
+    'Review issue #84',
+  );
+
+  assert.deepEqual(
+    scoped.findings.map((finding) => finding.file),
+    ['apps/web/e2e/visual-baselines.ts'],
+  );
+  assert.equal(scoped.verdict, 'fail');
+
+  // Когда продуктовых замечаний не осталось, отклонять нечего.
+  const infrastructureOnly = scopeReviewToProduct(
+    {
+      verdict: 'fail',
+      summary: 'One finding.',
+      findings: [{ severity: 'P2', file: 'scripts/ralph/ralph-loop.mjs', line: 1, title: 'x' }],
+    },
+    'Review issue #84',
+  );
+  assert.equal(infrastructureOnly.verdict, 'pass');
+  assert.deepEqual(infrastructureOnly.findings, []);
+});
+
+test('порог важности убирает право останавливать работу, но не сам отчёт', () => {
+  const review = {
+    verdict: 'fail',
+    summary: 'Three findings.',
+    findings: [
+      { severity: 'P1', file: 'a.ts', line: 1, title: 'Real defect' },
+      { severity: 'P3', file: 'b.ts', line: 2, title: 'Missing coverage' },
+      { severity: 'P2', file: 'c.ts', line: 3, title: 'Hardcoded number' },
+    ],
+  };
+
+  const blocking = applySeverityFloor(review, 'P1', 'Review issue #86');
+  assert.deepEqual(
+    blocking.findings.map((finding) => finding.severity),
+    ['P1'],
+  );
+  assert.equal(blocking.verdict, 'fail');
+  // Отброшенные не исчезают бесследно: сводка называет их число.
+  assert.match(blocking.summary, /2 finding\(s\) below the P1 severity floor/);
+
+  // Ничего выше порога — работать не над чем, и отклонять нечего. Именно этот
+  // случай крутил цикл всю ночь: замечания были, но ни одного важнее P3.
+  const belowOnly = applySeverityFloor(
+    { ...review, findings: review.findings.filter((finding) => finding.severity !== 'P1') },
+    'P1',
+  );
+  assert.equal(belowOnly.verdict, 'pass');
+  assert.deepEqual(belowOnly.findings, []);
+
+  // Порог P3 пропускает всё: поведение до этой правки.
+  assert.equal(applySeverityFloor(review, 'P3').findings.length, 3);
+
+  // Незнакомая важность считается блокирующей: молча пропустить опаснее.
+  assert.equal(findingBlocks({ severity: 'critical' }, 'P1'), true);
 });

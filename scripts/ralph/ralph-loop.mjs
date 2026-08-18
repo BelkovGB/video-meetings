@@ -7,7 +7,12 @@ import { fileURLToPath } from 'node:url';
 
 import { acquireRunLock, initializePersistentLog, readJsonFile } from './ralph-runtime.mjs';
 
-import { fail, isRalphInfrastructureIssue } from './ralph-scope.mjs';
+import {
+  applySeverityFloor,
+  fail,
+  isRalphInfrastructureIssue,
+  scopeReviewToProduct,
+} from './ralph-scope.mjs';
 
 import { run, runNetwork } from './ralph-process-runner.mjs';
 
@@ -25,6 +30,7 @@ import {
 import {
   configForPhase,
   configPath,
+  controlPlaneSnapshot,
   loadConfig,
   loadRalphRules,
   parseJson,
@@ -41,6 +47,13 @@ import {
 import { clearedFailure, recordedFailure, recoveryPrompt } from './ralph-failure-summary.mjs';
 
 import {
+  beginIssueMetrics,
+  finishIssueMetrics,
+  formatIssueMetrics,
+  startStage,
+} from './ralph-run-metrics.mjs';
+
+import {
   assertTrustedControlFilesUnchanged,
   runConfiguredValidation,
   runPreflight,
@@ -51,6 +64,10 @@ import {
   commitMessageFromAgent,
   commitStagedChanges,
   commitTrailerForIssue,
+  filesChangedBetween,
+  isAncestorCommit,
+  issueChangeInventory,
+  issueChangedPaths,
   linkedCommitForIssue,
   pushBranchAndVerify,
   reconcileStateAfterCrash,
@@ -58,6 +75,7 @@ import {
   verifyBaseHistory,
   verifyPushedHead,
   verifyRepository,
+  workingTreePaths,
 } from './ralph-git.mjs';
 
 import {
@@ -78,7 +96,9 @@ import {
   assertTrustedIssue,
   clearIssueCompletionState,
   formatReviewComment,
+  issueBodyWithoutRalphMetadata,
   normalizeReviewResult,
+  reviewContextFromIssueBody,
   updateIssueReviewContext,
 } from './ralph-issue-contract.mjs';
 
@@ -115,6 +135,61 @@ function assertValidationLeftTree(expected, message) {
   if (workingTreeStatus() !== expected) fail(message);
 }
 
+// Причина незавершённой issue берётся из результата, а не предполагается:
+// остановка после упавшей валидации сообщала об отказе ревью, до которого цикл
+// не дошёл, и отправляла оператора искать замечания, которых нет. Классификация
+// нужна и сообщению оператору, и записи метрик, поэтому живёт в одном месте.
+const incompleteIssueOutcomes = [
+  ['agentFailed', 'agent-failed', 'сессия агента не завершилась'],
+  ['validationFailed', 'validation-failed', 'валидация не прошла'],
+  ['reviewFailed', 'review-failed', 'независимое ревью вернуло замечания'],
+];
+
+export function incompleteIssueOutcome(result) {
+  const [flag, outcome, reason] =
+    incompleteIssueOutcomes.find(([field]) => result?.[field]) ?? incompleteIssueOutcomes.at(-1);
+
+  return { outcome, reason, runOutcome: { [flag]: true } };
+}
+
+/**
+ * Фазы, с которых issue продолжается без новой сессии агента: работа уже
+ * закоммичена, осталось её протолкнуть и отревьюить.
+ *
+ * `review-failed` сюда не входит и входить не должен. На этой фазе commit тоже
+ * существует, но ревью его уже отклонило: продолжение без сессии агента
+ * означало бы бесконечный повтор того же ревью над тем же деревом.
+ */
+export const committedRecoveryPhases = ['committed', 'pushed', 'reviewing', 'closing'];
+
+/**
+ * Фаза между вердиктом PASS и закрытием issue.
+ *
+ * Пишется только после успешного ревью, поэтому отличает «этот commit проверен
+ * и признан годным» от `review-failed`, где `reviewedCommit` тот же, а вердикт
+ * противоположный.
+ */
+const reviewPassedPhase = 'closing';
+
+function reportIssueMetrics(outcome) {
+  const record = finishIssueMetrics(outcome);
+  if (record) console.log(formatIssueMetrics(record));
+}
+
+// Валидация вызывается из трёх мест lifecycle, и замер, поставленный только в
+// одном, занизил бы стоимость issue молча. Обёртка одна на все три.
+function measuredValidation(runValidation) {
+  const endStage = startStage('validation');
+  try {
+    const outcome = runValidation();
+    endStage({ attested: outcome?.attested === true });
+    return outcome;
+  } catch (error) {
+    endStage({ failed: true });
+    throw error;
+  }
+}
+
 function verifyTools(config) {
   run('git', ['--version']);
   run('gh', ['--version']);
@@ -131,6 +206,27 @@ function verifyTools(config) {
 // Локальное ревью commit одной issue отдельной сессией агента
 // -----------------------------------------------------------------------------
 
+/**
+ * Коммит, уже проверенный прошлым ревью целиком, и то, что добавилось после.
+ *
+ * Возвращает null на первом ревью issue и на повторном ревью того же самого
+ * коммита: в обоих случаях сокращать нечего.
+ */
+function previouslyAuditedCommit(changes, commit) {
+  const reviewedCommit = activeStateStore()?.issue?.reviewedCommit;
+  if (!reviewedCommit || reviewedCommit === commit) return null;
+  if (!isAncestorCommit(reviewedCommit, commit)) return null;
+
+  return {
+    commit: reviewedCommit,
+    // Проверенными считаются только те коммиты issue, что были достижимы из
+    // уже отревьюенного: остальные добавились после и требуют полного разбора.
+    newCommits: (changes?.commits ?? []).filter(
+      (candidate) => !isAncestorCommit(candidate, reviewedCommit),
+    ),
+  };
+}
+
 async function runIndependentReview(config, repository, issue, commit) {
   if (!config.review.enabled) {
     return { verdict: 'pass', summary: 'Independent review is disabled.', findings: [] };
@@ -142,7 +238,20 @@ async function runIndependentReview(config, repository, issue, commit) {
     unlinkSync(config.review.outputPath);
   }
 
-  const reviewPrompt = buildIndependentReviewPrompt(issue, commit);
+  // Замечания прошлого ревью вынимаются из тела issue в отдельную секцию
+  // prompt: внутри тела они приезжали без подписи, вперемешку с критериями
+  // готовности, и требование «проверь их закрытие» опереться было не на что.
+  const inventory = issueChangeInventory(issue, commit);
+  const reviewPrompt = buildIndependentReviewPrompt(
+    config,
+    { ...issue, body: issueBodyWithoutRalphMetadata(issue) },
+    commit,
+    {
+      changes: inventory,
+      previousFindings: reviewContextFromIssueBody(issue),
+      previousReview: previouslyAuditedCommit(inventory, commit),
+    },
+  );
 
   console.log(`\n=== Independent review for issue #${issue.number} ===\n`);
 
@@ -160,7 +269,12 @@ async function runIndependentReview(config, repository, issue, commit) {
   let review = parseJson(readFileSync(config.review.outputPath, 'utf8'), config.review.outputPath);
 
   assertReviewPayloadShape(review, `Review issue #${issue.number}`);
-  review = normalizeReviewResult(review);
+  const reviewLabel = `Review issue #${issue.number}`;
+  review = applySeverityFloor(
+    scopeReviewToProduct(normalizeReviewResult(review), reviewLabel),
+    config.reviewSeverityFloor,
+    reviewLabel,
+  );
 
   const changes = run('git', ['status', '--porcelain']).stdout;
   const headAfterReview = run('git', ['rev-parse', 'HEAD']).stdout;
@@ -189,12 +303,22 @@ function closeIssue(config, repository, issue, commit) {
     ? 'Ralph Loop validations and independent review passed.'
     : 'Ralph Loop validations passed; independent review is disabled in config.';
   const commentMarker = `<!-- ralph-issue-complete commit:${commit} -->`;
-  postIssueCommentOnce(
-    repository,
-    issue.number,
-    `Implemented in commit ${commit}. ${completion}`,
-    commentMarker,
-  );
+  // Комментарий — след для человека, а не часть контракта: его marker никто не
+  // читает, а связь issue с работой держат trailer коммита, тело issue и PR.
+  // Закрытие ниже обязательно, публикация — нет.
+  try {
+    postIssueCommentOnce(
+      repository,
+      issue.number,
+      `Implemented in commit ${commit}. ${completion}`,
+      commentMarker,
+    );
+  } catch (error) {
+    console.error(
+      `Issue #${issue.number}: не удалось опубликовать комментарий о завершении: ${error.message}. ` +
+        'Issue всё равно закрывается: работа сделана и проверена.',
+    );
+  }
 
   const closedIssue = patchIssue(repository, issue.number, {
     state: 'closed',
@@ -205,7 +329,39 @@ function closeIssue(config, repository, issue, commit) {
   }
 }
 
+/**
+ * Прошло ли ревью этого самого commit на прошлом прогоне.
+ *
+ * Читается до первого updateIssue: тот сразу перезаписывает фазу, и после него
+ * отличить прерванное закрытие от обычного продолжения уже нечем.
+ */
+/**
+ * С какого коммита следующая сессия продолжит issue.
+ *
+ * Это HEAD, если работа issue уже в его истории, и сам commit, если история
+ * разошлась: перенос базы вперёд по чужой ветке потерял бы работу вместо того,
+ * чтобы её продолжить.
+ */
+export function baseForNextSession(commit, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const head = execute('git', ['rev-parse', 'HEAD']).stdout;
+  const contains = dependencies.isAncestorCommit ?? isAncestorCommit;
+
+  return head && contains(commit, head, execute) ? head : commit;
+}
+
+export function reviewAlreadyPassed(issue, commit) {
+  const storedIssue = activeStateStore()?.issue;
+
+  return (
+    storedIssue?.number === issue.number &&
+    storedIssue?.phase === reviewPassedPhase &&
+    storedIssue?.reviewedCommit === commit
+  );
+}
+
 async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
+  const passedOnPreviousRun = reviewAlreadyPassed(issue, commit);
   const pushedHead = pushBranchAndVerify(config);
   activeStateStore()?.updateIssue({
     phase: 'pushed',
@@ -225,15 +381,43 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
     };
   }
 
+  if (passedOnPreviousRun) {
+    // Прошлый прогон дошёл до PASS и упал на закрытии issue. Вердикт относится
+    // к дереву, а не к попытке записи в GitHub, а дерево с тех пор не менялось:
+    // повторное ревью того же commit стоило бы трёх минут и 150k токенов и
+    // ответило бы то же самое.
+    console.log(
+      `Issue #${issue.number}: ревью commit ${commit} прошло на прошлом прогоне; ` +
+        'повтор пропущен, осталось закрыть issue.',
+    );
+    verifyPushedHead(config, pushedHead);
+    closeIssue(config, repository, issue, commit);
+    activeStateStore()?.clearIssue();
+    return {
+      completed: true,
+      commit,
+      review: {
+        verdict: 'pass',
+        summary: 'Review passed on a previous run; the reviewed commit is unchanged.',
+        findings: [],
+      },
+    };
+  }
+
   activeStateStore()?.updateIssue({ phase: 'reviewing' });
   let review;
+  // Замер охватывает повторы: попытка ревью, упавшая технически, стоит полной
+  // сессии, а таких попыток допускается reviewRetryAttempts.
+  const endReview = startStage('review');
   try {
     review = await runReviewWithRetries(
       config,
       () => runIndependentReview(config, repository, issue, commit),
       `Review issue #${issue.number}`,
     );
+    endReview();
   } catch (error) {
+    endReview({ failed: true });
     activeStateStore()?.updateIssue({
       phase: 'pushed',
       ...recordedFailure(error),
@@ -252,12 +436,62 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
     throw error;
   }
   if (review.verdict !== 'pass') {
+    const reviewFixAttempts = (activeStateStore()?.issue?.reviewFixAttempts ?? 0) + 1;
+    // Замечания попадают в тело issue первыми: именно их читает следующая
+    // сессия агента, и без них она не знает, что чинить.
     updateIssueReviewContext(repository, issue, review);
+    // Состояние сохраняется, а не стирается: реализация уже в HEAD и уже прошла
+    // валидацию, и следующая сессия должна чинить замечания поверх неё, а не
+    // выяснять заново, что сделано. `startingCommit` обязан переехать вперёд —
+    // иначе сверка HEAD отвергнет повторный прогон, а проверка «ровно один
+    // commit» отвергнет исправляющий commit.
+    //
+    // Переезжает он именно на HEAD, а не на commit issue. Между ними могут
+    // лежать чужие коммиты: 17 августа это были мои правки Ralph, попавшие в
+    // ветку в том же прогоне, и следующая итерация потребовала HEAD, который
+    // остался двумя коммитами позади. Примирение в начале фазы такое уже не
+    // ловит — фаза началась раньше, чем состояние было записано.
+    //
+    // Запись идёт до публикации комментария: обрыв на комментарии оставил фазу
+    // `reviewing` без `reviewedCommit`, и вердикт FAIL, стоивший 4m19s,
+    // пришлось бы получать заново.
+    activeStateStore()?.updateIssue({
+      phase: 'review-failed',
+      startingCommit: baseForNextSession(commit),
+      commit,
+      // Отметка «этот commit проверен целиком»: следующему ревью не нужно
+      // заново проходить то, что уже признано чистым.
+      reviewedCommit: commit,
+      pushedHead: null,
+      expectedTree: null,
+      commitMessage: null,
+      validationFixAttempts: 0,
+      reviewFixAttempts,
+      ...clearedFailure,
+    });
     reopenIssueWithComment(repository, issue, formatReviewComment(review));
-    activeStateStore()?.clearIssue();
+
+    // Бюджет итераций общий на всю фазу, и без этого предела одна issue съедает
+    // его целиком: на #84 ревью отклонило работу десять раз подряд — около двух
+    // часов и порядка девяти миллионов токенов, — а число замечаний скакало
+    // 7, 2, 2, 3, 3, 3, 2, 4, 4 и ни разу не дошло до нуля. Дальше идут другие
+    // issues, а эта остаётся открытой с замечаниями в теле.
+    if (reviewFixAttempts >= config.maxReviewFixAttempts) {
+      console.error(
+        `Issue #${issue.number}: ревью отклонило работу ${reviewFixAttempts} раз подряд. ` +
+          'Issue отложена до конца прогона: работа в ветке, замечания в её теле. ' +
+          'Следующие заходы повторяли бы тот же круг.',
+      );
+      activeStateStore()?.clearIssue();
+      return { completed: false, parked: true, commit, review };
+    }
     return { completed: false, commit, review };
   }
 
+  // Вердикт записывается до обращения к GitHub. Публикация комментария и
+  // закрытие issue — сетевые операции, и падение на них уже трижды за день
+  // стоило повторного ревью того же самого дерева на следующем прогоне.
+  activeStateStore()?.updateIssue({ phase: reviewPassedPhase, reviewedCommit: commit });
   verifyPushedHead(config, pushedHead);
   closeIssue(config, repository, issue, commit);
   activeStateStore()?.clearIssue();
@@ -284,7 +518,24 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     fail(`Issue #${issue.number}: ${violations.join('; ')}. Цикл остановлен.`);
   }
 
-  if (changes === '') {
+  // Что в дереве принадлежит агенту, а что лежало там до начала issue.
+  //
+  // Раньше стадировалось всё подряд, и в коммит про снимки Playwright уехали
+  // правка `maxIterations` и черновик дизайна на 248 КБ — а следующий коммит
+  // агента черновик удалил вместе с рабочей копией. Ревьюер, увидев в диффе
+  // задачи чужой конфиг, справедливо отклонял работу заход за заходом.
+  const foreignPaths = new Set(activeStateStore()?.issue?.foreignPaths ?? []);
+  const agentPaths = workingTreePaths(changes).filter((file) => !foreignPaths.has(file));
+  const untouchedForeign = workingTreePaths(changes).filter((file) => foreignPaths.has(file));
+  if (untouchedForeign.length > 0) {
+    console.log(
+      `Issue #${issue.number}: вне коммита оставлено ${untouchedForeign.length} файлов, ` +
+        `изменённых до начала задачи: ${untouchedForeign.slice(0, 5).join(', ')}` +
+        `${untouchedForeign.length > 5 ? ' и другие' : ''}.`,
+    );
+  }
+
+  if (agentPaths.length === 0) {
     const alreadyFixedCommit = alreadyFixedCommitFromAgent(lastAgentMessage);
     if (!alreadyFixedCommit) {
       fail(`Issue #${issue.number}: агент не оставил изменений и не указал ALREADY_FIXED commit.`);
@@ -292,7 +543,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
     const commit = verifiedIssueCommit(alreadyFixedCommit, issue);
     activeStateStore()?.updateIssue({ phase: 'validating' });
     try {
-      runConfiguredValidation(config);
+      measuredValidation(() => runConfiguredValidation(config, issueChangedPaths(issue, commit)));
     } catch (error) {
       const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
       activeStateStore()?.updateIssue({
@@ -308,7 +559,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       return { completed: false, validationFailed: true };
     }
     assertValidationLeftTree(
-      '',
+      changes,
       `Issue #${issue.number}: проверки already-fixed решения изменили рабочее дерево.`,
     );
     return reviewAndCloseCommittedIssue(config, repository, issue, commit);
@@ -316,7 +567,7 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 
   activeStateStore()?.updateIssue({ phase: 'validating' });
   try {
-    runConfiguredValidation(config);
+    measuredValidation(() => runConfiguredValidation(config, agentPaths));
   } catch (error) {
     const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
     activeStateStore()?.updateIssue({
@@ -337,7 +588,9 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
       'Проверьте generated-файлы перед повторным запуском.',
   );
   activeStateStore()?.updateIssue({ phase: 'staging' });
-  run('git', ['add', '--all']);
+  // Именно пути агента, а не `--all`: остальное в дереве принадлежит оператору
+  // и обязано остаться незакоммиченным.
+  run('git', ['add', '--all', '--', ...agentPaths]);
 
   const stagedDiff = run('git', ['diff', '--cached', '--quiet'], {
     allowFailure: true,
@@ -364,11 +617,16 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   commitStagedChanges(commitMessage, issue, config.runtime.validationTimeoutMs);
 
   const commitCount = Number(run('git', ['rev-list', '--count', `${startingCommit}..HEAD`]).stdout);
-  const remainingChanges = run('git', ['status', '--porcelain']).stdout;
-  if (commitCount !== 1 || remainingChanges !== '') {
+  // Чистым дерево быть больше не обязано: файлы оператора намеренно остались
+  // вне коммита. Обязано другое — чтобы после коммита не осталось ничего, что
+  // агент изменил сам.
+  const leftBehind = workingTreePaths(run('git', ['status', '--porcelain']).stdout).filter(
+    (file) => !foreignPaths.has(file),
+  );
+  if (commitCount !== 1 || leftBehind.length > 0) {
     fail(
-      `Issue #${issue.number}: оркестратор ожидал один commit и чистое дерево, ` +
-        `получено commits=${commitCount}, changes=${remainingChanges ? 'yes' : 'no'}.`,
+      `Issue #${issue.number}: оркестратор ожидал один commit и никаких своих изменений вне него, ` +
+        `получено commits=${commitCount}, вне коммита: ${leftBehind.join(', ') || 'нет'}.`,
     );
   }
 
@@ -386,11 +644,60 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 // Реализация одной issue агентом и проверка правил завершения
 // -----------------------------------------------------------------------------
 
+// Фазы, на которых работа issue лежит незакоммиченной в рабочем дереве.
+const uncommittedWorkPhases = new Set(['agent-running', 'working-tree', 'validating']);
+
+/**
+ * Можно ли продолжить issue, если ветка ушла вперёд с сохранённого commit.
+ *
+ * Требование точного совпадения HEAD теряло задачу каждый раз, когда между
+ * прогонами в ветку попадал любой посторонний commit — а это ровно то, что
+ * делает оператор, правя Ralph между запусками.
+ *
+ * Условие зависит от того, где лежит работа. После отказа ревью она в HEAD, а
+ * дерево чистое: двигать базу безопасно всегда. На фазах с незакоммиченным
+ * diff — только если пришедшие коммиты не трогают ни одного файла, который
+ * сейчас правит агент; иначе его правки лягут поверх изменившегося файла, и
+ * это уже не продолжение, а конфликт.
+ *
+ * `staging` не входит: там в состоянии лежит `expectedTree`, собранный против
+ * прежнего HEAD.
+ */
+export function advanceStartingCommitIfBranchMovedOn(stateStore = activeStateStore()) {
+  const storedIssue = stateStore?.issue;
+  const currentHead = run('git', ['rev-parse', 'HEAD']).stdout;
+  if (!branchMovedWithoutDisturbingIssue(storedIssue, currentHead)) return false;
+
+  console.log(
+    `Issue #${storedIssue.number}: ветка ушла вперёд с ` +
+      `${storedIssue.startingCommit.slice(0, 8)} до ${currentHead.slice(0, 8)}; ` +
+      'продолжаем поверх нового HEAD.',
+  );
+  stateStore.updateIssue({ startingCommit: currentHead });
+
+  return true;
+}
+
+function branchMovedWithoutDisturbingIssue(storedIssue, currentHead) {
+  const storedStart = storedIssue?.startingCommit;
+  if (!storedStart || storedStart === currentHead) return false;
+  if (!isAncestorCommit(storedStart, currentHead)) return false;
+
+  const status = workingTreeStatus();
+  if (storedIssue.phase === 'review-failed') return status === '';
+  if (!uncommittedWorkPhases.has(storedIssue.phase) || status === '') return false;
+
+  const dirtyFiles = new Set(workingTreePaths(status));
+  const moved = filesChangedBetween(storedStart, currentHead);
+
+  return moved !== null && moved.every((file) => !dirtyFiles.has(file));
+}
+
 export async function runAgentOnIssue(config, repository, issue, rules) {
   issue = assertTrustedIssue(config, issue, repository);
   const storedIssue =
     activeStateStore()?.issue?.number === issue.number ? activeStateStore().issue : null;
-  if (storedIssue?.commit && ['committed', 'pushed', 'reviewing'].includes(storedIssue.phase)) {
+  if (storedIssue?.commit && committedRecoveryPhases.includes(storedIssue.phase)) {
     assertCleanTree(`Issue #${issue.number}: committed recovery требует чистое рабочее дерево.`);
     const commit = verifiedIssueCommit(storedIssue.commit, issue);
     console.log(
@@ -399,7 +706,7 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
     );
     const resumePhase = storedIssue.phase;
     try {
-      runConfiguredValidation(config);
+      measuredValidation(() => runConfiguredValidation(config, issueChangedPaths(issue, commit)));
     } catch (error) {
       activeStateStore().updateIssue({ phase: resumePhase, ...recordedFailure(error) });
       throw error;
@@ -409,13 +716,15 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
 
   const currentHead = run('git', ['rev-parse', 'HEAD']).stdout;
   const continuation = Boolean(storedIssue);
+  // База уже сдвинута в начале фазы, до проверки рабочего дерева; здесь
+  // остаётся простое сравнение.
   const startingCommit = storedIssue?.startingCommit ?? currentHead;
   if (startingCommit !== currentHead) {
     fail(
       `Issue #${issue.number}: recovery ожидал HEAD ${startingCommit}, но найден ${currentHead}.`,
     );
   }
-  activeStateStore()?.beginIssue(issue, startingCommit);
+  activeStateStore()?.beginIssue(issue, startingCommit, workingTreePaths(workingTreeStatus()));
 
   const linkedCommit = issue.linkedCommit ?? linkedCommitForIssue(issue);
   if (!continuation && linkedCommit) {
@@ -434,6 +743,7 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
 
   let codexResult;
   console.log(`\n=== Issue #${issue.number}: ${issue.title} ===\n`);
+  const endImplementation = startStage('implementation');
   try {
     codexResult = await runDevelopmentSession(config, {
       input: renderPrompt(config, issue, rules) + (continuation ? recoveryPrompt(storedIssue) : ''),
@@ -441,7 +751,9 @@ export async function runAgentOnIssue(config, repository, issue, rules) {
       timeoutMs: config.runtime.agentTimeoutMs,
       label: `${config.agentCli} issue #${issue.number}`,
     });
+    endImplementation();
   } catch (error) {
+    endImplementation({ failed: true });
     activeStateStore()?.updateIssue({
       phase: 'working-tree',
       ...recordedFailure(error),
@@ -599,7 +911,10 @@ function createPullRequest(config, repository) {
     args.push('--draft');
   }
 
-  const url = run('gh', args).stdout;
+  // Через runNetwork: создание PR — сетевой вызов, и 503 от GitHub не повод
+  // терять прогон. Повторная попытка при уже созданном PR падает своей ошибкой
+  // «pull request already exists», а не молча создаёт второй.
+  const url = runNetwork('gh', args).stdout;
   console.log(`Создан PR: ${url}`);
   return verifyPullRequestTarget(config, pullRequestDetails(repository, url));
 }
@@ -739,6 +1054,10 @@ export async function runContinuousLoop(context, actions) {
   let iteration = stateStore?.iterationsUsed ?? 0;
   const pendingIssues = new Map();
   const completedIssueNumbers = new Set();
+  // Issues, которые ревью отклоняло подряд до предела. Из очереди этого прогона
+  // они убраны, но остаются открытыми: их разбирает оператор или следующий
+  // прогон, а бюджет достаётся остальным.
+  const parkedIssueNumbers = new Set();
 
   while (true) {
     const listedIssues = actions
@@ -748,6 +1067,7 @@ export async function runContinuousLoop(context, actions) {
     // Сначала добавляем ответ GitHub, затем локальную очередь: локальная копия
     // содержит самый свежий body после review и должна победить устаревший REST-ответ.
     for (const issue of [...listedIssues, ...pendingIssues.values()]) {
+      if (parkedIssueNumbers.has(issue.number)) continue;
       if (completedIssueNumbers.has(issue.number)) {
         // REST-список может кратко вернуть уже закрытую issue. Прямой GET
         // отличает этот stale-ответ от настоящего повторного открытия.
@@ -815,6 +1135,9 @@ export async function runContinuousLoop(context, actions) {
       if (review.verdict === 'pass' && review.findings.length === 0) {
         const appearedIssues = actions
           .openIssues(repository, milestone)
+          // Отложенная issue открыта и здесь бы вернулась в очередь, а фильтр
+          // выше снова бы её убрал — цикл крутился бы на месте.
+          .filter((issue) => !parkedIssueNumbers.has(issue.number))
           .filter((issue) => actions.issueState(repository, issue.number) === 'OPEN');
         if (appearedIssues.length > 0) {
           for (const issue of appearedIssues) pendingIssues.set(issue.number, issue);
@@ -878,7 +1201,7 @@ export async function runContinuousLoop(context, actions) {
     const linkedCommit = storedPhase ? null : actions.linkedCommitForIssue?.(currentIssue);
     if (linkedCommit) currentIssue.linkedCommit = linkedCommit;
     const needsDevelopmentIteration =
-      !['committed', 'pushed', 'reviewing'].includes(storedPhase) && !linkedCommit;
+      !committedRecoveryPhases.includes(storedPhase) && !linkedCommit;
 
     if (needsDevelopmentIteration && iteration >= config.maxIterations) {
       fail(
@@ -894,9 +1217,20 @@ export async function runContinuousLoop(context, actions) {
         `осталось issues: ${issues.length}.`,
     );
     let result;
+    actions.beginIssueMetrics?.({
+      issue: currentIssue.number,
+      milestone: config.milestone,
+      branch: config.branch,
+      iteration,
+      agentCli: config.agentCli,
+    });
     try {
       result = await actions.runAgentOnIssue(config, repository, currentIssue, rules);
     } catch (error) {
+      actions.reportIssueMetrics?.({
+        outcome: error.code ?? 'aborted',
+        reason: error.message?.slice(0, 200) ?? null,
+      });
       if (
         needsDevelopmentIteration &&
         ['RALPH_AGENT_AUTH', 'RALPH_AGENT_WRITE_ACCESS', 'RALPH_UNTRUSTED_ISSUE'].includes(
@@ -909,7 +1243,15 @@ export async function runContinuousLoop(context, actions) {
       }
       throw error;
     }
-    if (result?.completed === false) {
+    actions.reportIssueMetrics?.(
+      result?.completed === false
+        ? incompleteIssueOutcome(result)
+        : { outcome: 'completed', reason: 'issue закрыта' },
+    );
+    if (result?.parked) {
+      parkedIssueNumbers.add(currentIssue.number);
+      pendingIssues.delete(currentIssue.number);
+    } else if (result?.completed === false) {
       pendingIssues.set(currentIssue.number, currentIssue);
     } else {
       pendingIssues.delete(currentIssue.number);
@@ -917,19 +1259,12 @@ export async function runContinuousLoop(context, actions) {
     }
     if (config.stopAfterFirstIssue) {
       if (result?.completed === false) {
-        // Причина берётся из результата, а не предполагается. Остановка после
-        // упавшей валидации сообщала об отказе ревью, до которого цикл не дошёл,
-        // и отправляла оператора искать замечания, которых нет.
-        const [reason, outcome] = result.agentFailed
-          ? ['сессия агента не завершилась', { agentFailed: true }]
-          : result.validationFailed
-            ? ['валидация не прошла', { validationFailed: true }]
-            : ['независимое ревью вернуло замечания', { reviewFailed: true }];
+        const { reason, runOutcome } = incompleteIssueOutcome(result);
         console.log(
           `Issue #${currentIssue.number} осталась открытой: ${reason}. ` +
             'Цикл остановлен после одной итерации.',
         );
-        return { mode: 'run', completed: 0, ...outcome };
+        return { mode: 'run', completed: 0, ...runOutcome };
       }
       stateStore?.finish();
       console.log(`Issue #${currentIssue.number} завершена. Цикл остановлен после одной итерации.`);
@@ -969,6 +1304,8 @@ function defaultActions() {
     linkedCommitForIssue,
     verifyReviewedPullRequestHead,
     workingTreeStatus,
+    beginIssueMetrics,
+    reportIssueMetrics,
   };
 }
 
@@ -1061,7 +1398,22 @@ async function main() {
     const milestones = config.phases.map((phase) => verifyMilestone(repository, phase.milestone));
     const actions = defaultActions();
     const runPhase = async (phaseConfig) => {
+      // Примирение с реальным HEAD идёт до проверки дерева: `verifyRepository`
+      // разрешает грязное дерево только через `allowsDirtyRecovery`, а тот
+      // требует точного совпадения HEAD с сохранённым startingCommit. Пока база
+      // не сдвинута, продолжение отвергается на слой раньше, чем до него
+      // доходит очередь.
+      if (mode !== '--check') advanceStartingCommitIfBranchMovedOn();
       const repositoryState = verifyRepository(phaseConfig, mode !== '--check');
+      // Слепок пересчитывается сразу после переключения ветки и до сессии
+      // агента. `verifyRepository` — единственное место, где рабочее дерево
+      // меняет сам цикл, а `.claude/**` и `AGENTS.md` есть не на каждой ветке:
+      // старт с ветки, где их нет, приводил к остановке с «AFK-сессия изменила
+      // набор доверенных файлов инструкций» ещё до валидации. Обвинялась сессия,
+      // которая не начиналась, а принёс файлы чекаут по команде самого цикла.
+      const snapshot = controlPlaneSnapshot(phaseConfig);
+      Object.assign(config, snapshot);
+      Object.assign(phaseConfig, snapshot);
       if (mode !== '--check') {
         reconcileStateAfterCrash(phaseConfig, activeStateStore());
       }

@@ -38,6 +38,126 @@ export function isRalphInfrastructurePath(file) {
   );
 }
 
+/**
+ * Тот же список путей в виде pathspec для git.
+ *
+ * Выводится здесь, а не пишется вторым списком рядом с git-командами: два
+ * перечисления одного и того же расходятся при первом же добавлении каталога, и
+ * расхождение будет тихим — diff просто покажет лишнее.
+ */
+export const controlPlaneExcludePathspec = [
+  ':(exclude).agents',
+  ':(exclude).claude',
+  ':(exclude)scripts/ralph',
+  ':(exclude)AGENTS.md',
+  ':(exclude,glob)**/AGENTS.md',
+];
+
+/**
+ * Направления аудита, которые имеет смысл называть ревьюеру только когда в
+ * изменении есть соответствующие файлы.
+ *
+ * Промпт требовал проверить контракты API, документацию, конфигурацию,
+ * миграции и предположения о деплое на каждой issue. Когда изменение — две
+ * строки в тестовой спеке, эти вопросы всё равно обдумываются, а рассуждения
+ * стоят 38% расхода цикла при 0,9% его токенов. Убирается не тщательность, а
+ * заведомо пустое направление.
+ */
+const conditionalAuditAreas = [
+  [
+    'public API response contracts',
+    (file) => /^apps\/api\/src\/.+\.(controller|dto)\.ts$/.test(file),
+  ],
+  ['documentation', (file) => file.endsWith('.md')],
+  [
+    'configuration',
+    (file) => /(^|\/)[^/]*\.(json|ya?ml|toml)$/.test(file) || /(^|\/)\.env/.test(file),
+  ],
+  ['database schema and migrations', (file) => file.includes('prisma/')],
+  [
+    'deployment and runtime assumptions',
+    (file) => /^(Dockerfile|docker-compose)/.test(file) || file.startsWith('.github/'),
+  ],
+  [
+    'whether tests assert real externally observable behaviour rather than an implementation detail',
+    (file) => /\.(spec|test|e2e-spec)\.[cm]?[jt]sx?$/.test(file),
+  ],
+];
+
+export function reviewAuditAreas(changedFiles = []) {
+  const files = changedFiles.map((file) => String(file).replaceAll('\\', '/'));
+
+  return conditionalAuditAreas
+    .filter(([, matches]) => files.some((file) => matches(file)))
+    .map(([area]) => area);
+}
+
+/**
+ * Какие проверки может сломать изменение конкретного файла.
+ *
+ * Полный набор поднимает контейнер с PostgreSQL и прогоняет оба набора E2E —
+ * это минуты на каждую issue. Правка спеки Playwright не может уронить E2E API,
+ * а правка Markdown — вообще ничего, кроме форматирования. Сокращается не
+ * тщательность, а заведомо неприменимая проверка.
+ *
+ * Порядок значим: первое совпадение и есть ответ. Markdown идёт первым, иначе
+ * `apps/web/README.md` притянул бы за собой сборку и браузерные тесты.
+ *
+ * Список намеренно неполон. Незнакомый путь — это полный набор, а не пустой:
+ * пропущенная проверка обнаруживается через несколько issue и стоит дороже
+ * лишнего прогона.
+ */
+const validationAreas = [
+  [/\.md$/, ['format:check']],
+  [/^\.github\//, ['format:check']],
+  // Изменения в API ломают и его собственные E2E, и браузерные: Playwright
+  // поднимает рядом настоящий сервер API.
+  [/^apps\/api\//, ['format:check', 'lint', 'build', 'test:e2e:api', 'test:e2e:web']],
+  [/^apps\/web\//, ['format:check', 'lint', 'build', 'test:e2e:web']],
+  [/^scripts\//, ['format:check', 'lint', 'test:ralph']],
+];
+
+// Что нельзя выполнить без поднятой и мигрированной базы. Когда ни одна такая
+// проверка не выбрана, preflight не выполняется вовсе.
+const databaseBackedScripts = new Set(['test:e2e:api', 'test:e2e:web']);
+
+function normalizedPath(file) {
+  return String(file ?? '')
+    .trim()
+    .replaceAll('\\', '/')
+    .replace(/^\.\//, '');
+}
+
+/**
+ * Подмножество `validationScripts`, которое имеет смысл выполнить для данного
+ * изменения. Порядок берётся из конфигурации, а не из карты областей.
+ */
+export function validationScriptsForChangedFiles(configuredScripts, changedFiles) {
+  const scripts = [...(configuredScripts ?? [])];
+  const fullSet = { scripts, skipped: [], narrowed: false, requiresDatabase: true };
+  const files = (changedFiles ?? []).map(normalizedPath).filter(Boolean);
+  if (files.length === 0) return fullSet;
+
+  const required = new Set();
+  for (const file of files) {
+    const area = validationAreas.find(([pattern]) => pattern.test(file));
+    if (!area) return fullSet;
+    for (const script of area[1]) required.add(script);
+  }
+
+  const selected = scripts.filter((script) => required.has(script));
+  // Пустой набор означал бы «валидация не выполнялась»: такое состояние
+  // неотличимо от прошедшей проверки, поэтому вместо него — полный набор.
+  if (selected.length === 0) return fullSet;
+
+  return {
+    scripts: selected,
+    skipped: scripts.filter((script) => !required.has(script)),
+    narrowed: selected.length < scripts.length,
+    requiresDatabase: selected.some((script) => databaseBackedScripts.has(script)),
+  };
+}
+
 export function issueLabels(issue) {
   return (issue?.labels ?? []).map((label) =>
     typeof label === 'string' ? label : String(label?.name ?? ''),
@@ -56,7 +176,18 @@ export function isRalphInfrastructureIssue(issue) {
   );
 }
 
-export function scopeMilestoneReviewToProduct(review) {
+/**
+ * Замечания к control plane выбрасываются из любого ревью, а не только из
+ * milestone.
+ *
+ * Агенту запрещено править `.agents/**`, `.claude/**`, `scripts/ralph/**` и
+ * `AGENTS.md`, и ревью, которое требует именно этого, невыполнимо по
+ * построению: следующая сессия вернёт тот же результат, ревью — то же
+ * замечание. На issue #84 так и вышло — десять заходов подряд, около двух
+ * часов и порядка девяти миллионов токенов, причём поводом были правки
+ * оператора в конфиге, сделанные параллельно с прогоном.
+ */
+export function scopeReviewToProduct(review, label = 'Review') {
   const productFindings = review.findings.filter(
     (finding) => !isRalphInfrastructurePath(finding.file),
   );
@@ -64,7 +195,7 @@ export function scopeMilestoneReviewToProduct(review) {
   if (ignoredCount === 0) return review;
 
   console.log(
-    `Milestone review: ${ignoredCount} замечаний к Ralph-инфраструктуре исключены из продуктовой очереди.`,
+    `${label}: ${ignoredCount} замечаний к Ralph-инфраструктуре исключены из продуктовой очереди.`,
   );
   return {
     ...review,
@@ -74,4 +205,48 @@ export function scopeMilestoneReviewToProduct(review) {
       'from the product milestone and must be handled manually in the configuration chat.',
     findings: productFindings,
   };
+}
+
+/**
+ * Порог важности, ниже которого замечание не блокирует работу.
+ *
+ * Ревьюер с `effort=high` на растущем изменении всегда найдёт ещё один P3:
+ * каждое исправление трогает больше кода и даёт ему больше поверхности. За
+ * ночь это дало десять заходов на одной задаче и три на другой, ни разу не
+ * сойдясь, — при том что ни одно замечание не было важнее P3.
+ *
+ * Замечания ниже порога не исчезают: они остаются в сводке ревью и в
+ * комментарии к PR. Они лишь перестают отклонять работу и заводить задачи.
+ */
+const severityOrder = ['P0', 'P1', 'P2', 'P3'];
+
+export function findingBlocks(finding, floor) {
+  const rank = severityOrder.indexOf(String(finding?.severity ?? '').toUpperCase());
+  const limit = severityOrder.indexOf(String(floor ?? 'P3').toUpperCase());
+
+  // Незнакомая важность считается блокирующей: молча пропустить замечание
+  // опаснее, чем лишний раз остановить работу.
+  return rank === -1 || limit === -1 || rank <= limit;
+}
+
+export function applySeverityFloor(review, floor, label = 'Review') {
+  const blocking = review.findings.filter((finding) => findingBlocks(finding, floor));
+  const belowFloor = review.findings.length - blocking.length;
+  if (belowFloor === 0) return review;
+
+  console.log(
+    `${label}: ${belowFloor} замечаний ниже порога ${floor} не блокируют работу и остаются в отчёте.`,
+  );
+  return {
+    ...review,
+    verdict: blocking.length > 0 ? 'fail' : 'pass',
+    summary:
+      `${review.summary} ${belowFloor} finding(s) below the ${floor} severity floor are reported ` +
+      'but do not block the work.',
+    findings: blocking,
+  };
+}
+
+export function scopeMilestoneReviewToProduct(review) {
+  return scopeReviewToProduct(review, 'Milestone review');
 }

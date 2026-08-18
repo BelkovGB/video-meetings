@@ -187,11 +187,20 @@ describe('Current user profile (e2e)', () => {
         .send({ displayName: savedDisplayName })
         .expect(200);
 
-      await request(app.getHttpServer())
+      const rejection = await request(app.getHttpServer())
         .patch('/users/me')
         .set('Authorization', `Bearer ${user.accessToken}`)
         .send(displayName === undefined ? {} : { displayName })
         .expect(400);
+      // The documented shape of a validation failure: prose for developers, plus
+      // a code and the rejected field for a client that words its own message.
+      expect(rejection.body).toEqual({
+        statusCode: 400,
+        message: expect.arrayContaining([expect.any(String)]),
+        error: 'Bad Request',
+        code: 'VALIDATION_FAILED',
+        fields: ['displayName'],
+      });
 
       const response = await request(app.getHttpServer())
         .get('/users/me')
@@ -225,32 +234,55 @@ describe('Current user profile (e2e)', () => {
 
   it('rejects invalid password changes without changing the password or session', async () => {
     const user = await registerUser('password-change-invalid');
+    // Every rejection carries a machine-readable discriminator, and validation
+    // failures name the rejected field: the browser routes the error to that
+    // input and renders its own localized text instead of parsing this prose.
     const invalidRequests = [
       {
-        currentPassword: 'not-the-current-password',
-        newPassword: 'new-password-123',
-        confirmation: 'new-password-123',
-      },
-      { currentPassword: validPassword, newPassword: validPassword, confirmation: validPassword },
-      { currentPassword: validPassword, newPassword: 'password', confirmation: 'password' },
-      {
-        currentPassword: validPassword,
-        newPassword: '😀'.repeat(19),
-        confirmation: '😀'.repeat(19),
+        body: {
+          currentPassword: 'not-the-current-password',
+          newPassword: 'new-password-123',
+          confirmation: 'new-password-123',
+        },
+        expected: { code: 'CURRENT_PASSWORD_INCORRECT' },
       },
       {
-        currentPassword: validPassword,
-        newPassword: 'new-password-123',
-        confirmation: 'different-password-123',
+        body: {
+          currentPassword: validPassword,
+          newPassword: validPassword,
+          confirmation: validPassword,
+        },
+        expected: { code: 'NEW_PASSWORD_NOT_DIFFERENT' },
+      },
+      {
+        body: { currentPassword: validPassword, newPassword: 'password', confirmation: 'password' },
+        expected: { code: 'VALIDATION_FAILED', fields: ['newPassword'] },
+      },
+      {
+        body: {
+          currentPassword: validPassword,
+          newPassword: '😀'.repeat(19),
+          confirmation: '😀'.repeat(19),
+        },
+        expected: { code: 'VALIDATION_FAILED', fields: ['newPassword'] },
+      },
+      {
+        body: {
+          currentPassword: validPassword,
+          newPassword: 'new-password-123',
+          confirmation: 'different-password-123',
+        },
+        expected: { code: 'PASSWORD_CONFIRMATION_MISMATCH' },
       },
     ];
 
-    for (const body of invalidRequests) {
-      await request(app.getHttpServer())
+    for (const { body, expected } of invalidRequests) {
+      const response = await request(app.getHttpServer())
         .post('/users/me/password')
         .set('Authorization', `Bearer ${user.accessToken}`)
         .send(body)
         .expect(400);
+      expect(response.body).toMatchObject(expected);
 
       await request(app.getHttpServer())
         .get('/users/me')
@@ -266,7 +298,7 @@ describe('Current user profile (e2e)', () => {
     const user = await registerUser('password-change-oversized-current', currentPassword);
     const newPassword = 'new-password-123';
 
-    await request(app.getHttpServer())
+    const response = await request(app.getHttpServer())
       .post('/users/me/password')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .send({
@@ -275,12 +307,29 @@ describe('Current user profile (e2e)', () => {
         confirmation: newPassword,
       })
       .expect(400);
+    expect(response.body).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      fields: ['currentPassword'],
+    });
 
     await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .expect(200);
     await loginUser(user.email, currentPassword);
+  });
+
+  it('names the confirmation field when it is rejected by the DTO', async () => {
+    const user = await registerUser('password-change-blank-confirmation');
+
+    const response = await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ currentPassword: validPassword, newPassword: 'new-password-123', confirmation: '' })
+      .expect(400);
+    expect(response.body).toMatchObject({ code: 'VALIDATION_FAILED', fields: ['confirmation'] });
+
+    await loginUser(user.email, validPassword);
   });
 
   it('rejects a password below the minimum after NFC normalization', async () => {
@@ -339,12 +388,23 @@ describe('Current user profile (e2e)', () => {
         .expect(400);
     }
 
-    await request(app.getHttpServer())
+    const limited = await request(app.getHttpServer())
       .post('/users/me/password')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .send(invalidChange)
       .expect('Retry-After', /\d+/)
       .expect(429);
+    expect(limited.body).toMatchObject({ code: 'PASSWORD_CHANGE_RATE_LIMITED' });
+
+    // The wait is carried in the body as well as the header, because a browser
+    // cannot read `Retry-After`: the API exposes no custom headers through CORS,
+    // so the web client words its message from `retryAfterSeconds` alone.
+    // Dropping it here would degrade that message to a hard-coded guess.
+    expect(limited.body.retryAfterSeconds).toEqual(expect.any(Number));
+    expect(limited.body.retryAfterSeconds).toBeGreaterThan(0);
+    expect(limited.body.retryAfterSeconds).toBeLessThanOrEqual(15 * 60);
+    expect(Number.isInteger(limited.body.retryAfterSeconds)).toBe(true);
+    expect(String(limited.headers['retry-after'])).toBe(String(limited.body.retryAfterSeconds));
 
     await request(app.getHttpServer())
       .get('/users/me')
@@ -353,7 +413,7 @@ describe('Current user profile (e2e)', () => {
     await loginUser(user.email, validPassword);
   });
 
-  it('changes the password, revokes only the caller session, and permits login with the new password', async () => {
+  it('changes the password, revokes every session of the account, and permits login with the new password', async () => {
     const user = await registerUser('password-change-success');
     const secondSessionToken = await loginUser(user.email, validPassword);
     const newPassword = '😀'.repeat(18);
@@ -368,13 +428,110 @@ describe('Current user profile (e2e)', () => {
       .get('/users/me')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .expect(401);
+
+    // A password is usually changed because the old one, or a token minted with
+    // it, is suspected stolen. The app offers no reset and no "sign out
+    // everywhere", so a session the caller is not holding must die here or not
+    // at all.
     await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${secondSessionToken}`)
-      .expect(200);
+      .expect(401);
     await request(app.getHttpServer())
       .post('/auth/login')
       .send({ email: user.email, password: validPassword })
+      .expect(401);
+    await loginUser(user.email, newPassword);
+  });
+
+  it('revokes only the changing account, leaving every other account signed in', async () => {
+    const user = await registerUser('password-change-scope-caller');
+    const bystander = await registerUser('password-change-scope-bystander');
+    const bystanderSecondToken = await loginUser(bystander.email, validPassword);
+    const newPassword = 'scoped-new-password-123';
+
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ currentPassword: validPassword, newPassword, confirmation: newPassword })
+      .expect(204);
+
+    // The sweep revokes by user alone, so the only thing keeping it from
+    // signing every account in the service out is the `userId` in its `where`.
+    // Losing that key would still pass every other assertion in this file: the
+    // caller's sessions die either way, and no other test changes a password
+    // while a second account holds a token.
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${bystander.accessToken}`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${bystanderSecondToken}`)
+      .expect(200);
+
+    // The bystander's credential is untouched too: a sweep bound to the wrong
+    // subject could revoke rows without touching hashes, which the token checks
+    // above would catch, but the reverse mistake is worth pinning as well.
+    await loginUser(bystander.email, validPassword);
+  });
+
+  it('rejects a password change whose session another change revoked after the guard admitted it', async () => {
+    const user = await registerUser('password-change-concurrent-revocation');
+    const staleSessionToken = await loginUser(user.email, validPassword);
+    const newPassword = 'new-password-123';
+    const rivalPassword = 'rival-password-123';
+    const profileService = app.get(ProfileService);
+    const originalChangePassword = profileService.changePassword.bind(profileService);
+    let releaseStaleChange: (() => void) | undefined;
+    const staleChangeReleased = new Promise<void>((resolve) => {
+      releaseStaleChange = resolve;
+    });
+    let signalStaleChange: (() => void) | undefined;
+    const staleChangeAdmitted = new Promise<void>((resolve) => {
+      signalStaleChange = resolve;
+    });
+    // The guard reads the session outside the transaction that revokes it, so a
+    // request admitted a moment before another session changes the password
+    // reaches the service with a session that is already revoked. It carries the
+    // password that change installed, so only the service's own session check
+    // can stop it from sweeping the fresh sessions away and setting a password
+    // of its own.
+    const changePassword = jest
+      .spyOn(profileService, 'changePassword')
+      .mockImplementationOnce(async (userId, sessionId, dto) => {
+        signalStaleChange?.();
+        await staleChangeReleased;
+        return originalChangePassword(userId, sessionId, dto);
+      });
+
+    try {
+      const staleChange = request(app.getHttpServer())
+        .post('/users/me/password')
+        .set('Authorization', `Bearer ${staleSessionToken}`)
+        .send({
+          currentPassword: newPassword,
+          newPassword: rivalPassword,
+          confirmation: rivalPassword,
+        })
+        .then((response) => response);
+      await staleChangeAdmitted;
+
+      await request(app.getHttpServer())
+        .post('/users/me/password')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .send({ currentPassword: validPassword, newPassword, confirmation: newPassword })
+        .expect(204);
+
+      releaseStaleChange?.();
+      expect((await staleChange).status).toBe(401);
+    } finally {
+      changePassword.mockRestore();
+    }
+
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email: user.email, password: rivalPassword })
       .expect(401);
     await loginUser(user.email, newPassword);
   });

@@ -12,11 +12,23 @@ export type ApiError = {
 };
 
 /**
- * Upload errors additionally carry a machine-readable code. Only the meeting
- * file upload reads it; every other caller keys off `message` and status.
+ * Errors that carry a machine-readable discriminator. `code` identifies the
+ * failure, and `fields` names the rejected request properties of a
+ * `VALIDATION_FAILED` response. A caller that shows localized text must key off
+ * these instead of the English `message`, which is free to be reworded.
+ *
+ * Read by the meeting file upload and by the password-change form; every other
+ * caller keys off `message` and status.
  */
-export type UploadApiError = ApiError & {
+export type CodedApiError = ApiError & {
   code?: string;
+  fields?: string[];
+  /**
+   * Seconds left on a rate-limit window, mirroring the `Retry-After` header.
+   * The header is not exposed to browser code by `app.enableCors(...)`, so a
+   * screen that wants to quote the wait reads it here.
+   */
+  retryAfterSeconds?: number;
 };
 
 export type Avatar = {

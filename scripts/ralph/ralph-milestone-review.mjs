@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 
-import { fail, isRalphInfrastructurePath, scopeMilestoneReviewToProduct } from './ralph-scope.mjs';
-import { run } from './ralph-process-runner.mjs';
+import {
+  applySeverityFloor,
+  fail,
+  isRalphInfrastructurePath,
+  scopeMilestoneReviewToProduct,
+} from './ralph-scope.mjs';
+import { run, runtimeSettings } from './ralph-process-runner.mjs';
+import { retryTransientOperation } from './ralph-runtime.mjs';
 import { runReviewWithRetries } from './ralph-agent-session.mjs';
 import { runReviewSession } from './ralph-agent-backends.mjs';
 import { parseJson } from './ralph-config.mjs';
@@ -13,6 +19,7 @@ import {
   postIssueCommentOnce,
   postPullRequestReview,
 } from './ralph-github-client.mjs';
+import { branchChangeInventory } from './ralph-git.mjs';
 import { assertReviewPayloadShape, normalizeReviewResult } from './ralph-issue-contract.mjs';
 import { buildMilestoneReviewPrompt } from './ralph-prompts.mjs';
 
@@ -148,7 +155,11 @@ export async function runMilestoneReview(config, repository, milestone, pullRequ
     };
   }
 
-  const reviewPrompt = buildMilestoneReviewPrompt(config, milestone, pullRequest);
+  // База берётся с origin, а не с локальной ветки: локальная может отставать, и
+  // тогда в diff попадёт чужая работа, которую ревьюер обязан игнорировать.
+  const reviewPrompt = buildMilestoneReviewPrompt(config, milestone, pullRequest, {
+    changes: branchChangeInventory(`origin/${config.baseBranch}`, pullRequest.headRefOid),
+  });
 
   console.log(
     `\n=== Milestone review for PR #${pullRequest.number} (${config.milestoneReview.model}) ===\n`,
@@ -208,7 +219,11 @@ export async function runMilestoneReview(config, repository, milestone, pullRequ
     }
     fail(`Milestone review PR #${pullRequest.number} не завершился: ${error.message}`);
   }
-  review = scopeMilestoneReviewToProduct(review);
+  review = applySeverityFloor(
+    scopeMilestoneReviewToProduct(review),
+    config.reviewSeverityFloor,
+    'Milestone review',
+  );
   review = limitMilestoneReviewFindings(review, pullRequest, config.milestoneReview.maxFindings);
 
   postPullRequestReview(
@@ -240,46 +255,138 @@ export function reviewFindingMarker(pullRequest, finding) {
   return `<!-- ralph-milestone-finding pr:${pullRequest.number} id:${reviewFindingFingerprint(pullRequest, finding)} -->`;
 }
 
-function findingIssueTitle(finding) {
-  const title = `[${finding.severity}] ${finding.title}`.replace(/\s+/g, ' ').trim();
-  return title.slice(0, 240);
+/**
+ * Замечания, которые имеет смысл чинить одной задачей.
+ *
+ * Ключ — файл и полоса важности. Файл потому, что фиксированная часть цикла —
+ * холодная сессия, чтение репозитория, контейнер валидации, ревью — не зависит
+ * от размера правки: на milestone фазы 8 шесть из семи замечаний пришлись на
+ * один компонент и стоили шести отдельных циклов по 450–650 тысяч базовых
+ * токенов вместо одного.
+ *
+ * Полоса важности потому, что задача закрывается целиком: без разделения
+ * косметическое P3, не прошедшее ревью, держало бы открытым исправленный P1.
+ */
+const criticalSeverities = new Set(['P0', 'P1']);
+
+function findingBatchKey(finding) {
+  return `${criticalSeverities.has(finding.severity) ? 'critical' : 'routine'}\n${finding.file}`;
 }
 
-function findingIssueBody(config, pullRequest, finding) {
-  const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
-  return `${reviewFindingMarker(pullRequest, finding)}
+export function groupFindingsIntoBatches(findings, maxBatchSize = 5) {
+  const batches = new Map();
+  for (const finding of findings) {
+    const key = findingBatchKey(finding);
+    const open = batches.get(key);
+    // Ограничение размера: задача должна оставаться обозримой на ревью.
+    if (open && open.at(-1).length < maxBatchSize) open.at(-1).push(finding);
+    else if (open) open.push([finding]);
+    else batches.set(key, [[finding]]);
+  }
+
+  return [...batches.values()].flat();
+}
+
+function severityRank(severity) {
+  return Number.parseInt(String(severity).replace(/\D/g, ''), 10);
+}
+
+function batchSeverity(batch) {
+  return batch.reduce((worst, finding) =>
+    severityRank(finding.severity) < severityRank(worst.severity) ? finding : worst,
+  ).severity;
+}
+
+function findingIssueTitle(batch) {
+  const [first] = batch;
+  const title =
+    batch.length === 1
+      ? `[${first.severity}] ${first.title}`
+      : `[${batchSeverity(batch)}] ${first.file.split('/').at(-1)}: ${batch.length} review findings`;
+
+  return title.replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+function findingIssueBody(config, pullRequest, batch) {
+  // Группа собрана по файлу, поэтому локация у неё одна — и определитель
+  // инфраструктурных issues, читающий эту строку, продолжает работать.
+  const location =
+    batch.length === 1 && batch[0].line ? `${batch[0].file}:${batch[0].line}` : batch[0].file;
+  const markers = batch.map((finding) => reviewFindingMarker(pullRequest, finding)).join('\n');
+  const findings = batch
+    .map((finding, index) => {
+      const at = finding.line ? ` (line ${finding.line})` : '';
+      const heading =
+        batch.length === 1
+          ? '## Finding'
+          : `### ${index + 1}. [${finding.severity}] ${finding.title}${at}`;
+      return `${heading}\n\n${finding.body}`;
+    })
+    .join('\n\n');
+  const checklist = batch
+    .map((finding) => `- [ ] [${finding.severity}] ${finding.title}`)
+    .join('\n');
+
+  return `${markers}
 ## Context
 
 **Source:** automated milestone review of PR #${pullRequest.number}
 **Milestone:** ${config.milestone}
 **Reviewed head:** \`${pullRequest.headRefOid}\`
-**Severity:** ${finding.severity}
+**Severity:** ${batchSeverity(batch)}
 **Location:** \`${location}\`
 
-## Finding
-
-${finding.body}
+${findings}
 
 ## Definition of done
 
-- Fix the root cause without weakening existing behavior or tests.
-- Add or update regression coverage for the failure path.
-- Run the relevant checks from AGENTS.md and the Ralph configuration.
-- Keep the change focused on this finding; do not create a pull request.
+${checklist}
 
-The existing draft PR will be updated and reviewed again after all review findings are resolved.`;
+Fix the root cause of every finding above and add regression coverage for each failure path, without weakening existing tests. The issue is not done until every box is ticked.`;
 }
 
-function createReviewFindingIssue(config, repository, milestone, pullRequest, finding) {
-  const issue = parseJson(
-    run('gh', ['api', `repos/${repository}/issues`, '--method', 'POST', '--input', '-'], {
-      input: JSON.stringify({
-        title: findingIssueTitle(finding),
-        body: findingIssueBody(config, pullRequest, finding),
-        milestone: milestone.number,
-      }),
-    }).stdout,
-    'GitHub issue creation',
+/**
+ * Создание задачи повторяется вместе с проверкой, а не само по себе.
+ *
+ * Без повтора один таймаут TLS-рукопожатия обрывал прогон после того, как
+ * milestone-ревью уже отработало — а это самая дорогая сессия цикла. Слепой
+ * повтор был бы хуже: POST не идемпотентен, и попытка после дошедшего запроса
+ * завела бы вторую задачу с тем же замечанием. Поэтому внутри повтора список
+ * задач milestone перечитывается, и задача с тем же marker принимается как уже
+ * созданная.
+ */
+function createReviewFindingIssue(config, repository, milestone, pullRequest, batch) {
+  const issue = retryTransientOperation(
+    () => {
+      const existing = milestoneIssues(repository, milestone).find((candidate) =>
+        batch.some((finding) =>
+          String(candidate.body ?? '').includes(reviewFindingMarker(pullRequest, finding)),
+        ),
+      );
+      if (existing) {
+        console.log(`Задача из этого замечания уже создана: #${existing.number}.`);
+        return existing;
+      }
+      return parseJson(
+        run('gh', ['api', `repos/${repository}/issues`, '--method', 'POST', '--input', '-'], {
+          input: JSON.stringify({
+            title: findingIssueTitle(batch),
+            body: findingIssueBody(config, pullRequest, batch),
+            milestone: milestone.number,
+          }),
+        }).stdout,
+        'GitHub issue creation',
+      );
+    },
+    {
+      attempts: runtimeSettings().networkRetryAttempts,
+      baseDelayMs: runtimeSettings().networkRetryBaseDelayMs,
+      onRetry: (error, attempt, delay) =>
+        console.error(
+          `Временная ошибка создания задачи (попытка ${attempt}): ${error.message}. ` +
+            `Повтор через ${delay} ms.`,
+        ),
+    },
   );
   console.log(`Создана issue #${issue.number} из milestone finding: ${issue.html_url}`);
   return {
@@ -303,9 +410,9 @@ function reopenReviewFindingIssue(repository, issue, pullRequest) {
   console.log(`Переоткрыта issue #${issue.number}: finding всё ещё присутствует.`);
 }
 
-function updateReviewFindingIssue(config, repository, issue, pullRequest, finding) {
-  const title = findingIssueTitle(finding);
-  const body = findingIssueBody(config, pullRequest, finding);
+function updateReviewFindingIssue(config, repository, issue, pullRequest, batch) {
+  const title = findingIssueTitle(batch);
+  const body = findingIssueBody(config, pullRequest, batch);
   const updated = patchIssue(repository, issue.number, { title, body });
   issue.title = updated.title;
   issue.body = updated.body;
@@ -344,11 +451,23 @@ export function createOrReopenReviewIssues(
   const existingIssues = dependencies.milestoneIssues(repository, milestone);
   const queuedIssues = [];
   const queuedNumbers = new Set();
-  for (const finding of review.findings) {
-    const marker = reviewFindingMarker(pullRequest, finding);
-    let issue = existingIssues.find(
-      (candidate) => typeof candidate.body === 'string' && candidate.body.includes(marker),
+  // Группа разбивается обратно на отдельные замечания, если её пункты уже
+  // разъехались по разным задачам прошлого раунда: слияние осиротило бы их со
+  // старым содержимым, а это хуже лишней задачи.
+  const batches = groupFindingsIntoBatches(review.findings).flatMap((batch) => {
+    const matched = new Set(
+      batch
+        .map((finding) => matchingIssueFor(existingIssues, pullRequest, finding))
+        .filter(Boolean)
+        .map((issue) => issue.number),
     );
+    return matched.size > 1 ? batch.map((finding) => [finding]) : [batch];
+  });
+
+  for (const batch of batches) {
+    let issue = batch
+      .map((finding) => matchingIssueFor(existingIssues, pullRequest, finding))
+      .find(Boolean);
 
     if (!issue) {
       issue = dependencies.createReviewFindingIssue(
@@ -356,11 +475,11 @@ export function createOrReopenReviewIssues(
         repository,
         milestone,
         pullRequest,
-        finding,
+        batch,
       );
       existingIssues.push(issue);
     } else {
-      dependencies.updateReviewFindingIssue(config, repository, issue, pullRequest, finding);
+      dependencies.updateReviewFindingIssue(config, repository, issue, pullRequest, batch);
       if (issue.state === 'CLOSED') {
         dependencies.reopenReviewFindingIssue(repository, issue, pullRequest);
         issue.state = 'OPEN';
@@ -376,4 +495,12 @@ export function createOrReopenReviewIssues(
   }
 
   return queuedIssues;
+}
+
+function matchingIssueFor(existingIssues, pullRequest, finding) {
+  const marker = reviewFindingMarker(pullRequest, finding);
+
+  return existingIssues.find(
+    (candidate) => typeof candidate.body === 'string' && candidate.body.includes(marker),
+  );
 }

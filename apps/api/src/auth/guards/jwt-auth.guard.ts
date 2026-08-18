@@ -30,31 +30,36 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException();
     }
 
+    let payload: AccessTokenPayload;
+
+    // Only verification is caught: anything it throws means the token is bad,
+    // while a failing session lookup is an infrastructure fault that must stay
+    // a 5xx instead of signing every caller out.
     try {
-      const payload = await this.jwtService.verifyAsync<AccessTokenPayload>(token);
-
-      if (!payload.sub) {
-        throw new UnauthorizedException();
-      }
-
-      if (payload.sid === undefined) {
-        if (!environment.acceptLegacyJwtWithoutSession) {
-          throw new UnauthorizedException();
-        }
-      } else {
-        if (typeof payload.sid !== 'string' || !payload.sid) {
-          throw new UnauthorizedException();
-        }
-        if (!(await this.authSessionService.isActive(payload.sid, payload.sub))) {
-          throw new UnauthorizedException();
-        }
-      }
-
-      request.user = payload;
-      return true;
+      payload = await this.jwtService.verifyAsync<AccessTokenPayload>(token);
     } catch {
       throw new UnauthorizedException();
     }
+
+    if (!payload.sub) {
+      throw new UnauthorizedException();
+    }
+
+    if (payload.sid === undefined) {
+      if (!environment.acceptLegacyJwtWithoutSession) {
+        throw new UnauthorizedException();
+      }
+    } else {
+      if (typeof payload.sid !== 'string' || !payload.sid) {
+        throw new UnauthorizedException();
+      }
+      if (!(await this.authSessionService.isActive(payload.sid, payload.sub))) {
+        throw new UnauthorizedException();
+      }
+    }
+
+    request.user = payload;
+    return true;
   }
 
   private extractBearerToken(request: Request): string | undefined {

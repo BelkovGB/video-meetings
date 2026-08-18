@@ -44,7 +44,8 @@ read model selection; it ensures every meeting response excludes `ownerId`.
 `AuthModule` owns authentication decisions: it validates a registration attempt,
 hashes and verifies passwords, handles duplicate and invalid-credential errors,
 and issues JWTs. It also owns the minimal persisted authentication-session state
-used to revoke a single JWT without affecting a user's other sessions.
+used to revoke JWTs: one row per issued token, so a password change can revoke
+all of a user's tokens at once.
 
 Instead, it depends on the `UsersSecurityPort` token exported by `UsersModule`.
 The port offers only the credential-oriented operations authentication needs:
@@ -62,15 +63,16 @@ updates, and avatar operations are not credential operations. Its one credential
 boundary is the authenticated `POST /users/me/password` operation: it accepts
 only the verified JWT subject and session ID, selects that subject's password
 hash inside its transaction, verifies the current password, atomically replaces
-the hash, and revokes that same session. It never returns or logs a password or
-hash, has no operation accepting a target user ID or an email update, and rate
-limits password verification by both caller account and client IP. Other profile
-operations use `PrismaModule` only for safe fields (`id`, `email`, `displayName`,
-and private avatar metadata). Thus the credential flow in `AuthModule` has no
-direct `User` model dependency, `AuthSessionService` is its only Prisma-backed
-authentication state, `UsersModule` does not expose general user CRUD, and the
-profile HTTP surface is limited to the authenticated caller endpoints documented
-in `docs/api.md`.
+the hash, and revokes every authentication session of that subject, including
+the caller's. It never returns or logs a password or hash, has no operation
+accepting a target user ID or an email update, and rate limits password
+verification by both caller account and client IP. Other profile operations use
+`PrismaModule` only for safe fields (`id`, `email`, `displayName`, and private
+avatar metadata). Thus the credential flow in `AuthModule` has no direct `User`
+model dependency, `AuthSessionService` is its only Prisma-backed authentication
+state, `UsersModule` does not expose general user CRUD, and the profile HTTP
+surface is limited to the authenticated caller endpoints documented in
+`docs/api.md`.
 
 There is no general users controller: user creation and credential lookup are
 available only through the security port, while the profile controller exposes
@@ -103,9 +105,10 @@ unique authentication-session ID in `sid`. When registration or login issues a
 JWT, `AuthSessionService` first creates an `auth_sessions` row for that user;
 `sid` identifies that row. The guard verifies a non-empty `sid` against a row
 belonging to `sub` with no `revoked_at` value. Revoking a row therefore
-invalidates only its bearer token; other session rows for the same user remain
-valid. There is intentionally no session-management or bulk-device termination
-API.
+invalidates its bearer token and nothing else. A password change revokes every
+row of that user, which is the only bulk termination the API offers: there is no
+session-management screen and no password reset, so the change is a user's sole
+way to evict a token they no longer hold.
 
 `sid` was added after JWTs had already been issued. During the rollout,
 `ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true` temporarily admits signed legacy tokens
@@ -113,7 +116,12 @@ that lack it, avoiding a global logout. Such a token cannot change a password,
 because it has no session row to revoke. After at least the one-hour maximum JWT
 lifetime, deployments set the flag to `false`; missing, malformed, unknown, or
 revoked session identities are then rejected as `401` and every protected token
-is selectively revocable.
+is revocable.
+
+Only token verification is treated as an authentication failure: if the session
+lookup itself fails, the error propagates as `5xx` instead of `401`. A `401`
+makes every browser clear its session and return to sign-in, so a database blip
+would otherwise sign all active users out.
 
 After this verification, the guard attaches the payload to the Nest request.
 The controller passes only `sub` to the command or query. Collection and detail

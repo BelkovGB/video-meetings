@@ -147,8 +147,26 @@ export function normalizeReviewResult(review) {
 const reviewContextPattern =
   /\n*<!-- ralph-issue-review-context:start -->[\s\S]*?<!-- ralph-issue-review-context:end -->\n*/g;
 
-function issueBodyWithoutRalphMetadata(issue) {
+export function issueBodyWithoutRalphMetadata(issue) {
   return issueBodyWithoutCompletionState(issue).replace(reviewContextPattern, '').trim();
+}
+
+/**
+ * Замечания прошлого ревью, если они есть в теле issue.
+ *
+ * Блок и так доезжал до ревьюера — внутри тела, без подписи, вперемешку с
+ * критериями готовности. Отдельная секция нужна, чтобы можно было потребовать
+ * проверить закрытие каждого пункта: неподписанный текст такого требования не
+ * выдерживает.
+ */
+export function reviewContextFromIssueBody(issue) {
+  const [block] = issueBodyWithoutCompletionState(issue).match(reviewContextPattern) ?? [];
+  if (!block) return null;
+
+  return block
+    .replace('<!-- ralph-issue-review-context:start -->', '')
+    .replace('<!-- ralph-issue-review-context:end -->', '')
+    .trim();
 }
 
 export function issueBodyWithReviewContext(issue, review) {

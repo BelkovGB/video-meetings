@@ -15,7 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { readJsonFile, writeJsonAtomic } from './ralph-runtime.mjs';
-import { fail } from './ralph-scope.mjs';
+import { fail, validationScriptsForChangedFiles } from './ralph-scope.mjs';
 import { credentialFreeEnvironment, run } from './ralph-process-runner.mjs';
 import { agentInstructionFiles, trustedFileHash } from './ralph-config.mjs';
 import { stripAnsi } from './ralph-failure-summary.mjs';
@@ -106,7 +106,7 @@ export function validationContainerRunArgs(config, scripts, snapshotPath) {
   ];
 }
 
-function createValidationWorkspaceSnapshot() {
+export function createValidationWorkspaceSnapshot() {
   const snapshotPath = mkdtempSync(path.join(tmpdir(), 'ralph-validation-'));
   try {
     const files = run('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])
@@ -123,7 +123,14 @@ function createValidationWorkspaceSnapshot() {
         fail(`Небезопасный путь в git ls-files: ${relativePath}`);
       }
       const sourcePath = path.join(projectRoot, normalizedPath);
-      if (lstatSync(sourcePath).isSymbolicLink()) {
+      // Удалённый в рабочем дереве файл git ls-files всё ещё перечисляет как
+      // отслеживаемый. Снимок обязан повторять дерево, а не индекс: иначе
+      // issue, которую нельзя выполнить без удаления файла, не проходит
+      // валидацию в принципе. На issue #84 три попытки подряд падали с ENOENT
+      // за секунду и съели остаток бюджета итераций.
+      const sourceStats = lstatSync(sourcePath, { throwIfNoEntry: false });
+      if (!sourceStats) continue;
+      if (sourceStats.isSymbolicLink()) {
         fail(`Validation snapshot не допускает symbolic link: ${relativePath}`);
       }
       const destinationPath = path.join(snapshotPath, normalizedPath);
@@ -146,6 +153,48 @@ const validationDependencyFiles = [
   'scripts/ralph/ralph-validation-docker-shim.sh',
   'scripts/ralph/ralph-validation-entrypoint.sh',
 ];
+
+/**
+ * Образ валидации ставит зависимости по HEAD, а не по рабочему дереву, и это
+ * намеренно: сборка образа — единственный шаг с сетью, поэтому брать
+ * `package.json` из дерева значило бы выполнить lifecycle-хуки, которые туда
+ * только что мог записать агент. Ровно это закрывают тесты «built from
+ * committed inputs, not the mutable workspace» и «takes package.json from HEAD
+ * and ignores injected lifecycle hooks».
+ *
+ * Плата — дрейф. Стоит агенту добавить пакет, и контейнер собирает дерево,
+ * объявляющее одну зависимость, против node_modules предыдущего коммита. Молча
+ * это выглядит как ошибка компиляции «модуль не найден», а починить её агент не
+ * может: коммитить ему запрещено, HEAD не двигается, тег образа считается по
+ * тем же HEAD-байтам, поэтому и пересборки не будет — все maxTestFixAttempts
+ * уходят на один и тот же отказ. Обратный случай тише и опаснее: поднятая в
+ * дереве версия проверяется против ранее установленной, даёт зелёный прогон и
+ * уходит в push.
+ *
+ * Поэтому расхождение называется вслух и до контейнера. Файлы схемы Prisma сюда
+ * не входят: `prisma:generate` выполняется внутри `build` и `test:e2e` по
+ * рабочему дереву, так что схема не дрейфует.
+ */
+export function assertValidationDependenciesCommitted(dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const drifted = execute('git', [
+    'diff',
+    '--name-only',
+    'HEAD',
+    '--',
+    ...validationDependencyFiles,
+  ])
+    .stdout.split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (drifted.length === 0) return;
+
+  fail(
+    `Образ валидации ставит зависимости по HEAD, а в рабочем дереве изменены: ${drifted.join(', ')}. ` +
+      'Контейнер проверял бы это дерево против node_modules предыдущего коммита, ' +
+      'поэтому прогон остановлен. Закоммитьте эти файлы и запустите Ralph заново.',
+  );
+}
 
 export function createTrustedValidationDependencySnapshot() {
   const snapshotPath = mkdtempSync(path.join(tmpdir(), 'ralph-validation-dependencies-'));
@@ -302,10 +351,16 @@ export function failedValidationScript(error) {
   return markers.at(-1)?.[1] ?? null;
 }
 
+/**
+ * Возвращает исход прогона: выполнялся ли контейнер или набор был признан
+ * проверенным по attestation. Без этого признака длительность стадии
+ * бимодальна — доли секунды против нескольких минут на том же наборе, — и
+ * усреднение по issues даёт число, которого не бывает ни в одном прогоне.
+ */
 export function runConfiguredScripts(config, scripts, label, options = {}) {
   const includePreflight = options.includePreflight ?? true;
   const execute = options.run ?? run;
-  if (scripts.length === 0) return;
+  if (scripts.length === 0) return { ran: false, attested: false, scripts: [] };
   assertTrustedControlFilesUnchanged(config);
   // Один контейнер на весь набор. Изоляция от хоста сохраняется, а workspace,
   // node_modules, PostgreSQL и migrations готовятся один раз вместо одного раза
@@ -338,7 +393,7 @@ export function runConfiguredScripts(config, scripts, label, options = {}) {
         `${label}: тот же source, тот же набор scripts и тот же образ уже прошли проверку ` +
           `(attestation ${attestationKey.slice(0, 12)}). Повторный прогон пропущен.`,
       );
-      return;
+      return { ran: false, attested: true, scripts: isolatedScripts, image };
     }
     execute(
       'docker',
@@ -360,6 +415,7 @@ export function runConfiguredScripts(config, scripts, label, options = {}) {
         attestationsPath,
       );
     }
+    return { ran: true, attested: false, scripts: isolatedScripts, image };
   } catch (error) {
     error.code = error.code === 'RALPH_COMMAND_TIMEOUT' ? error.code : 'RALPH_VALIDATION_FAILED';
     error.script = failedValidationScript(error) ?? isolatedScripts.join(', ');
@@ -371,12 +427,35 @@ export function runConfiguredScripts(config, scripts, label, options = {}) {
 }
 
 export function runPreflight(config) {
-  runConfiguredScripts(config, config.preflightScripts, 'Preflight', { includePreflight: false });
+  return runConfiguredScripts(config, config.preflightScripts, 'Preflight', {
+    includePreflight: false,
+  });
 }
 
-export function runConfiguredValidation(config) {
+/**
+ * `changedFiles` — пути, которые изменила эта issue. По ним набор сокращается
+ * до применимых проверок; без них выполняется полный набор.
+ *
+ * Перед созданием PR валидация вызывается без аргумента намеренно: сокращённые
+ * прогоны покрывают каждую issue по отдельности, а ветку целиком должен один
+ * раз проверить полный набор.
+ */
+export function runConfiguredValidation(config, changedFiles) {
+  // Проверка стоит здесь, а не в runConfiguredScripts: дрейф вносит только
+  // сессия агента, а preflight выполняется по заведомо чистому дереву.
+  assertValidationDependenciesCommitted();
+  const selection = config.scopedValidation
+    ? validationScriptsForChangedFiles(config.validationScripts, changedFiles)
+    : { scripts: config.validationScripts, skipped: [], narrowed: false, requiresDatabase: true };
+  if (selection.narrowed) {
+    console.log(
+      `Validation сокращена по области изменения: пропущены ${selection.skipped.join(', ')}.`,
+    );
+  }
   // Каждый validation-запуск получает новый контейнер с новой изолированной БД и
   // выполняет preflight первым, чтобы migration текущей issue была применена
   // внутри того же контейнера, что и остальные scripts.
-  runConfiguredScripts(config, config.validationScripts, 'Validation');
+  return runConfiguredScripts(config, selection.scripts, 'Validation', {
+    includePreflight: selection.requiresDatabase,
+  });
 }

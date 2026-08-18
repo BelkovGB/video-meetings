@@ -4,12 +4,20 @@ import Link from 'next/link';
 
 import { AvatarSection } from './avatar-section';
 import { DisplayNameForm } from './display-name-form';
+import { PasswordChangeForm } from './password-change-form';
 import { ProfileOverview } from './profile-overview';
 import { useCurrentProfile } from './use-current-profile';
 
 export default function ProfilePage() {
-  const { profile, setProfile, isLoading, loadError, handleUnauthorized, retryLoad } =
-    useCurrentProfile();
+  const {
+    profile,
+    setProfile,
+    isLoading,
+    loadError,
+    handlePasswordChanged,
+    handleSessionRejected,
+    retryLoad,
+  } = useCurrentProfile();
 
   if (isLoading) {
     return (
@@ -85,7 +93,7 @@ export default function ProfilePage() {
             <DisplayNameForm
               initialDisplayName={profile.displayName}
               onProfileSaved={setProfile}
-              onUnauthorized={handleUnauthorized}
+              onUnauthorized={handleSessionRejected}
             />
             <AvatarSection
               avatar={profile.avatar}
@@ -94,7 +102,11 @@ export default function ProfilePage() {
                   currentProfile ? { ...currentProfile, avatar } : currentProfile,
                 )
               }
-              onUnauthorized={handleUnauthorized}
+              onUnauthorized={handleSessionRejected}
+            />
+            <PasswordChangeForm
+              onSessionRejected={handleSessionRejected}
+              onPasswordChanged={handlePasswordChanged}
             />
             <div className="grid gap-2 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center">
               <p className="text-sm font-medium text-slate-600">Email</p>

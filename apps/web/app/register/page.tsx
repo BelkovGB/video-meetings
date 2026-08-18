@@ -8,6 +8,7 @@ import { FormEvent, useRef, useState } from 'react';
 import { apiUrl } from '../../lib/api/config';
 import { startSession } from '../../lib/auth/session';
 import type { ApiError } from '../../lib/api/contracts';
+import { apiErrorMessage, type ApiErrorFallback } from '../../lib/api/errors';
 
 const minimumPasswordLength = 9;
 const maximumPasswordBytes = 72;
@@ -42,16 +43,21 @@ function validatePassword(value: string) {
   return null;
 }
 
+// The API answers field validation in English; this screen words its own.
+// `satisfies` rather than a bare const: passed as a variable, a misspelled
+// `validaton` would be an unchecked excess property and would silently
+// downgrade every field rejection to the default sentence.
+const registrationErrorFallback = {
+  default: 'Не удалось создать аккаунт. Попробуйте ещё раз.',
+  validation: 'Проверьте корректность email и пароля.',
+} satisfies ApiErrorFallback;
+
 function getErrorMessage(error: ApiError, status: number) {
   if (status === 409) {
     return 'Этот email уже зарегистрирован.';
   }
 
-  if (Array.isArray(error.message)) {
-    return 'Проверьте корректность email и пароля.';
-  }
-
-  return error.message ?? 'Не удалось создать аккаунт. Попробуйте ещё раз.';
+  return apiErrorMessage(error, registrationErrorFallback);
 }
 
 export default function RegisterPage() {

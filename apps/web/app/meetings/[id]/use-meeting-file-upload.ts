@@ -4,7 +4,8 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useReducer, useRef } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
-import type { MeetingFile, UploadApiError } from '../../../lib/api/contracts';
+import type { CodedApiError, MeetingFile } from '../../../lib/api/contracts';
+import { sessionRejectedLoginPath } from '../../../lib/auth/login-notice';
 import { clearSessionIdentity, readAccessToken } from '../../../lib/auth/session';
 
 type MeetingFileUploadOptions = {
@@ -111,7 +112,7 @@ function getClientValidationError(file: File): string | null {
   return null;
 }
 
-function getServerErrorMessage(status: number, error: UploadApiError | null): string {
+function getServerErrorMessage(status: number, error: CodedApiError | null): string {
   if (error?.code && uploadErrorMessages[error.code]) {
     return uploadErrorMessages[error.code];
   }
@@ -250,7 +251,7 @@ export function useMeetingFileUpload({
 
       if (request.status === 401) {
         clearSessionIdentity();
-        router.replace('/login');
+        router.replace(sessionRejectedLoginPath);
         return;
       }
 
@@ -261,7 +262,7 @@ export function useMeetingFileUpload({
 
         if (request.status < 200 || request.status >= 300) {
           dispatch({ type: 'failed' });
-          onError(getServerErrorMessage(request.status, request.response as UploadApiError | null));
+          onError(getServerErrorMessage(request.status, request.response as CodedApiError | null));
           return;
         }
 

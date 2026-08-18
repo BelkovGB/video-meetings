@@ -1,9 +1,10 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { apiUrl } from '../lib/api/config';
 import type { CurrentUserProfile, Meeting } from '../lib/api/contracts';
+import { sessionRejectedLoginPath } from '../lib/auth/login-notice';
 import {
   clearSession,
   readAccessToken,
@@ -12,6 +13,7 @@ import {
   removeStoredDisplayName,
   writeDisplayName,
 } from '../lib/auth/session';
+import { useRestoredSessionGuard } from '../lib/auth/use-restored-session-guard';
 
 type DashboardData = {
   identity: string;
@@ -44,6 +46,17 @@ function clearSessionAndRedirectToLogin(router: ReturnType<typeof useRouter>) {
   router.replace('/login');
 }
 
+// The same `401` handling the profile screen documents at `handleSessionRejected`:
+// a password change now revokes every session of the account, so a rejected
+// token on this device is as likely to be someone signing out from another one
+// as an expiry, and the `401` carries no `code` to tell them apart. The notice
+// is accurate for both and names the new password as the way back in. Signing
+// out on purpose keeps the bare /login: nothing needs explaining there.
+function clearSessionAndExplainRejection(router: ReturnType<typeof useRouter>) {
+  clearSession();
+  router.replace(sessionRejectedLoginPath);
+}
+
 /**
  * Loads everything the dashboard needs for the signed-in user and redirects to
  * the login page whenever the stored session turns out to be unusable.
@@ -57,6 +70,12 @@ export function useDashboardData(): DashboardData {
   const [isLoading, setIsLoading] = useState(true);
   const [loadAttempts, setLoadAttempts] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const returnToLogin = useCallback(() => {
+    clearSessionAndRedirectToLogin(router);
+  }, [router]);
+
+  useRestoredSessionGuard(clearSession);
 
   useEffect(() => {
     const token = readAccessToken();
@@ -85,7 +104,7 @@ export function useDashboardData(): DashboardData {
         }
 
         if (response.status === 401) {
-          clearSessionAndRedirectToLogin(router);
+          clearSessionAndExplainRejection(router);
           return;
         }
 
@@ -120,7 +139,7 @@ export function useDashboardData(): DashboardData {
         });
 
         if (response.status === 401) {
-          clearSessionAndRedirectToLogin(router);
+          clearSessionAndExplainRejection(router);
           return;
         }
 
@@ -160,8 +179,6 @@ export function useDashboardData(): DashboardData {
       setIsLoading(true);
       setLoadAttempts((currentAttempt) => currentAttempt + 1);
     },
-    logout: () => {
-      clearSessionAndRedirectToLogin(router);
-    },
+    logout: returnToLogin,
   };
 }

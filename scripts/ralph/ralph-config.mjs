@@ -261,6 +261,14 @@ function applyLoopDefaults(config) {
   config.maxIterations ??= 20;
   config.maxTurns ??= 50;
   config.maxTestFixAttempts ??= 5;
+  // Сколько раз подряд ревью может отклонить одну issue, прежде чем она уйдёт
+  // из очереди прогона. Меньше, чем у тестов: провал теста называет конкретную
+  // строку, а отказ ревью — суждение, и повтор суждения сходится хуже.
+  config.maxReviewFixAttempts ??= 3;
+  // Важность, ниже которой замечание не отклоняет работу и не заводит задачу.
+  // Оно остаётся в отчёте ревью и в комментарии к PR — меняется не видимость,
+  // а право останавливать цикл.
+  config.reviewSeverityFloor ??= 'P1';
   config.runtime ??= {};
   // Значения живут в ralph-process-runner.mjs: тот же набор действует до
   // loadConfig, и раздвоение дефолтов расходилось бы молча.
@@ -317,6 +325,10 @@ function applyValidationAndReviewDefaults(config) {
   };
   config.preflightScripts ??= [];
   config.validationScripts ??= ['format:check', 'lint', 'build'];
+  // Сокращение набора по области изменения. Выключается, когда набор проверок
+  // не соответствует карте областей в ralph-scope.mjs и оператору нужен
+  // гарантированно полный прогон на каждой issue.
+  config.scopedValidation ??= true;
   config.review ??= {
     enabled: true,
     model: 'gpt-5.6-terra',
@@ -356,6 +368,9 @@ function validateLoopFields(config) {
   }
   if (!Number.isInteger(config.maxTurns) || config.maxTurns < 1) {
     fail('Поле "maxTurns" должно быть целым числом больше 0.');
+  }
+  if (!Number.isInteger(config.maxReviewFixAttempts) || config.maxReviewFixAttempts < 1) {
+    fail('Поле "maxReviewFixAttempts" должно быть целым числом больше 0.');
   }
   if (!Number.isInteger(config.maxTestFixAttempts) || config.maxTestFixAttempts < 1) {
     fail('Поле "maxTestFixAttempts" должно быть целым числом больше 0.');
@@ -438,6 +453,12 @@ function validateScriptNames(config) {
       'Поля "preflightScripts" и "validationScripts" должны быть массивами безопасных имён npm scripts.',
     );
   }
+  if (!['P0', 'P1', 'P2', 'P3'].includes(config.reviewSeverityFloor)) {
+    fail('Поле "reviewSeverityFloor" должно быть одним из: P0, P1, P2, P3.');
+  }
+  if (typeof config.scopedValidation !== 'boolean') {
+    fail('Поле "scopedValidation" должно быть true или false.');
+  }
 }
 
 function validateRuntimeSettings(config) {
@@ -455,14 +476,24 @@ function validateRuntimeSettings(config) {
       fail(`Поле "runtime.${field}" должно быть целым числом больше 0.`);
     }
   }
-  for (const field of ['networkRetryAttempts', 'reviewRetryAttempts']) {
-    if (
-      !Number.isInteger(config.runtime[field]) ||
-      config.runtime[field] < 1 ||
-      config.runtime[field] > 5
-    ) {
-      fail(`Поле "runtime.${field}" должно быть целым числом от 1 до 5.`);
-    }
+  // Пределы разные, потому что попытка стоит разного. Повтор сетевой команды —
+  // это секунды ожидания, и щедрость здесь оправдана: 17 августа трёх попыток
+  // с паузами 2 и 4 секунды не хватило на мигающий GitHub, и это стоило трёх
+  // прогонов, каждый из которых уже сделал всю дорогую работу. Повтор ревью —
+  // это целая сессия агента: минуты и сотни тысяч токенов за попытку.
+  if (
+    !Number.isInteger(config.runtime.networkRetryAttempts) ||
+    config.runtime.networkRetryAttempts < 1 ||
+    config.runtime.networkRetryAttempts > 60
+  ) {
+    fail('Поле "runtime.networkRetryAttempts" должно быть целым числом от 1 до 60.');
+  }
+  if (
+    !Number.isInteger(config.runtime.reviewRetryAttempts) ||
+    config.runtime.reviewRetryAttempts < 1 ||
+    config.runtime.reviewRetryAttempts > 5
+  ) {
+    fail('Поле "runtime.reviewRetryAttempts" должно быть целым числом от 1 до 5.');
   }
   if (
     !Number.isInteger(config.runtime.maxPages) ||
@@ -584,6 +615,7 @@ function collectTrustedControlFileHashes(config) {
     path.join(scriptDirectory, 'ralph-milestone-review.mjs'),
     path.join(scriptDirectory, 'ralph-process-runner.mjs'),
     path.join(scriptDirectory, 'ralph-prompts.mjs'),
+    path.join(scriptDirectory, 'ralph-run-metrics.mjs'),
     path.join(scriptDirectory, 'ralph-runtime.mjs'),
     path.join(scriptDirectory, 'ralph-scope.mjs'),
     path.join(scriptDirectory, 'ralph-state-store.mjs'),
@@ -619,16 +651,34 @@ export function loadConfig() {
   validateRuntimeSettings(config);
   validateAgentRoles(config);
   resolveControlPlanePaths(config);
-  // Набор инструкций сохраняется целиком, а не восстанавливается по имени
-  // файла. Пока проверка выводила его фильтром `basename === 'AGENTS.md'`,
-  // правило «что считается инструкцией» жило в двух местах, и расширение набора
-  // на `.claude/**` рассогласовало их: файл попадал в текущий набор и не попадал
-  // в ожидаемый, из-за чего любой прогон падал до валидации.
-  config.agentInstructionFiles = agentInstructionFiles();
-  config.trustedControlFileHashes = collectTrustedControlFileHashes(config);
+  Object.assign(config, controlPlaneSnapshot(config));
 
   applyRuntimeSettings(config.runtime);
   return config;
+}
+
+/**
+ * Слепок контрольного контура на момент вызова: набор файлов инструкций и хеши
+ * доверенных файлов.
+ *
+ * Набор сохраняется целиком, а не восстанавливается по имени файла. Пока
+ * проверка выводила его фильтром `basename === 'AGENTS.md'`, правило «что
+ * считается инструкцией» жило в двух местах, и расширение набора на `.claude/**`
+ * рассогласовало их: файл попадал в текущий набор и не попадал в ожидаемый.
+ *
+ * Функция отдельная, потому что снимок берётся дважды. Смысл проверки —
+ * «AFK-сессия изменила контрольный контур», значит слепок обязан описывать
+ * дерево в тот момент, когда цикл закончил его готовить. Единственное, чем цикл
+ * готовит дерево, — переключение на ветку фазы в `verifyRepository`, и оно
+ * происходит уже после `loadConfig`. Слепок, снятый только при загрузке
+ * конфигурации, описывал бы дерево до переключения: файлы, которые чекаут
+ * принёс или унёс, выглядели бы правкой сессии, которая ещё не начиналась.
+ */
+export function controlPlaneSnapshot(config) {
+  return {
+    agentInstructionFiles: agentInstructionFiles(),
+    trustedControlFileHashes: collectTrustedControlFileHashes(config),
+  };
 }
 
 export function loadRalphRules(config) {

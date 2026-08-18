@@ -4,7 +4,8 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
-import type { ApiError, CurrentUserProfile } from '../../lib/api/contracts';
+import type { CurrentUserProfile } from '../../lib/api/contracts';
+import { readApiErrorMessage } from '../../lib/api/errors';
 import { readAccessToken, writeDisplayName } from '../../lib/auth/session';
 
 type DisplayNameFormProps = {
@@ -75,7 +76,12 @@ export function DisplayNameForm({
       }
 
       if (!response.ok) {
-        setDisplayNameError(await getProfileApiError(response));
+        setDisplayNameError(
+          await readApiErrorMessage(
+            response,
+            'Не удалось сохранить имя. Исправьте значение и повторите попытку.',
+          ),
+        );
         return;
       }
 
@@ -148,24 +154,4 @@ export function DisplayNameForm({
       </div>
     </form>
   );
-}
-
-/**
- * Reads the API error message. An array is used for field validation, and its
- * first element is returned even when empty, which renders an empty message.
- */
-async function getProfileApiError(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as ApiError;
-    if (typeof body.message === 'string') {
-      return body.message;
-    }
-    if (Array.isArray(body.message) && body.message.length > 0) {
-      return body.message[0];
-    }
-  } catch {
-    // A malformed error response falls back to a recoverable field message.
-  }
-
-  return 'Не удалось сохранить имя. Исправьте значение и повторите попытку.';
 }

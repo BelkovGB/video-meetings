@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -7,12 +15,21 @@ import test from 'node:test';
 import {
   acquireRunLock,
   initializePersistentLog,
+  logDetail,
+  logDetailError,
   rotatePersistentLog,
   isTransientFailure,
   readJsonFile,
+  retryDelayMs,
   retryTransientOperation,
   writeJsonAtomic,
 } from './ralph-runtime.mjs';
+import {
+  commandSpec,
+  resolveWindowsExecutable,
+  windowsSafeCommandEnvironment,
+} from './ralph-process-runner.mjs';
+import { runReviewWithRetries } from './ralph-agent-session.mjs';
 
 function withTemporaryDirectory(run) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'ralph-runtime-test-'));
@@ -265,6 +282,33 @@ test('every run starts a fresh run.log and keeps a bounded history', () => {
   });
 });
 
+test('retention keeps the newest runs even when every rotation shares one timestamp', () => {
+  withTemporaryDirectory((directory) => {
+    const logPath = path.join(directory, 'run.log');
+    // Метка задаётся явно, а не берётся с часов: восемь ротаций укладываются в
+    // одну миллисекунду на tmpfs контейнера и не укладываются на диске Windows,
+    // из-за чего дефект был виден только в валидации. Явная метка
+    // воспроизводит его на любой машине.
+    const stamp = '2026-08-16T17:41:21.721Z';
+
+    for (let run = 1; run <= 8; run += 1) {
+      writeFileSync(logPath, `marker for run ${run}\n`, 'utf8');
+      rotatePersistentLog(logPath, stamp);
+    }
+
+    const archived = readdirSync(directory)
+      .filter((name) => /^run-.*\.log$/.test(name))
+      .sort();
+    assert.equal(archived.length, 5);
+    // Пока порядок задавал случайный суффикс, здесь оставались прогоны
+    // 5, 6, 3, 8 и 2: самый свежий архив удалялся, самый старый выживал.
+    assert.deepEqual(
+      archived.map((name) => readFileSync(path.join(directory, name), 'utf8').trim()),
+      [4, 5, 6, 7, 8].map((run) => `marker for run ${run}`),
+    );
+  });
+});
+
 test('two rotations within the same millisecond keep both archives', () => {
   withTemporaryDirectory((directory) => {
     const logPath = path.join(directory, 'run.log');
@@ -287,4 +331,215 @@ test('two rotations within the same millisecond keep both archives', () => {
       ['first run\n', 'second run\n'],
     );
   });
+});
+
+// Порядок PATHEXT задаётся явно: на Linux сравнение имён регистрозависимо, и
+// без фиксированного регистра тест проверял бы разные вещи на разных системах.
+const windowsPathExtensions = '.COM;.EXE;.BAT;.CMD';
+
+test('a windows command resolves by PATH order first and extension order second', () => {
+  withTemporaryDirectory((root) => {
+    const native = path.join(root, 'native');
+    const npm = path.join(root, 'npm');
+    for (const directory of [native, npm]) {
+      mkdirSync(directory, { recursive: true });
+    }
+
+    writeFileSync(path.join(native, 'claude.EXE'), '', 'utf8');
+    writeFileSync(path.join(npm, 'claude.CMD'), '', 'utf8');
+
+    const resolve = (directories) =>
+      resolveWindowsExecutable('claude', {
+        PATH: directories.join(path.delimiter),
+        PATHEXT: windowsPathExtensions,
+      });
+
+    // Ровно этот случай ронял каждую Claude-сессию: рабочий claude.exe лежал
+    // раньше в PATH, а код всё равно подставлял сломанный npm-шим claude.cmd.
+    assert.equal(resolve([native, npm]), path.join(native, 'claude.EXE'));
+    // Каталог сильнее расширения: шим побеждает, если стоит раньше.
+    assert.equal(resolve([npm, native]), path.join(npm, 'claude.CMD'));
+    // Установка только через npm остаётся рабочей.
+    assert.equal(resolve([npm]), path.join(npm, 'claude.CMD'));
+    assert.equal(resolve([path.join(root, 'empty')]), null);
+
+    // Элемент PATH в кавычках законен, и Windows кавычки снимает. Пока их не
+    // снимал этот код, установленный CLI выглядел как отсутствующий, а
+    // отсутствие команды здесь — жёсткая ошибка запуска.
+    assert.equal(
+      resolveWindowsExecutable('claude', {
+        PATH: `"${native}"`,
+        PATHEXT: windowsPathExtensions,
+      }),
+      path.join(native, 'claude.EXE'),
+    );
+  });
+});
+
+test('a batch shim is protected from a same-named file in the working directory', () => {
+  // cmd.exe ищет команду в текущем каталоге раньше PATH, а текущий каталог
+  // сессии — корень репозитория, куда агент пишет с полным доступом. Передать
+  // вместо имени абсолютный путь нельзя: `cmd /d /s /c "C:\dir with space\x.cmd"`
+  // разбирается по пробелу. Значит, единственная защита — эта переменная.
+  assert.deepEqual(
+    windowsSafeCommandEnvironment,
+    process.platform === 'win32' ? { NoDefaultCurrentDirectoryInExePath: '1' } : {},
+  );
+});
+
+test('a review is not retried when the failure cannot change between attempts', async () => {
+  const config = { runtime: { reviewRetryAttempts: 3, networkRetryBaseDelayMs: 1 } };
+
+  for (const code of [
+    'RALPH_AGENT_AUTH',
+    'RALPH_AGENT_TIMEOUT',
+    'RALPH_MAX_TURNS',
+    'RALPH_COMMAND_NOT_FOUND',
+  ]) {
+    let calls = 0;
+    await assert.rejects(
+      runReviewWithRetries(
+        config,
+        () => {
+          calls += 1;
+          const error = new Error(code);
+          error.code = code;
+          throw error;
+        },
+        'review',
+      ),
+      (error) => error.code === code,
+    );
+    // Ни prompt, ни состояние репозитория между попытками не меняются, поэтому
+    // повтор воспроизводит тот же отказ. Дороже всех RALPH_AGENT_TIMEOUT: три
+    // попытки по agentTimeoutMs — это 4,5 часа до первого сообщения оператору.
+    assert.equal(calls, 1, code);
+  }
+
+  // Технический сбой запуска по-прежнему повторяется.
+  let attempts = 0;
+  const result = await runReviewWithRetries(
+    config,
+    () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error('spawn EAGAIN');
+      return 'ok';
+    },
+    'review',
+  );
+  assert.equal(result, 'ok');
+  assert.equal(attempts, 3);
+});
+
+test(
+  'commandSpec spawns a native executable directly and keeps cmd.exe for batch shims',
+  // Ветка целиком windows-only: в Linux-контейнере валидации проверять нечего.
+  { skip: process.platform !== 'win32' ? 'windows-only' : false },
+  () => {
+    withTemporaryDirectory((root) => {
+      const native = path.join(root, 'native');
+      const npm = path.join(root, 'npm');
+      for (const directory of [native, npm]) {
+        mkdirSync(directory, { recursive: true });
+      }
+      writeFileSync(path.join(native, 'claude.exe'), '', 'utf8');
+      writeFileSync(path.join(npm, 'claude.cmd'), '', 'utf8');
+      const originalPath = process.env.PATH;
+      // Регистр берётся из PATHEXT машины, а сравнение имён на Windows от
+      // регистра не зависит: сравниваем так же.
+      const same = (actual, expected) => assert.equal(actual.toLowerCase(), expected.toLowerCase());
+
+      try {
+        process.env.PATH = [native, npm].join(path.delimiter);
+        const direct = commandSpec('claude', ['-p']);
+        same(direct.command, path.join(native, 'claude.exe'));
+        // Без cmd.exe исчезает и обрезка командной строки на переводе строки.
+        assert.deepEqual(direct.commandArgs, ['-p']);
+
+        process.env.PATH = npm;
+        const shim = commandSpec('claude', ['-p']);
+        assert.match(shim.command, /cmd\.exe$/i);
+        assert.deepEqual(shim.commandArgs.slice(0, 3), ['/d', '/s', '/c']);
+        same(shim.commandArgs[3], 'claude.cmd');
+        assert.deepEqual(shim.commandArgs.slice(4), ['-p']);
+
+        // Отсутствие обеих установок обязано быть громкой ошибкой, а не
+        // командой, которая не запустится.
+        process.env.PATH = path.join(root, 'empty');
+        assert.throws(
+          () => commandSpec('claude', ['-p']),
+          (error) => {
+            assert.equal(error.code, 'RALPH_COMMAND_NOT_FOUND');
+            return true;
+          },
+        );
+      } finally {
+        process.env.PATH = originalPath;
+      }
+    });
+  },
+);
+
+test('подробности идут в журнал, а объёмный повтор — ссылкой', () => {
+  withTemporaryDirectory((directory) => {
+    const logPath = path.join(directory, 'run.log');
+    const printed = [];
+    // Вывод контейнера длиннее порога: именно такие куски и повторялись.
+    const containerOutput = `RALPH_VALIDATION_SCRIPT=lint\n${'x'.repeat(600)}`;
+
+    let restore;
+    try {
+      restore = initializePersistentLog(logPath, { mode: '--run' });
+      // Перехват ставится поверх журнального: если подробности всё же уйдут в
+      // консоль, они окажутся здесь.
+      console.log = (...args) => printed.push(args.join(' '));
+      console.error = (...args) => printed.push(args.join(' '));
+      logDetail(containerOutput);
+      logDetail(containerOutput);
+      logDetailError('короткая строка ошибки');
+    } finally {
+      restore?.();
+    }
+
+    const log = readFileSync(logPath, 'utf8');
+    // Консоль не получила ничего: за ходом прогона в ней видно шаги, а не
+    // десятки тысяч строк вывода контейнера.
+    assert.deepEqual(printed, []);
+    assert.match(log, /RALPH_VALIDATION_SCRIPT=lint/);
+    assert.match(log, /ERROR короткая строка ошибки/);
+
+    const digest = log.match(/<сообщение ([0-9a-f]{12})>/)?.[1];
+    assert.ok(digest, 'первое появление обязано получить метку');
+    // Второй раз тот же текст занимает строку вместо шестисот символов, но
+    // остаётся в хронологии и находится поиском по той же метке.
+    assert.equal(log.match(/x{600}/g)?.length, 1);
+    assert.match(log, new RegExp(`<повтор сообщения ${digest} от `));
+  });
+});
+
+test('вне прогона подробности всё же попадают в консоль', () => {
+  // `--check` и тесты работают без журнала: единственный доступный вывод —
+  // консоль, и молчание там означало бы потерю сообщения.
+  const printed = [];
+  const original = console.log;
+  console.log = (...args) => printed.push(args.join(' '));
+  try {
+    logDetail('вывод без журнала');
+  } finally {
+    console.log = original;
+  }
+
+  assert.deepEqual(printed, ['вывод без журнала']);
+});
+
+test('пауза между повторами удваивается и упирается в тридцать секунд', () => {
+  assert.deepEqual(
+    [1, 2, 3, 4].map((attempt) => retryDelayMs(2_000, attempt)),
+    [2_000, 4_000, 8_000, 16_000],
+  );
+  assert.equal(retryDelayMs(2_000, 10), 30_000);
+  // Базовая задержка в тридцать секунд упирается в потолок сразу, поэтому все
+  // паузы становятся одинаковыми: удвоение перестаёт работать.
+  assert.equal(retryDelayMs(30_000, 1), 30_000);
+  assert.equal(retryDelayMs(30_000, 5), 30_000);
 });

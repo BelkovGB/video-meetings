@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { fail } from './ralph-scope.mjs';
+import { controlPlaneExcludePathspec, fail } from './ralph-scope.mjs';
 import { run, runNetwork } from './ralph-process-runner.mjs';
 import { activeStateStore } from './ralph-state-store.mjs';
 import { clearedFailure } from './ralph-failure-summary.mjs';
@@ -17,6 +17,183 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 
 export function commitTrailerForIssue(issue) {
   return `Ralph-Issue: #${issue.number}`;
+}
+
+// Бюджет подобран по наблюдаемой цене альтернативы: без diff ревьюер Claude
+// запускается с Read, Glob и Grep и без оболочки, то есть получить изменения
+// сам не может вовсе и восстанавливает область правки чтением файлов целиком —
+// на issue #57 это 34 шага и шесть минут. Diff на 60 000 символов дешевле.
+const reviewDiffCharacterBudget = 60_000;
+
+// package-lock.json меняется на сотни строк от одной зависимости и вытеснил бы
+// из бюджета продуктовый код. Файл остаётся в списке изменений и в статистике;
+// исчезает только его построчный diff.
+const reviewDiffExcludedPaths = [':(exclude)package-lock.json', ':(exclude)**/package-lock.json'];
+
+/**
+ * Все commit этой issue, новейший первым.
+ *
+ * Оркестратор требует один commit на прогон, а не на issue: после отказа ревью
+ * состояние очищается, следующая итерация стартует с нового HEAD и добавляет
+ * второй commit с тем же trailer. Номер issue уникален в репозитории, поэтому
+ * совпадение trailer однозначно и ограничивать поиск по истории не нужно.
+ */
+export function issueCommits(issue, head, execute = run) {
+  const found = execute(
+    'git',
+    ['log', '--format=%H', '--fixed-strings', '--grep', commitTrailerForIssue(issue), head],
+    { allowFailure: true },
+  );
+  if (found.status !== 0) return [];
+
+  return found.stdout.split(/\r?\n/).filter((line) => /^[0-9a-f]{40}$/i.test(line));
+}
+
+/**
+ * Файлы, изменённые между двумя коммитами. Нужно, чтобы отличить «ветка ушла
+ * вперёд по чужим файлам» от «ветка ушла вперёд по тем же, что правит агент».
+ */
+export function filesChangedBetween(from, to, execute = run) {
+  const changed = execute('git', ['diff', '--name-only', from, to], { allowFailure: true });
+  if (changed.status !== 0) return null;
+
+  return changed.stdout.split(/\r?\n/).filter(Boolean);
+}
+
+/**
+ * Является ли commit предком другого. Нужно там, где ветка законно ушла вперёд
+ * и точное совпадение HEAD спрашивать не за что.
+ */
+export function isAncestorCommit(ancestor, descendant, execute = run) {
+  if (!ancestor || !descendant) return false;
+
+  return (
+    execute('git', ['merge-base', '--is-ancestor', ancestor, descendant], { allowFailure: true })
+      .status === 0
+  );
+}
+
+/**
+ * Пути, которые изменила issue, — без diff и статистики.
+ *
+ * Отдельно от issueChangeInventory: тому нужен патч для ревьюера, а выбору
+ * набора проверок хватает имён файлов, и собирать ради него сотню килобайт
+ * текста незачем.
+ */
+export function issueChangedPaths(issue, commit, execute = run) {
+  const commits = issueCommits(issue, commit, execute);
+  const inspected = execute(
+    'git',
+    ['show', '--format=', '--name-only', ...(commits.length > 0 ? commits : [commit])],
+    { allowFailure: true },
+  );
+  if (inspected.status !== 0) return [];
+
+  return [...new Set(inspected.stdout.split(/\r?\n/).filter(Boolean))];
+}
+
+/**
+ * Пути из `git status --porcelain`: формат `XY <путь>`, а для переименования —
+ * `R  старый -> новый`, где нужен последний.
+ */
+export function workingTreePaths(status) {
+  return [
+    ...new Set(
+      String(status ?? '')
+        .split(/\r?\n/)
+        .filter(Boolean)
+        // Отрезать ровно три символа нельзя: `run` обрезает пробелы по краям
+        // вывода, и первая строка приходит без ведущего пробела статуса. Срез
+        // съедал первый символ её пути, `apps/web/...` превращался в
+        // `pps/web/...`, и путь переставал совпадать с чем бы то ни было.
+        .map((line) => line.trim().replace(/^\S{1,2}\s+/, ''))
+        .map((line) => line.split(' -> ').at(-1))
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/**
+ * Полный набор изменений issue одним объектом: список файлов, статистика и
+ * ограниченный diff.
+ *
+ * Показываются именно коммиты этой issue, по одному, в хронологическом
+ * порядке. Диапазон `first^..last` был бы короче, но он втягивает всё, что
+ * легло в ветку между ними: на issue #57 это дало 31 файл вместо четырёх,
+ * включая правки control plane, сделанные оператором между прогонами. Ревьюер
+ * получал чужую работу под видом реализации задачи.
+ *
+ * `git show` принимает список коммитов и печатает их подряд, поэтому вызовов
+ * по-прежнему три, а не три на коммит.
+ */
+export function issueChangeInventory(issue, commit, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const commits = issueCommits(issue, commit, execute);
+  // issueCommits отдаёт новейший первым; ревьюеру нужен порядок появления.
+  const reviewed = commits.length > 0 ? [...commits].reverse() : [commit];
+  const inspect = (flags, pathspecs = []) =>
+    execute('git', ['show', '--format=', ...flags, ...reviewed, ...pathspecs]).stdout;
+  const patch = inspect(['--patch', '--unified=3'], ['--', '.', ...reviewDiffExcludedPaths]);
+  const truncated = patch.length > reviewDiffCharacterBudget;
+
+  const nameStatus = inspect(['--name-status']);
+
+  return {
+    commit,
+    commits: commits.length > 0 ? commits : [commit],
+    // Пути разбираются здесь, у источника: `git diff --name-status` печатает
+    // статус, табуляцию и путь, а для переименования — два пути, из которых
+    // нужен последний.
+    paths: nameStatus
+      .split(/\r?\n/)
+      .map((line) => line.split('\t').at(-1)?.trim())
+      .filter(Boolean),
+    nameStatus,
+    stat: inspect(['--stat']),
+    // Обрезанный diff полезнее отсутствующего: ревьюер видит начало изменений и
+    // знает, что остаток надо дочитать сам.
+    diff: truncated ? patch.slice(0, reviewDiffCharacterBudget) : patch,
+    truncated,
+  };
+}
+
+/**
+ * Изменения всей ветки против базы — то же, что видит milestone-ревью.
+ *
+ * Диапазон с тремя точками: сравнивать нужно с точкой расхождения, иначе в diff
+ * попадёт всё, что уехало в базовую ветку после ответвления, и ревьюер получит
+ * чужую работу под видом своей области.
+ *
+ * Control plane исключён pathspec'ом: milestone-ревью и так запрещено сообщать
+ * о нём замечания, но в diff этой ветки он занимает бо́льшую часть — 108 583
+ * символа из 138 394 на момент замера.
+ */
+export function branchChangeInventory(baseRef, head, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const range = `${baseRef}...${head}`;
+  const inspect = (flags) =>
+    execute('git', ['diff', ...flags, range, '--', '.', ...controlPlaneExcludePathspec], {
+      allowFailure: true,
+    });
+  const commits = execute(
+    'git',
+    ['log', '--format=%h %s', range, '--', '.', ...controlPlaneExcludePathspec],
+    { allowFailure: true },
+  );
+  const patch = inspect(['--patch', '--unified=3']);
+  // Отсутствие базы — не повод ронять ревью: оно останется таким же, каким было
+  // до появления инвентаря.
+  if (patch.status !== 0) return null;
+  const truncated = patch.stdout.length > reviewDiffCharacterBudget;
+
+  return {
+    range,
+    commits: commits.status === 0 ? commits.stdout : '',
+    nameStatus: inspect(['--name-status']).stdout,
+    stat: inspect(['--stat']).stdout,
+    diff: truncated ? patch.stdout.slice(0, reviewDiffCharacterBudget) : patch.stdout,
+    truncated,
+  };
 }
 
 export function commitStagedChanges(commitMessage, issue, timeoutMs, dependencies = {}) {

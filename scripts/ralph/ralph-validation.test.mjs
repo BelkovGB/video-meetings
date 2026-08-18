@@ -9,7 +9,9 @@ import { loadConfig } from './ralph-config.mjs';
 import { summarizeCommandFailure } from './ralph-failure-summary.mjs';
 import { run } from './ralph-process-runner.mjs';
 import {
+  assertValidationDependenciesCommitted,
   createTrustedValidationDependencySnapshot,
+  createValidationWorkspaceSnapshot,
   ensureValidationImage,
   failedValidationScript,
   hasValidationAttestation,
@@ -19,6 +21,7 @@ import {
   validationAttestationKey,
   validationImageForSnapshot,
 } from './ralph-validation-runner.mjs';
+import { validationScriptsForChangedFiles } from './ralph-scope.mjs';
 import {
   ralphConfigPath,
   trustedAgentInstructionFiles,
@@ -610,4 +613,120 @@ test('the attestation key covers every declared input', () => {
     assert.notEqual(validationAttestationKey(changed), base);
   }
   assert.equal(validationAttestationKey({ ...inputs }), base);
+});
+
+test('a dependency changed only in the working tree stops the run before the container', () => {
+  // Образ ставит зависимости по HEAD — намеренно, потому что сборка образа
+  // единственный шаг с сетью. Значит добавленный агентом пакет физически не
+  // окажется в node_modules контейнера, и `build` упадёт на «модуль не найден».
+  // Агент это не чинит: коммитить ему нельзя, HEAD не двигается, тег образа
+  // считается по тем же HEAD-байтам, поэтому все maxTestFixAttempts уходят на
+  // один и тот же отказ. Причина обязана называться до контейнера.
+  const calls = [];
+  const driftedRun = (name, args) => {
+    calls.push([name, args[0], args[1]]);
+    return { status: 0, stdout: 'package.json\npackage-lock.json\n', stderr: '' };
+  };
+
+  assert.throws(
+    () => assertValidationDependenciesCommitted({ run: driftedRun }),
+    (error) => {
+      assert.match(error.message, /package\.json/);
+      assert.match(error.message, /package-lock\.json/);
+      // Сообщение обязано назвать и причину, и выход, иначе оператор увидит
+      // только «модуль не найден» пять раз подряд.
+      assert.match(error.message, /HEAD/);
+      assert.match(error.message, /Закоммитьте/);
+      return true;
+    },
+  );
+  assert.deepEqual(calls, [['git', 'diff', '--name-only']]);
+
+  // Совпадающее дерево проходит молча.
+  assertValidationDependenciesCommitted({
+    run: () => ({ status: 0, stdout: '', stderr: '' }),
+  });
+});
+
+test('набор проверок сокращается до применимых к изменённым файлам', () => {
+  const configured = [
+    'format:check',
+    'lint',
+    'build',
+    'test:ralph',
+    'test:e2e:api',
+    'test:e2e:web',
+  ];
+
+  // Правка браузерной спеки не может уронить E2E API и тесты Ralph, и база ей
+  // всё равно нужна: Playwright поднимает рядом настоящий сервер API.
+  const web = validationScriptsForChangedFiles(configured, ['apps/web/e2e/profile.spec.ts']);
+  assert.deepEqual(web.scripts, ['format:check', 'lint', 'build', 'test:e2e:web']);
+  assert.deepEqual(web.skipped, ['test:ralph', 'test:e2e:api']);
+  assert.equal(web.requiresDatabase, true);
+
+  // Markdown не поднимает контейнер с базой вовсе.
+  const documentation = validationScriptsForChangedFiles(configured, [
+    'README.md',
+    'apps/web/README.md',
+  ]);
+  assert.deepEqual(documentation.scripts, ['format:check']);
+  assert.equal(documentation.requiresDatabase, false);
+
+  // Изменение API тянет за собой и браузерные тесты: они ходят в настоящий API.
+  const api = validationScriptsForChangedFiles(configured, [
+    'apps/api/src/auth/auth.controller.ts',
+  ]);
+  assert.deepEqual(api.scripts, ['format:check', 'lint', 'build', 'test:e2e:api', 'test:e2e:web']);
+
+  // Один незнакомый путь возвращает полный набор целиком: пропущенная проверка
+  // обнаруживается через несколько issue и стоит дороже лишнего прогона.
+  const unknown = validationScriptsForChangedFiles(configured, [
+    'apps/web/app/page.tsx',
+    'docker-compose.yml',
+  ]);
+  assert.deepEqual(unknown.scripts, configured);
+  assert.equal(unknown.narrowed, false);
+  assert.equal(unknown.requiresDatabase, true);
+
+  // Неизвестный состав изменений — тоже полный набор.
+  assert.deepEqual(validationScriptsForChangedFiles(configured, []).scripts, configured);
+  assert.deepEqual(validationScriptsForChangedFiles(configured, null).scripts, configured);
+});
+
+test('сокращение набора не может привести к пустой валидации', () => {
+  // Набор без format:check и Markdown-правка: пересечение пусто, и «ничего не
+  // выполнялось» неотличимо от «всё прошло». Возвращается полный набор.
+  const selection = validationScriptsForChangedFiles(['lint', 'build'], ['docs/plan.md']);
+
+  assert.deepEqual(selection.scripts, ['lint', 'build']);
+  assert.equal(selection.narrowed, false);
+});
+
+test('конфигурация включает сокращение набора по умолчанию', () => {
+  // Значение по умолчанию, а не обязательное поле: конфигурации без него
+  // работали до появления сокращения и должны работать после.
+  assert.equal(loadConfig().scopedValidation, true);
+});
+
+test('снимок повторяет рабочее дерево, а не индекс: удалённый файл его не роняет', () => {
+  // Отслеживаемый файл, удалённый в рабочем дереве, git ls-files по-прежнему
+  // перечисляет. Пока снимок копировал список дословно, он падал с ENOENT за
+  // секунду, и issue, требующая удалить файл, была невыполнима в принципе.
+  const victim = path.join('scripts', 'ralph', 'README.md');
+  const absolute = path.join(process.cwd(), victim);
+  const original = readFileSync(absolute);
+  let snapshot;
+
+  try {
+    rmSync(absolute);
+    snapshot = createValidationWorkspaceSnapshot();
+
+    assert.equal(existsSync(path.join(snapshot, victim)), false);
+    // Снимок собран целиком, а не оборван на удалённом файле.
+    assert.equal(existsSync(path.join(snapshot, 'package.json')), true);
+  } finally {
+    writeFileSync(absolute, original);
+    if (snapshot) rmSync(snapshot, { recursive: true, force: true });
+  }
 });

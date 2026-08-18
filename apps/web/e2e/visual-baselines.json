@@ -1,0 +1,32 @@
+{
+  "note": "Playwright baselines rendered by the operator's validation image. An agent does not add lines to \"directories\": it writes the visual test and lists the names it needs under \"pending\"; the operator regenerates the snapshots with npm run test:e2e:web:visual and moves the names across. Reconciled with the tree and with the toHaveScreenshot calls by visual-baselines.spec.ts.",
+  "directories": {
+    "profile.spec.ts-snapshots": [
+      "avatar-preview-panel-desktop-chromium.png",
+      "avatar-preview-panel-mobile-chromium.png",
+      "avatar-preview-panel-mobile-landscape-chromium.png",
+      "avatar-removal-controls-desktop-chromium.png",
+      "avatar-removal-controls-mobile-chromium.png",
+      "avatar-removal-controls-mobile-landscape-chromium.png",
+      "current-user-avatar-image-desktop-chromium.png",
+      "current-user-avatar-image-mobile-chromium.png",
+      "current-user-avatar-image-mobile-landscape-chromium.png",
+      "current-user-avatar-load-error-fallback-desktop-chromium.png",
+      "current-user-avatar-load-error-fallback-mobile-chromium.png",
+      "current-user-avatar-load-error-fallback-mobile-landscape-chromium.png",
+      "dashboard-account-entry-desktop-chromium.png",
+      "dashboard-account-entry-mobile-chromium.png",
+      "dashboard-account-entry-mobile-landscape-chromium.png",
+      "dashboard-account-header-desktop-chromium.png",
+      "dashboard-account-header-mobile-chromium.png",
+      "dashboard-account-header-mobile-landscape-chromium.png"
+    ]
+  },
+  "pending": {
+    "profile.spec.ts-snapshots": [
+      "password-change-form-desktop-chromium.png",
+      "password-change-form-mobile-chromium.png",
+      "password-change-form-mobile-landscape-chromium.png"
+    ]
+  }
+}

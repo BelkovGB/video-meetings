@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { fail, isRalphInfrastructureIssue } from './ralph-scope.mjs';
 import { run, runNetwork, runtimeSettings } from './ralph-process-runner.mjs';
+import { retryTransientOperation } from './ralph-runtime.mjs';
 import { parseJson } from './ralph-config.mjs';
 
 /**
@@ -159,45 +160,85 @@ export function patchIssue(repository, issueNumber, values) {
   );
 }
 
+/**
+ * Публикация шла через `run`, то есть без повтора, и один 503 от GitHub убивал
+ * прогон целиком: на milestone фазы 8 это стоило часа работы — ревью уже
+ * вернуло PASS, оставалось закрыть issue.
+ *
+ * Повторяется не сам POST, а проверка вместе с ним. Публикация комментария не
+ * идемпотентна, и слепой повтор мог бы напечатать его дважды; повтор с
+ * перечитыванием списка находит комментарий, если предыдущая попытка всё же
+ * дошла, и не делает ничего.
+ */
 export function postIssueCommentOnce(repository, issueNumber, body, marker) {
-  const comments = githubPagedArray(
-    repository,
-    `issues/${issueNumber}/comments`,
-    [],
-    `GitHub comments for issue #${issueNumber}`,
-  );
-  if (
-    comments.some((comment) => typeof comment.body === 'string' && comment.body.includes(marker))
-  ) {
-    console.log(`Комментарий ${marker} уже опубликован в issue #${issueNumber}.`);
-    return;
-  }
-  run(
-    'gh',
-    [
-      'api',
-      '--method',
-      'POST',
-      `repos/${repository}/issues/${issueNumber}/comments`,
-      '--input',
-      '-',
-    ],
-    { input: JSON.stringify({ body: `${marker}\n${body}`.slice(0, 60_000) }) },
+  return retryTransientOperation(
+    () => {
+      const comments = githubPagedArray(
+        repository,
+        `issues/${issueNumber}/comments`,
+        [],
+        `GitHub comments for issue #${issueNumber}`,
+      );
+      if (
+        comments.some(
+          (comment) => typeof comment.body === 'string' && comment.body.includes(marker),
+        )
+      ) {
+        console.log(`Комментарий ${marker} уже опубликован в issue #${issueNumber}.`);
+        return;
+      }
+      run(
+        'gh',
+        [
+          'api',
+          '--method',
+          'POST',
+          `repos/${repository}/issues/${issueNumber}/comments`,
+          '--input',
+          '-',
+        ],
+        { input: JSON.stringify({ body: `${marker}\n${body}`.slice(0, 60_000) }) },
+      );
+    },
+    {
+      attempts: runtimeSettings().networkRetryAttempts,
+      baseDelayMs: runtimeSettings().networkRetryBaseDelayMs,
+      onRetry: (error, attempt, delay) =>
+        console.error(
+          `Временная ошибка публикации комментария (попытка ${attempt}): ${error.message}. ` +
+            `Повтор через ${delay} ms.`,
+        ),
+    },
   );
 }
 
-export function reopenIssueWithComment(repository, issue, comment) {
-  if (issueState(repository, issue.number) === 'CLOSED') {
-    patchIssue(repository, issue.number, { state: 'open' });
+/**
+ * Открытие issue обязательно, комментарий — нет.
+ *
+ * Закрытая issue выпадает из очереди, поэтому её состояние обязано совпадать с
+ * сохранённым, и отказ на нём останавливает цикл. Комментарий же — след для
+ * человека: всё, что Ralph читает сам, лежит в теле issue и в state. Пока он
+ * был обязательным, 17 августа три обрыва подряд пришлись именно на него,
+ * каждый раз уничтожая уже сделанную работу — до пятнадцати минут за раз.
+ */
+export function reopenIssueWithComment(repository, issue, comment, dependencies = {}) {
+  const readState = dependencies.issueState ?? issueState;
+  const reopen = dependencies.patchIssue ?? patchIssue;
+  const publish = dependencies.postComment ?? postIssueCommentOnce;
+
+  if (readState(repository, issue.number) === 'CLOSED') {
+    reopen(repository, issue.number, { state: 'open' });
   }
 
   const fingerprint = createHash('sha256').update(comment).digest('hex').slice(0, 20);
-  postIssueCommentOnce(
-    repository,
-    issue.number,
-    comment,
-    `<!-- ralph-issue-comment id:${fingerprint} -->`,
-  );
+  try {
+    publish(repository, issue.number, comment, `<!-- ralph-issue-comment id:${fingerprint} -->`);
+  } catch (error) {
+    console.error(
+      `Issue #${issue.number}: не удалось опубликовать комментарий: ${error.message}. ` +
+        'Состояние цикла сохранено, потерян только комментарий.',
+    );
+  }
 }
 
 export function milestoneIssues(repository, milestone) {

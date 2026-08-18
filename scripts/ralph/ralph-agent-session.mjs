@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -9,7 +9,9 @@ import { retryDelayMs, terminateProcessTreeByPid, waitSync } from './ralph-runti
 import {
   commandSpec,
   credentialFreeEnvironment,
+  outputTail,
   runtimeSettings,
+  windowsSafeCommandEnvironment,
 } from './ralph-process-runner.mjs';
 
 /**
@@ -33,10 +35,40 @@ export const agentProjectRoot = path.resolve(
 // Песочница файловой системы, общая для обоих CLI
 // -----------------------------------------------------------------------------
 
+/**
+ * Кэш браузеров Playwright на хосте, если он там есть.
+ *
+ * Playwright ищет браузеры в `LOCALAPPDATA` (Windows) или `~/.cache` (POSIX), а
+ * песочница подменяет оба, поэтому сессия видела пустой каталог. Агент, которого
+ * просят починить браузерный тест, оставался без обратной связи: на issue #57 он
+ * попробовал запустить тест, получил «Executable doesn't exist», и потратил
+ * оставшиеся 90 шагов на суррогаты проверки — самостоятельный разбор diff,
+ * сверку переводов строк, повторные прогоны prettier. Сессия упёрлась в лимит
+ * за 34 минуты и не закончила ничего.
+ *
+ * Границу доверия это не двигает. Изоляция HOME отрезает пользовательский
+ * *конфиг* — скиллы, плагины, MCP-серверы, правила; каталог с бинарями браузера
+ * ничего из этого не несёт. Полный доступ к файловой системе у сессии и так
+ * есть, так что нового пути сюда не появляется — появляется работающая проверка
+ * вместо ста потраченных шагов.
+ */
+export function hostPlaywrightBrowsersPath(source, exists = existsSync) {
+  const configured = source.PLAYWRIGHT_BROWSERS_PATH?.trim();
+  const base =
+    configured ||
+    (process.platform === 'win32'
+      ? source.LOCALAPPDATA && path.join(source.LOCALAPPDATA, 'ms-playwright')
+      : source.HOME && path.join(source.HOME, '.cache', 'ms-playwright'));
+
+  return base && exists(base) ? base : null;
+}
+
 // Изолированный HOME отрезает пользовательский конфиг агента: скиллы, плагины,
 // MCP-серверы и правила, которых нет в доверенном control plane. Каталог для
 // учётных данных создаёт backend: у каждого CLI он свой.
 export function createSandboxRoot(source, prefix) {
+  // Путь снимается до подмены LOCALAPPDATA и HOME: после неё он уже не выводим.
+  const browsersPath = hostPlaywrightBrowsersPath(source);
   const root = mkdtempSync(path.join(tmpdir(), prefix));
   const home = path.join(root, 'home');
   const temp = path.join(root, 'tmp');
@@ -51,6 +83,9 @@ export function createSandboxRoot(source, prefix) {
     cleanup: () => rmSync(root, { recursive: true, force: true }),
     env: {
       ...credentialFreeEnvironment(source),
+      // cwd сессии — корень репозитория, куда сама же сессия пишет с полным
+      // доступом, поэтому cmd.exe нельзя оставлять с поиском в текущем каталоге.
+      ...windowsSafeCommandEnvironment,
       HOME: home,
       USERPROFILE: home,
       APPDATA: config,
@@ -60,6 +95,7 @@ export function createSandboxRoot(source, prefix) {
       TEMP: temp,
       TMP: temp,
       TMPDIR: temp,
+      ...(browsersPath === null ? {} : { PLAYWRIGHT_BROWSERS_PATH: browsersPath }),
     },
   };
 }
@@ -96,6 +132,26 @@ async function waitForChildTermination(child, childResult, graceMs) {
   ]);
 }
 
+/**
+ * Складывает счётчики токенов, сохраняя различие между нулём и «не сообщено».
+ * Поле, которого backend не присылает ни разу, обязано остаться null: ноль в
+ * сводке читается как измеренная величина.
+ */
+export function addUsage(total, usage) {
+  const sum = { ...(total ?? {}) };
+  for (const [field, value] of Object.entries(usage)) {
+    if (typeof value === 'number') {
+      sum[field] = (typeof sum[field] === 'number' ? sum[field] : 0) + value;
+    } else if (!(field in sum)) {
+      // Поле остаётся в записи как null, а не исчезает: форма сводки не должна
+      // зависеть от того, что backend прислал в конкретном ответе.
+      sum[field] = null;
+    }
+  }
+
+  return sum;
+}
+
 // -----------------------------------------------------------------------------
 // Circuit breaker: лимит шагов и wall-clock timeout
 // -----------------------------------------------------------------------------
@@ -107,11 +163,16 @@ async function waitForChildTermination(child, childResult, graceMs) {
  * - `createSandboxedEnvironment(source, options)` — песочница с учётными данными;
  * - `readEvent(line)` — разбор одной строки stdout. Возвращает `null`, если
  *   строка не разобрана (её печатают как есть), иначе объект с полями
- *   `stepId`, `log`, `agentMessage`, `error`;
+ *   `stepId`, `log`, `agentMessage`, `error`, `telemetry`, `toolResults`;
  * - `exitFailure(result, stderr)` — Error по коду завершения, если backend
  *   умеет распознать причину точнее общего сообщения.
+ *
+ * `telemetry` — цена сессии по данным самого CLI: шаги, токены, стоимость.
+ * Backend волен её не присылать; тогда в сводке остаётся только измеренное
+ * оркестратором время и собственный счётчик шагов.
  */
 export async function runAgentSession(backend, args, options) {
+  const sessionStartedMs = Date.now();
   const { command, commandArgs } = commandSpec(backend.binary, args);
   const childEnvironment = backend.createSandboxedEnvironment(options.env ?? process.env, {
     authenticationFile: options.authenticationFile,
@@ -146,8 +207,32 @@ export async function runAgentSession(backend, args, options) {
   // Claude CLI завершается кодом 0 и при отказе авторизации, и при собственном
   // лимите шагов: единственный признак отказа приходит в потоке событий.
   let streamError = null;
+  let backendTelemetry = null;
+  let accumulatedUsage = null;
+  let toolResults = 0;
   let resolveTurnLimit;
   const seenStepIds = new Set();
+  // Считается один раз на сообщение: одно сообщение — один запрос к API, и
+  // повторное событие с тем же id удвоило бы его расход.
+  const countedUsageIds = new Set();
+
+  // Сводка снимается в момент выхода, а выходов у сессии шесть, включая четыре
+  // аварийных. Дороже всех именно они: оборванная по лимиту сессия успевает
+  // потратить весь бюджет, и без её цены сводка прогона занижена.
+  //
+  // Итоговое событие CLI точнее, но при обрыве по лимиту шагов процесс убивают
+  // до него: на issue #57 сессия из ста шагов и тридцати четырёх минут осталась
+  // единственной без чисел. Поэтому суммы накапливаются по ходу, а итоговые
+  // перекрывают их — но только теми полями, которые в них действительно есть.
+  const reportedFields = (telemetry) =>
+    Object.fromEntries(Object.entries(telemetry ?? {}).filter(([, value]) => value !== null));
+  const sessionTelemetry = () => ({
+    turns,
+    toolResults,
+    wallMs: Date.now() - sessionStartedMs,
+    ...(accumulatedUsage ?? {}),
+    ...reportedFields(backendTelemetry),
+  });
 
   const handleLine = (line) => {
     if (line.trim() === '') {
@@ -156,12 +241,22 @@ export async function runAgentSession(backend, args, options) {
 
     const event = backend.readEvent(line);
     if (!event) {
-      console.log(line);
+      // Строка обрезается: единственный гарантированный источник неразобранной
+      // строки — обрыв процесса circuit breaker'ом посреди события, а событие с
+      // выводом инструмента бывает в сотни килобайт. Такой блок ложился в
+      // run.log сразу после сообщения breaker'а, ради которого журнал и читают.
+      console.log(`[${backend.label}] неразобранная строка: ${outputTail(line)}`);
       return;
     }
 
     if (event.agentMessage) lastAgentMessage = event.agentMessage;
     if (event.error) streamError ??= event.error;
+    if (event.telemetry) backendTelemetry = event.telemetry;
+    if (event.toolResults) toolResults += event.toolResults;
+    if (event.usage && event.stepId != null && !countedUsageIds.has(event.stepId)) {
+      countedUsageIds.add(event.stepId);
+      accumulatedUsage = addUsage(accumulatedUsage, event.usage);
+    }
 
     let currentTurn = null;
     if (event.stepId !== undefined && event.stepId !== null && !seenStepIds.has(event.stepId)) {
@@ -243,6 +338,7 @@ export async function runAgentSession(backend, args, options) {
     const error = new Error(`${options.label} достиг лимита maxTurns=${options.maxTurns}.`);
     error.code = 'RALPH_MAX_TURNS';
     error.turns = turns;
+    error.telemetry = sessionTelemetry();
     throw error;
   }
 
@@ -251,6 +347,7 @@ export async function runAgentSession(backend, args, options) {
     error.code = 'RALPH_AGENT_TIMEOUT';
     error.turns = turns;
     error.timeoutMs = timeoutMs;
+    error.telemetry = sessionTelemetry();
     throw error;
   }
 
@@ -259,18 +356,21 @@ export async function runAgentSession(backend, args, options) {
   // поэтому опора на код завершения приняла бы такой прогон за успешный.
   if (streamError) {
     streamError.turns = turns;
+    streamError.telemetry = sessionTelemetry();
     throw streamError;
   }
 
   if (result.code !== 0) {
-    throw (
+    const error =
       backend.exitFailure?.(result, stderr, options.label) ??
-      genericExitFailure(result, stderr, options.label)
-    );
+      genericExitFailure(result, stderr, options.label);
+    error.turns = turns;
+    error.telemetry = sessionTelemetry();
+    throw error;
   }
 
   console.log(`${options.label}: использовано шагов ${turns}/${options.maxTurns}.`);
-  return { turns, lastAgentMessage };
+  return { turns, lastAgentMessage, telemetry: sessionTelemetry() };
 }
 
 export function genericExitFailure(result, stderr, label) {
@@ -287,6 +387,20 @@ export function genericExitFailure(result, stderr, label) {
 
 // Ошибка с nonRetryable — это вердикт ревьюера, а не сбой запуска, и повторять
 // её нельзя.
+//
+// Коды ниже — тоже не сбой запуска: между попытками не меняются ни prompt, ни
+// состояние репозитория, поэтому повтор воспроизводит тот же результат и только
+// тратит время и квоту. Дороже всех RALPH_AGENT_TIMEOUT: при agentTimeoutMs в
+// 90 минут три попытки — это 4,5 часа до первого сообщения оператору. Путь
+// разработки уже считает RALPH_AGENT_AUTH фатальным (ralph-loop.mjs), и ревью
+// не должно расходиться с ним.
+const nonRetryableReviewCodes = new Set([
+  'RALPH_AGENT_AUTH',
+  'RALPH_AGENT_TIMEOUT',
+  'RALPH_MAX_TURNS',
+  'RALPH_COMMAND_NOT_FOUND',
+]);
+
 export async function runReviewWithRetries(config, operation, label) {
   let lastError;
   for (let attempt = 1; attempt <= config.runtime.reviewRetryAttempts; attempt += 1) {
@@ -294,7 +408,13 @@ export async function runReviewWithRetries(config, operation, label) {
       return await operation();
     } catch (error) {
       lastError = error;
-      if (error.nonRetryable || attempt === config.runtime.reviewRetryAttempts) throw error;
+      if (
+        error.nonRetryable ||
+        nonRetryableReviewCodes.has(error.code) ||
+        attempt === config.runtime.reviewRetryAttempts
+      ) {
+        throw error;
+      }
       const delay = retryDelayMs(config.runtime.networkRetryBaseDelayMs, attempt);
       console.error(
         `${label} технически не завершился (попытка ${attempt}): ${error.message}. ` +
