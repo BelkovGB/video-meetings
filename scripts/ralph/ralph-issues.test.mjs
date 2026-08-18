@@ -932,3 +932,32 @@ test('разбор git status переживает обрезку пробело
     'b.ts',
   ]);
 });
+
+test('пределы повторов разведены по цене одной попытки', () => {
+  const original = JSON.parse(readFileSync(ralphConfigPath, 'utf8'));
+  const runtime = (patch) => ({ runtime: { ...original.runtime, ...patch } });
+
+  // Повтор сетевой команды стоит секунд ожидания: трёх попыток с паузами 2 и 4
+  // секунды не хватило на мигающий GitHub, и это стоило трёх прогонов, каждый
+  // из которых уже сделал всю дорогую работу.
+  withPatchedRalphConfig(runtime({ networkRetryAttempts: 30 }), (config) => {
+    assert.equal(config.runtime.networkRetryAttempts, 30);
+  });
+  assert.throws(
+    () =>
+      withPatchedRalphConfig(runtime({ networkRetryAttempts: 61 }), () => {
+        throw new Error('loadConfig должен был отказать');
+      }),
+    /от 1 до 60/,
+  );
+
+  // Повтор ревью — целая сессия агента: минуты и сотни тысяч токенов за
+  // попытку, поэтому предел остаётся жёстким.
+  assert.throws(
+    () =>
+      withPatchedRalphConfig(runtime({ reviewRetryAttempts: 6 }), () => {
+        throw new Error('loadConfig должен был отказать');
+      }),
+    /от 1 до 5/,
+  );
+});

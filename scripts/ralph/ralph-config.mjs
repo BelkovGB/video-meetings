@@ -469,14 +469,24 @@ function validateRuntimeSettings(config) {
       fail(`Поле "runtime.${field}" должно быть целым числом больше 0.`);
     }
   }
-  for (const field of ['networkRetryAttempts', 'reviewRetryAttempts']) {
-    if (
-      !Number.isInteger(config.runtime[field]) ||
-      config.runtime[field] < 1 ||
-      config.runtime[field] > 5
-    ) {
-      fail(`Поле "runtime.${field}" должно быть целым числом от 1 до 5.`);
-    }
+  // Пределы разные, потому что попытка стоит разного. Повтор сетевой команды —
+  // это секунды ожидания, и щедрость здесь оправдана: 17 августа трёх попыток
+  // с паузами 2 и 4 секунды не хватило на мигающий GitHub, и это стоило трёх
+  // прогонов, каждый из которых уже сделал всю дорогую работу. Повтор ревью —
+  // это целая сессия агента: минуты и сотни тысяч токенов за попытку.
+  if (
+    !Number.isInteger(config.runtime.networkRetryAttempts) ||
+    config.runtime.networkRetryAttempts < 1 ||
+    config.runtime.networkRetryAttempts > 60
+  ) {
+    fail('Поле "runtime.networkRetryAttempts" должно быть целым числом от 1 до 60.');
+  }
+  if (
+    !Number.isInteger(config.runtime.reviewRetryAttempts) ||
+    config.runtime.reviewRetryAttempts < 1 ||
+    config.runtime.reviewRetryAttempts > 5
+  ) {
+    fail('Поле "runtime.reviewRetryAttempts" должно быть целым числом от 1 до 5.');
   }
   if (
     !Number.isInteger(config.runtime.maxPages) ||

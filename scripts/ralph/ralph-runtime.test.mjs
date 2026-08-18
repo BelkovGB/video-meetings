@@ -20,6 +20,7 @@ import {
   rotatePersistentLog,
   isTransientFailure,
   readJsonFile,
+  retryDelayMs,
   retryTransientOperation,
   writeJsonAtomic,
 } from './ralph-runtime.mjs';
@@ -529,4 +530,16 @@ test('вне прогона подробности всё же попадают 
   }
 
   assert.deepEqual(printed, ['вывод без журнала']);
+});
+
+test('пауза между повторами удваивается и упирается в тридцать секунд', () => {
+  assert.deepEqual(
+    [1, 2, 3, 4].map((attempt) => retryDelayMs(2_000, attempt)),
+    [2_000, 4_000, 8_000, 16_000],
+  );
+  assert.equal(retryDelayMs(2_000, 10), 30_000);
+  // Базовая задержка в тридцать секунд упирается в потолок сразу, поэтому все
+  // паузы становятся одинаковыми: удвоение перестаёт работать.
+  assert.equal(retryDelayMs(30_000, 1), 30_000);
+  assert.equal(retryDelayMs(30_000, 5), 30_000);
 });
