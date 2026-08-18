@@ -14,8 +14,6 @@ type CurrentProfile = {
   setProfile: Dispatch<SetStateAction<CurrentUserProfile | null>>;
   isLoading: boolean;
   loadError: string | null;
-  /** Clears the session and returns to the login screen. */
-  handleUnauthorized: () => void;
   /** Clears the session and returns to the login screen explaining the new sign-in. */
   handlePasswordChanged: () => void;
   /** Clears the session and returns to the login screen explaining the ended session. */
@@ -31,16 +29,21 @@ export function useCurrentProfile(): CurrentProfile {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
 
-  const handleUnauthorized = useCallback(() => {
-    clearSession();
-    router.replace('/login');
-  }, [router]);
-
   const handlePasswordChanged = useCallback(() => {
     clearSession();
     router.replace(passwordChangedLoginPath);
   }, [router]);
 
+  // Every `401` from an authenticated request ends the session, and since the
+  // change was widened to revoke every session of the account, the likeliest
+  // cause is no longer an expiry but a password changed on another device. The
+  // API's `401` carries no `code` to tell those apart, so both take the notice
+  // that fits either: it names the new password as the way back in, which an
+  // expiry survives being told and a revocation cannot be recovered from without
+  // — this app has no password reset. A bare /login would leave that user
+  // retrying a password the account no longer has. The token-missing check at
+  // mount keeps its bare /login: nothing ended there, the user simply never
+  // signed in.
   const handleSessionRejected = useCallback(() => {
     clearSession();
     router.replace(sessionRejectedLoginPath);
@@ -65,7 +68,7 @@ export function useCurrentProfile(): CurrentProfile {
         });
 
         if (response.status === 401) {
-          handleUnauthorized();
+          handleSessionRejected();
           return;
         }
 
@@ -93,7 +96,7 @@ export function useCurrentProfile(): CurrentProfile {
     return () => {
       isActive = false;
     };
-  }, [handleUnauthorized, loadAttempt, router]);
+  }, [handleSessionRejected, loadAttempt, router]);
 
   const retryLoad = () => {
     setLoadError(null);
@@ -106,7 +109,6 @@ export function useCurrentProfile(): CurrentProfile {
     setProfile,
     isLoading,
     loadError,
-    handleUnauthorized,
     handlePasswordChanged,
     handleSessionRejected,
     retryLoad,

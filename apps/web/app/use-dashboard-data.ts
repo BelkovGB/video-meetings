@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { apiUrl } from '../lib/api/config';
 import type { CurrentUserProfile, Meeting } from '../lib/api/contracts';
+import { sessionRejectedLoginPath } from '../lib/auth/login-notice';
 import {
   clearSession,
   readAccessToken,
@@ -43,6 +44,17 @@ function getEmailFromToken(token: string) {
 function clearSessionAndRedirectToLogin(router: ReturnType<typeof useRouter>) {
   clearSession();
   router.replace('/login');
+}
+
+// The same `401` handling the profile screen documents at `handleSessionRejected`:
+// a password change now revokes every session of the account, so a rejected
+// token on this device is as likely to be someone signing out from another one
+// as an expiry, and the `401` carries no `code` to tell them apart. The notice
+// is accurate for both and names the new password as the way back in. Signing
+// out on purpose keeps the bare /login: nothing needs explaining there.
+function clearSessionAndExplainRejection(router: ReturnType<typeof useRouter>) {
+  clearSession();
+  router.replace(sessionRejectedLoginPath);
 }
 
 /**
@@ -92,7 +104,7 @@ export function useDashboardData(): DashboardData {
         }
 
         if (response.status === 401) {
-          clearSessionAndRedirectToLogin(router);
+          clearSessionAndExplainRejection(router);
           return;
         }
 
@@ -127,7 +139,7 @@ export function useDashboardData(): DashboardData {
         });
 
         if (response.status === 401) {
-          clearSessionAndRedirectToLogin(router);
+          clearSessionAndExplainRejection(router);
           return;
         }
 

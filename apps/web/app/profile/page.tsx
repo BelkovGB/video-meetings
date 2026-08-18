@@ -14,7 +14,6 @@ export default function ProfilePage() {
     setProfile,
     isLoading,
     loadError,
-    handleUnauthorized,
     handlePasswordChanged,
     handleSessionRejected,
     retryLoad,
@@ -94,7 +93,7 @@ export default function ProfilePage() {
             <DisplayNameForm
               initialDisplayName={profile.displayName}
               onProfileSaved={setProfile}
-              onUnauthorized={handleUnauthorized}
+              onUnauthorized={handleSessionRejected}
             />
             <AvatarSection
               avatar={profile.avatar}
@@ -103,7 +102,7 @@ export default function ProfilePage() {
                   currentProfile ? { ...currentProfile, avatar } : currentProfile,
                 )
               }
-              onUnauthorized={handleUnauthorized}
+              onUnauthorized={handleSessionRejected}
             />
             <PasswordChangeForm
               onSessionRejected={handleSessionRejected}

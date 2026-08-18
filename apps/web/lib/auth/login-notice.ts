@@ -11,15 +11,21 @@ export const loginNoticeParam = 'reason';
 export const passwordChangedNotice = 'password-changed';
 
 /**
- * The session could no longer authorize the request, so the change was not made
- * under it. Whether the password itself changed is left unsaid: a change commits
- * and revokes the calling session together, so a retry after a lost response is
- * answered `401` with the new password already in force.
+ * The session could no longer authorize the request. Whether the password itself
+ * changed is left unsaid: a change commits and revokes every session of the
+ * account together, so a retry after a lost response is answered `401` with the
+ * new password already in force.
  *
  * `POST /users/me/password` answers `401` for a missing, legacy or revoked
  * session, and a token issued before the session migration hits it with a
  * correct current password. Without a reason that sign-out looks exactly like
  * the successful one, minus the notice.
+ *
+ * Every other authenticated `401` takes this notice too. Since a change revokes
+ * the whole account, a device that made no request of its own is signed out by
+ * one made elsewhere, and the `401` carries no `code` to separate that from an
+ * ordinary expiry. The sentence holds for both, and naming the new password is
+ * the only way back in: this app has no password reset.
  */
 export const sessionRejectedNotice = 'session-rejected';
 

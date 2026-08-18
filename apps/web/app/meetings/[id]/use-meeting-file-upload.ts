@@ -5,6 +5,7 @@ import { useEffect, useReducer, useRef } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
 import type { CodedApiError, MeetingFile } from '../../../lib/api/contracts';
+import { sessionRejectedLoginPath } from '../../../lib/auth/login-notice';
 import { clearSessionIdentity, readAccessToken } from '../../../lib/auth/session';
 
 type MeetingFileUploadOptions = {
@@ -250,7 +251,7 @@ export function useMeetingFileUpload({
 
       if (request.status === 401) {
         clearSessionIdentity();
-        router.replace('/login');
+        router.replace(sessionRejectedLoginPath);
         return;
       }
 

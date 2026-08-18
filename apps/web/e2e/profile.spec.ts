@@ -72,6 +72,40 @@ async function register(request: APIRequestContext, prefix: string): Promise<Ses
   return { accessToken, email, userId };
 }
 
+// The password the account-wide sweep is triggered with, distinct from the one
+// every session was minted under so a stale token cannot be mistaken for a fresh
+// sign-in.
+const rotatedPassword = 'rotated-secure-password-456';
+
+/** Opens a second session for an existing account, standing in for another device. */
+async function login(request: APIRequestContext, email: string): Promise<Session> {
+  const response = await request.post(`${apiUrl}/auth/login`, {
+    headers: { 'X-Forwarded-For': `198.51.100.${testClientAddress++}` },
+    data: { email, password },
+  });
+  expect(response.ok()).toBeTruthy();
+
+  const { accessToken } = (await response.json()) as { accessToken: string };
+
+  return { accessToken, email, userId: getUserId(accessToken) };
+}
+
+/** Changes the password from one session, revoking every session of the account. */
+async function changePassword(request: APIRequestContext, session: Session): Promise<void> {
+  const response = await request.post(`${apiUrl}/users/me/password`, {
+    headers: {
+      Authorization: `Bearer ${session.accessToken}`,
+      'X-Forwarded-For': `198.51.100.${testClientAddress++}`,
+    },
+    data: {
+      currentPassword: password,
+      newPassword: rotatedPassword,
+      confirmation: rotatedPassword,
+    },
+  });
+  expect(response.ok()).toBeTruthy();
+}
+
 async function createMeeting(request: APIRequestContext, owner: Session): Promise<Meeting> {
   const response = await request.post(`${apiUrl}/meetings`, {
     headers: { Authorization: `Bearer ${owner.accessToken}` },
@@ -1143,9 +1177,9 @@ test('explains the sign-out when the password endpoint rejects the session', asy
   // minted before the session migration carries no `sid`, and the body has no
   // `code` to route on.
   // The first attempt is dropped on the way back instead, which is the sequence
-  // the notice must survive: a change can commit and revoke the calling session
-  // while its response is lost, so the retry that follows is answered `401` by a
-  // token that is already revoked — with the new password in force.
+  // the notice must survive: a change can commit and revoke every session of the
+  // account while its response is lost, so the retry that follows is answered
+  // `401` by a token that is already revoked — with the new password in force.
   let passwordChangeResponseArrives = false;
 
   await page.route('**/users/me/password', async (route) => {
@@ -1425,10 +1459,93 @@ test('clears an expired session and redirects to login without showing profile d
 
   await page.goto('/profile');
 
-  await expect(page).toHaveURL('/login');
+  // The client cannot tell an expiry apart from a revocation — the API's `401`
+  // carries no `code` — so both land on the same notice. It is accurate for an
+  // expiry too, and saying nothing would leave the device signed out by someone
+  // else's password change with no explanation at all.
+  await expect(page).toHaveURL('/login?reason=session-rejected');
   await expect(page.getByRole('heading', { name: 'С возвращением' })).toBeVisible();
   await expect(page.getByText('private@example.com')).toHaveCount(0);
   await expect(
     page.evaluate(() => window.sessionStorage.getItem('accessToken')),
   ).resolves.toBeNull();
+});
+
+test('explains the sign-out on the profile screen of a device another device signed out', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'other-device-profile');
+  const otherDevice = await login(request, session.email);
+  await authenticate(page, otherDevice);
+
+  await page.goto('/profile');
+  await expect(page.getByRole('heading', { name: 'Профиль' })).toBeVisible();
+
+  // The change happens on the first device; this page holds the second session,
+  // which the account-wide sweep revokes without this browser ever hearing of it.
+  await changePassword(request, session);
+
+  await page.goto('/profile');
+
+  await expect(page).toHaveURL('/login?reason=session-rejected');
+  await expect(page.getByRole('status')).toHaveText(
+    'Сессия завершена. Войдите заново; если смена пароля прошла, используйте новый пароль.',
+  );
+  await expect(page.getByText(session.email)).toHaveCount(0);
+  await expect(
+    page.evaluate(() => window.sessionStorage.getItem('accessToken')),
+  ).resolves.toBeNull();
+
+  // The notice is the user's only lead out of the confusion, so it has to point
+  // at a password that works: the new one signs the device back in.
+  await page.getByLabel('Email').fill(session.email);
+  await page.getByLabel('Пароль').fill(rotatedPassword);
+  await page.getByRole('button', { name: 'Войти' }).click();
+  await expect(page).toHaveURL('/');
+});
+
+test('explains the sign-out on the meeting page of a device another device signed out', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'other-device-meeting');
+  const meeting = await createMeeting(request, session);
+  const otherDevice = await login(request, session.email);
+  await authenticate(page, otherDevice);
+
+  await page.goto(`/meetings/${meeting.id}`);
+  await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
+
+  await changePassword(request, session);
+
+  await page.goto(`/meetings/${meeting.id}`);
+
+  await expect(page).toHaveURL('/login?reason=session-rejected');
+  await expect(page.getByRole('status')).toHaveText(
+    'Сессия завершена. Войдите заново; если смена пароля прошла, используйте новый пароль.',
+  );
+  await expect(page.getByText(meeting.title)).toHaveCount(0);
+});
+
+test('explains the sign-out on the dashboard of a device another device signed out', async ({
+  page,
+  request,
+}) => {
+  const session = await register(request, 'other-device-dashboard');
+  const otherDevice = await login(request, session.email);
+  await authenticate(page, otherDevice);
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Рады видеть вас.' })).toBeVisible();
+
+  await changePassword(request, session);
+
+  await page.goto('/');
+
+  await expect(page).toHaveURL('/login?reason=session-rejected');
+  await expect(page.getByRole('status')).toHaveText(
+    'Сессия завершена. Войдите заново; если смена пароля прошла, используйте новый пароль.',
+  );
+  await expect(page.getByText(session.email)).toHaveCount(0);
 });

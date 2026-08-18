@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { apiUrl } from '../../../lib/api/config';
 import type { ApiError, Meeting, MeetingFile } from '../../../lib/api/contracts';
 import { apiErrorMessage, readApiErrorMessage } from '../../../lib/api/errors';
+import { sessionRejectedLoginPath } from '../../../lib/auth/login-notice';
 import { clearAccessToken, clearSessionIdentity, readAccessToken } from '../../../lib/auth/session';
 import { useRestoredSessionGuard } from '../../../lib/auth/use-restored-session-guard';
 
@@ -51,9 +52,12 @@ export function useMeetingFiles(meetingId: string) {
           fetch(`${apiUrl}/meetings/${meetingId}/files`, { headers }),
         ]);
 
+        // A `401` here is as likely to be a session ended elsewhere as an expired
+        // one: a password change revokes every session of the account. The sign-in
+        // screen is told to explain that instead of appearing without a reason.
         if (meetingResponse.status === 401 || filesResponse.status === 401) {
           clearSessionIdentity();
-          router.replace('/login');
+          router.replace(sessionRejectedLoginPath);
           return;
         }
 
@@ -135,7 +139,7 @@ export function useMeetingFiles(meetingId: string) {
 
       if (response.status === 401) {
         clearAccessToken();
-        router.replace('/login');
+        router.replace(sessionRejectedLoginPath);
         return;
       }
 
@@ -178,7 +182,7 @@ export function useMeetingFiles(meetingId: string) {
 
       if (response.status === 401) {
         clearAccessToken();
-        router.replace('/login');
+        router.replace(sessionRejectedLoginPath);
         return;
       }
 

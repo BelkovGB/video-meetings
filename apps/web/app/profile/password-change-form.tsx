@@ -75,8 +75,8 @@ const serverRefusalError: ServerError = {
 
 // The request whose answer never arrived. `fetch` rejects identically whether it
 // never left the browser or whether a change committed server-side and lost its
-// response, so the sentence claims no outcome: a change revokes the calling
-// session in the same transaction, and a user told "пароль не изменён" here
+// response, so the sentence claims no outcome: a change revokes every session of
+// the account in the same transaction, and a user told "пароль не изменён" here
 // signs in later with the old one — this app has no password reset to recover.
 const connectionFailureMessage =
   'Ответ сервера не получен: проверьте соединение и повторите попытку. Если смена пароля прошла, войдите с новым паролем.';
@@ -284,11 +284,11 @@ export function PasswordChangeForm({
 
       // A `401` here is not only an expired token: the endpoint answers it for a
       // legacy session too, so a correct current password can land on it. What
-      // the password is afterwards cannot be decided here — a change revokes the
-      // calling session as it commits, so a retry after a lost response is
-      // refused with the new password already in force. Signing out is still the
-      // only recovery, but it has to say so instead of dropping the user on a
-      // bare /login.
+      // the password is afterwards cannot be decided here — a change revokes
+      // every session of the account as it commits, so a retry after a lost
+      // response is refused with the new password already in force. Signing out
+      // is still the only recovery, but it has to say so instead of dropping the
+      // user on a bare /login.
       if (response.status === 401) {
         onSessionRejected();
         return;
