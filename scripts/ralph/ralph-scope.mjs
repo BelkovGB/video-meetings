@@ -176,7 +176,18 @@ export function isRalphInfrastructureIssue(issue) {
   );
 }
 
-export function scopeMilestoneReviewToProduct(review) {
+/**
+ * Замечания к control plane выбрасываются из любого ревью, а не только из
+ * milestone.
+ *
+ * Агенту запрещено править `.agents/**`, `.claude/**`, `scripts/ralph/**` и
+ * `AGENTS.md`, и ревью, которое требует именно этого, невыполнимо по
+ * построению: следующая сессия вернёт тот же результат, ревью — то же
+ * замечание. На issue #84 так и вышло — десять заходов подряд, около двух
+ * часов и порядка девяти миллионов токенов, причём поводом были правки
+ * оператора в конфиге, сделанные параллельно с прогоном.
+ */
+export function scopeReviewToProduct(review, label = 'Review') {
   const productFindings = review.findings.filter(
     (finding) => !isRalphInfrastructurePath(finding.file),
   );
@@ -184,7 +195,7 @@ export function scopeMilestoneReviewToProduct(review) {
   if (ignoredCount === 0) return review;
 
   console.log(
-    `Milestone review: ${ignoredCount} замечаний к Ralph-инфраструктуре исключены из продуктовой очереди.`,
+    `${label}: ${ignoredCount} замечаний к Ralph-инфраструктуре исключены из продуктовой очереди.`,
   );
   return {
     ...review,
@@ -194,4 +205,8 @@ export function scopeMilestoneReviewToProduct(review) {
       'from the product milestone and must be handled manually in the configuration chat.',
     findings: productFindings,
   };
+}
+
+export function scopeMilestoneReviewToProduct(review) {
+  return scopeReviewToProduct(review, 'Milestone review');
 }

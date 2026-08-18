@@ -17,6 +17,7 @@ import {
   isRalphInfrastructureIssue,
   isRalphInfrastructurePath,
   scopeMilestoneReviewToProduct,
+  scopeReviewToProduct,
 } from './ralph-scope.mjs';
 
 test('implementation prompt delegates full validation to the outer orchestrator', () => {
@@ -556,4 +557,50 @@ test('a Next.js route segment is only readable through -LiteralPath on Windows',
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('замечания к control plane выбрасываются из ревью issue, а не только milestone', () => {
+  // Агенту запрещено править .agents/**, scripts/ralph/** и AGENTS.md, поэтому
+  // ревью, требующее этого, невыполнимо: следующая сессия вернёт тот же
+  // результат, ревью — то же замечание. На issue #84 круг повторился десять раз.
+  const scoped = scopeReviewToProduct(
+    {
+      verdict: 'fail',
+      summary: 'Four findings.',
+      findings: [
+        {
+          severity: 'P2',
+          file: '.agents/ralph.config.json',
+          line: 14,
+          title: 'Budget not reverted',
+        },
+        { severity: 'P2', file: 'apps/web/AGENTS.md', line: 34, title: 'Rule not updated' },
+        {
+          severity: 'P3',
+          file: 'apps/web/e2e/visual-baselines.ts',
+          line: 37,
+          title: 'Textual scan',
+        },
+      ],
+    },
+    'Review issue #84',
+  );
+
+  assert.deepEqual(
+    scoped.findings.map((finding) => finding.file),
+    ['apps/web/e2e/visual-baselines.ts'],
+  );
+  assert.equal(scoped.verdict, 'fail');
+
+  // Когда продуктовых замечаний не осталось, отклонять нечего.
+  const infrastructureOnly = scopeReviewToProduct(
+    {
+      verdict: 'fail',
+      summary: 'One finding.',
+      findings: [{ severity: 'P2', file: 'scripts/ralph/ralph-loop.mjs', line: 1, title: 'x' }],
+    },
+    'Review issue #84',
+  );
+  assert.equal(infrastructureOnly.verdict, 'pass');
+  assert.deepEqual(infrastructureOnly.findings, []);
 });

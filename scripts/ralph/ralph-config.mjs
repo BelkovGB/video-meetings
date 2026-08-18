@@ -261,6 +261,10 @@ function applyLoopDefaults(config) {
   config.maxIterations ??= 20;
   config.maxTurns ??= 50;
   config.maxTestFixAttempts ??= 5;
+  // Сколько раз подряд ревью может отклонить одну issue, прежде чем она уйдёт
+  // из очереди прогона. Меньше, чем у тестов: провал теста называет конкретную
+  // строку, а отказ ревью — суждение, и повтор суждения сходится хуже.
+  config.maxReviewFixAttempts ??= 3;
   config.runtime ??= {};
   // Значения живут в ralph-process-runner.mjs: тот же набор действует до
   // loadConfig, и раздвоение дефолтов расходилось бы молча.
@@ -360,6 +364,9 @@ function validateLoopFields(config) {
   }
   if (!Number.isInteger(config.maxTurns) || config.maxTurns < 1) {
     fail('Поле "maxTurns" должно быть целым числом больше 0.');
+  }
+  if (!Number.isInteger(config.maxReviewFixAttempts) || config.maxReviewFixAttempts < 1) {
+    fail('Поле "maxReviewFixAttempts" должно быть целым числом больше 0.');
   }
   if (!Number.isInteger(config.maxTestFixAttempts) || config.maxTestFixAttempts < 1) {
     fail('Поле "maxTestFixAttempts" должно быть целым числом больше 0.');

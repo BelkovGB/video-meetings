@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { acquireRunLock, initializePersistentLog, readJsonFile } from './ralph-runtime.mjs';
 
-import { fail, isRalphInfrastructureIssue } from './ralph-scope.mjs';
+import { fail, isRalphInfrastructureIssue, scopeReviewToProduct } from './ralph-scope.mjs';
 
 import { run, runNetwork } from './ralph-process-runner.mjs';
 
@@ -264,7 +264,7 @@ async function runIndependentReview(config, repository, issue, commit) {
   let review = parseJson(readFileSync(config.review.outputPath, 'utf8'), config.review.outputPath);
 
   assertReviewPayloadShape(review, `Review issue #${issue.number}`);
-  review = normalizeReviewResult(review);
+  review = scopeReviewToProduct(normalizeReviewResult(review), `Review issue #${issue.number}`);
 
   const changes = run('git', ['status', '--porcelain']).stdout;
   const headAfterReview = run('git', ['rev-parse', 'HEAD']).stdout;
@@ -426,6 +426,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
     throw error;
   }
   if (review.verdict !== 'pass') {
+    const reviewFixAttempts = (activeStateStore()?.issue?.reviewFixAttempts ?? 0) + 1;
     // Замечания попадают в тело issue первыми: именно их читает следующая
     // сессия агента, и без них она не знает, что чинить.
     updateIssueReviewContext(repository, issue, review);
@@ -455,9 +456,25 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
       expectedTree: null,
       commitMessage: null,
       validationFixAttempts: 0,
+      reviewFixAttempts,
       ...clearedFailure,
     });
     reopenIssueWithComment(repository, issue, formatReviewComment(review));
+
+    // Бюджет итераций общий на всю фазу, и без этого предела одна issue съедает
+    // его целиком: на #84 ревью отклонило работу десять раз подряд — около двух
+    // часов и порядка девяти миллионов токенов, — а число замечаний скакало
+    // 7, 2, 2, 3, 3, 3, 2, 4, 4 и ни разу не дошло до нуля. Дальше идут другие
+    // issues, а эта остаётся открытой с замечаниями в теле.
+    if (reviewFixAttempts >= config.maxReviewFixAttempts) {
+      console.error(
+        `Issue #${issue.number}: ревью отклонило работу ${reviewFixAttempts} раз подряд. ` +
+          'Issue отложена до конца прогона: работа в ветке, замечания в её теле. ' +
+          'Следующие заходы повторяли бы тот же круг.',
+      );
+      activeStateStore()?.clearIssue();
+      return { completed: false, parked: true, commit, review };
+    }
     return { completed: false, commit, review };
   }
 
@@ -1003,6 +1020,10 @@ export async function runContinuousLoop(context, actions) {
   let iteration = stateStore?.iterationsUsed ?? 0;
   const pendingIssues = new Map();
   const completedIssueNumbers = new Set();
+  // Issues, которые ревью отклоняло подряд до предела. Из очереди этого прогона
+  // они убраны, но остаются открытыми: их разбирает оператор или следующий
+  // прогон, а бюджет достаётся остальным.
+  const parkedIssueNumbers = new Set();
 
   while (true) {
     const listedIssues = actions
@@ -1012,6 +1033,7 @@ export async function runContinuousLoop(context, actions) {
     // Сначала добавляем ответ GitHub, затем локальную очередь: локальная копия
     // содержит самый свежий body после review и должна победить устаревший REST-ответ.
     for (const issue of [...listedIssues, ...pendingIssues.values()]) {
+      if (parkedIssueNumbers.has(issue.number)) continue;
       if (completedIssueNumbers.has(issue.number)) {
         // REST-список может кратко вернуть уже закрытую issue. Прямой GET
         // отличает этот stale-ответ от настоящего повторного открытия.
@@ -1079,6 +1101,9 @@ export async function runContinuousLoop(context, actions) {
       if (review.verdict === 'pass' && review.findings.length === 0) {
         const appearedIssues = actions
           .openIssues(repository, milestone)
+          // Отложенная issue открыта и здесь бы вернулась в очередь, а фильтр
+          // выше снова бы её убрал — цикл крутился бы на месте.
+          .filter((issue) => !parkedIssueNumbers.has(issue.number))
           .filter((issue) => actions.issueState(repository, issue.number) === 'OPEN');
         if (appearedIssues.length > 0) {
           for (const issue of appearedIssues) pendingIssues.set(issue.number, issue);
@@ -1189,7 +1214,10 @@ export async function runContinuousLoop(context, actions) {
         ? incompleteIssueOutcome(result)
         : { outcome: 'completed', reason: 'issue закрыта' },
     );
-    if (result?.completed === false) {
+    if (result?.parked) {
+      parkedIssueNumbers.add(currentIssue.number);
+      pendingIssues.delete(currentIssue.number);
+    } else if (result?.completed === false) {
       pendingIssues.set(currentIssue.number, currentIssue);
     } else {
       pendingIssues.delete(currentIssue.number);
