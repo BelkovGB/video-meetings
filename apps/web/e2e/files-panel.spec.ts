@@ -73,12 +73,13 @@ async function uploadPdf(
   request: APIRequestContext,
   owner: Session,
   meeting: Meeting,
+  options: { name?: string } = {},
 ): Promise<UploadedFile> {
   const response = await request.post(`${apiUrl}/meetings/${meeting.id}/files`, {
     headers: { Authorization: `Bearer ${owner.accessToken}` },
     multipart: {
       file: {
-        name: 'phase-3-notes.pdf',
+        name: options.name ?? 'phase-3-notes.pdf',
         mimeType: 'application/pdf',
         buffer: Buffer.from('%PDF-1.7\nphase-3'),
       },
@@ -93,6 +94,47 @@ async function uploadPdf(
   });
 
   return uploaded;
+}
+
+async function createUserRecord(prefix: string): Promise<{ userId: string; email: string }> {
+  const user = await prisma.user.create({
+    data: { email: uniqueEmail(prefix), passwordHash: 'not-a-usable-hash' },
+  });
+  createdUserIds.add(user.id);
+
+  return { userId: user.id, email: user.email };
+}
+
+async function createForeignMeeting(prefix: string): Promise<Meeting> {
+  const outsider = await createUserRecord(prefix);
+  const meeting = await prisma.meeting.create({
+    data: {
+      title: `Чужая встреча ${Date.now()}`,
+      date: new Date('2026-08-15T10:30:00.000Z'),
+      ownerId: outsider.userId,
+    },
+  });
+  createdMeetingIds.add(meeting.id);
+
+  return { id: meeting.id, title: meeting.title };
+}
+
+async function setDisplayName(
+  request: APIRequestContext,
+  session: Session,
+  displayName: string,
+): Promise<void> {
+  const response = await request.patch(`${apiUrl}/users/me`, {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+    data: { displayName },
+  });
+  expect(response.ok()).toBeTruthy();
+}
+
+async function addParticipant(meeting: Meeting, participant: Session): Promise<void> {
+  await prisma.meetingParticipant.create({
+    data: { meetingId: meeting.id, userId: participant.userId },
+  });
 }
 
 async function authenticate(page: Page, session: Session): Promise<void> {
@@ -507,14 +549,71 @@ test('owner navigates to files, downloads metadata, and deletes with feedback', 
   await expect(page.getByText('У встречи пока нет файлов')).toBeVisible();
 });
 
+test('names the uploader of every file and shows none of it outside the meeting', async ({
+  page,
+  request,
+}) => {
+  const owner = await register(request, 'phase-6-uploader');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  const namedFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-named.pdf' });
+  const unnamedFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-unnamed.pdf' });
+
+  // The second uploader is created directly: every extra registration here
+  // spends the shared per-IP auth rate limit that the whole suite runs against.
+  const unnamedUploader = await createUserRecord('phase-6-uploader-unnamed');
+  await prisma.meetingFile.update({
+    where: { id: unnamedFile.id },
+    data: { uploadedById: unnamedUploader.userId, createdAt: new Date('2026-08-14T10:00:00.000Z') },
+  });
+  // The row below is photographed, and its upload date is part of the picture.
+  await prisma.meetingFile.update({
+    where: { id: namedFile.id },
+    data: { createdAt: new Date('2026-08-15T10:00:00.000Z') },
+  });
+  await authenticate(page, owner);
+
+  await page.goto(`/meetings/${meeting.id}`);
+
+  const namedRow = page.getByRole('listitem').filter({ hasText: 'phase-6-named.pdf' });
+  const unnamedRow = page.getByRole('listitem').filter({ hasText: 'phase-6-unnamed.pdf' });
+  await expect(namedRow).toContainText('Загрузил(а): Ада Лавлейс');
+  await expect(unnamedRow).toContainText('Загрузил(а): участник без имени');
+
+  // Naming the uploader is all this list does with the identity: no email, and
+  // no way from here into a private profile.
+  await expect(page.getByText(owner.email)).toHaveCount(0);
+  await expect(page.getByText(unnamedUploader.email)).toHaveCount(0);
+  await expect(namedRow.getByRole('link')).toHaveCount(0);
+
+  await expect(namedRow).toHaveScreenshot('meeting-file-uploader-identity.png');
+
+  // A deleted account leaves the file listed and downloadable, under an
+  // identity that no longer names anyone.
+  await prisma.user.delete({ where: { id: unnamedUploader.userId } });
+  await page.reload();
+
+  await expect(unnamedRow).toContainText('Загрузил(а): участник недоступен');
+  await expect(
+    unnamedRow.getByRole('button', { name: 'Скачать phase-6-unnamed.pdf' }),
+  ).toBeVisible();
+
+  const foreignMeeting = await createForeignMeeting('phase-6-uploader-outsider');
+  await page.goto(`/meetings/${foreignMeeting.id}`);
+
+  await expect(
+    page.getByText('Встреча не найдена или у вас больше нет к ней доступа.'),
+  ).toBeVisible();
+  await expect(page.getByText('Ада Лавлейс')).toHaveCount(0);
+});
+
 test('participant can download but never sees the delete action', async ({ page, request }) => {
   const owner = await register(request, 'phase-3-shared-owner');
   const participant = await register(request, 'phase-3-participant');
   const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
   await uploadPdf(request, owner, meeting);
-  await prisma.meetingParticipant.create({
-    data: { meetingId: meeting.id, userId: participant.userId },
-  });
+  await addParticipant(meeting, participant);
   await authenticate(page, participant);
 
   await page.goto('/');
@@ -524,6 +623,10 @@ test('participant can download but never sees the delete action', async ({ page,
   await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
   await expect(page.getByText('Участник', { exact: true })).toBeVisible();
   await expect(page.getByText('phase-3-notes.pdf')).toBeVisible();
+  await expect(page.getByRole('listitem').filter({ hasText: 'phase-3-notes.pdf' })).toContainText(
+    'Загрузил(а): Ада Лавлейс',
+  );
+  await expect(page.getByText(owner.email)).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Скачать phase-3-notes.pdf' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Удалить phase-3-notes.pdf' })).toHaveCount(0);
 

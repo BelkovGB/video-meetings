@@ -218,6 +218,11 @@ export function PasswordChangeForm({
   // Focus follows a rejected submit, never the error state itself: clearing one
   // field's error while another is still set would otherwise pull the caret out
   // of the field being typed into and append the rest of the value elsewhere.
+  // Waiting for `isSubmitting` to clear is what makes the move land at all: the
+  // fields are disabled for the length of the request, and `focus()` on a
+  // disabled input does nothing, so a refusal that focused from inside the
+  // request would leave the caret on the status region whenever the browser
+  // reached the animation frame before React re-enabled the field.
   useEffect(() => {
     if (isSubmitting || !shouldFocusErrorRef.current) {
       return;
@@ -226,9 +231,9 @@ export function PasswordChangeForm({
     const field = (['currentPassword', 'newPassword', 'confirmation'] as const).find(
       (name) => errors[name],
     );
-    if (field) {
-      focusField(field);
-    }
+    // A refusal that belongs to no field returns the caret to the first one,
+    // which describes itself with that refusal.
+    focusField(field ?? 'currentPassword');
   }, [errors, isSubmitting]);
 
   useEffect(() => {
@@ -296,12 +301,11 @@ export function PasswordChangeForm({
 
       if (!response.ok) {
         const { field, message } = await readServerError(response);
+        shouldFocusErrorRef.current = true;
         if (field) {
-          shouldFocusErrorRef.current = true;
           setErrors({ [field]: message });
         } else {
           setRequestError(message);
-          focusField('currentPassword');
         }
         return;
       }
@@ -309,8 +313,8 @@ export function PasswordChangeForm({
       hasChanged = true;
       onPasswordChanged();
     } catch {
+      shouldFocusErrorRef.current = true;
       setRequestError(connectionFailureMessage);
-      focusField('currentPassword');
     } finally {
       // A successful change leaves the form submitted while the router leaves
       // the page: re-enabling it would let a repeated Enter run again without a

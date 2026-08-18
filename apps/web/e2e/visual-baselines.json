@@ -27,6 +27,11 @@
       "password-change-form-desktop-chromium.png",
       "password-change-form-mobile-chromium.png",
       "password-change-form-mobile-landscape-chromium.png"
+    ],
+    "files-panel.spec.ts-snapshots": [
+      "meeting-file-uploader-identity-desktop-chromium.png",
+      "meeting-file-uploader-identity-mobile-chromium.png",
+      "meeting-file-uploader-identity-mobile-landscape-chromium.png"
     ]
   }
 }
