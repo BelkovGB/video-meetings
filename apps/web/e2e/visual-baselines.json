@@ -31,7 +31,10 @@
     "files-panel.spec.ts-snapshots": [
       "meeting-file-uploader-identity-desktop-chromium.png",
       "meeting-file-uploader-identity-mobile-chromium.png",
-      "meeting-file-uploader-identity-mobile-landscape-chromium.png"
+      "meeting-file-uploader-identity-mobile-landscape-chromium.png",
+      "meeting-file-uploader-avatar-desktop-chromium.png",
+      "meeting-file-uploader-avatar-mobile-chromium.png",
+      "meeting-file-uploader-avatar-mobile-landscape-chromium.png"
     ]
   }
 }

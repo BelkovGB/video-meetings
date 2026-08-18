@@ -3,6 +3,7 @@ import { FileIcon } from './meeting-file-list-icons';
 import { MeetingFileRow } from './meeting-file-row';
 
 type MeetingFileListProps = {
+  meetingId: string;
   files: MeetingFile[];
   canDelete: boolean;
   downloadingId: string | null;
@@ -15,6 +16,7 @@ type MeetingFileListProps = {
 };
 
 export function MeetingFileList({
+  meetingId,
   files,
   canDelete,
   downloadingId,
@@ -44,6 +46,7 @@ export function MeetingFileList({
       {files.map((file) => (
         <MeetingFileRow
           key={file.id}
+          meetingId={meetingId}
           file={file}
           canDelete={canDelete}
           isDownloading={downloadingId === file.id}
