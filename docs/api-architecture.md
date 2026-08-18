@@ -44,7 +44,8 @@ read model selection; it ensures every meeting response excludes `ownerId`.
 `AuthModule` owns authentication decisions: it validates a registration attempt,
 hashes and verifies passwords, handles duplicate and invalid-credential errors,
 and issues JWTs. It also owns the minimal persisted authentication-session state
-used to revoke a single JWT without affecting a user's other sessions.
+used to revoke JWTs: one row per issued token, so a password change can revoke
+all of a user's tokens at once.
 
 Instead, it depends on the `UsersSecurityPort` token exported by `UsersModule`.
 The port offers only the credential-oriented operations authentication needs:
@@ -103,9 +104,10 @@ unique authentication-session ID in `sid`. When registration or login issues a
 JWT, `AuthSessionService` first creates an `auth_sessions` row for that user;
 `sid` identifies that row. The guard verifies a non-empty `sid` against a row
 belonging to `sub` with no `revoked_at` value. Revoking a row therefore
-invalidates only its bearer token; other session rows for the same user remain
-valid. There is intentionally no session-management or bulk-device termination
-API.
+invalidates its bearer token and nothing else. A password change revokes every
+row of that user, which is the only bulk termination the API offers: there is no
+session-management screen and no password reset, so the change is a user's sole
+way to evict a token they no longer hold.
 
 `sid` was added after JWTs had already been issued. During the rollout,
 `ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true` temporarily admits signed legacy tokens
@@ -113,7 +115,7 @@ that lack it, avoiding a global logout. Such a token cannot change a password,
 because it has no session row to revoke. After at least the one-hour maximum JWT
 lifetime, deployments set the flag to `false`; missing, malformed, unknown, or
 revoked session identities are then rejected as `401` and every protected token
-is selectively revocable.
+is revocable.
 
 Only token verification is treated as an authentication failure: if the session
 lookup itself fails, the error propagates as `5xx` instead of `401`. A `401`

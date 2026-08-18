@@ -103,13 +103,27 @@ export class ProfileService {
 
       const passwordHash = await bcrypt.hash(normalizedNewPassword, 12);
       await transaction.user.update({ where: { id: userId }, data: { passwordHash } });
-      const revokedSession = await transaction.authSession.updateMany({
+      // The caller session is checked before the sweep below, which cannot tell
+      // it apart from the others it revokes: a request carrying an unknown or
+      // already revoked session must be answered `401` with nothing changed,
+      // not treated as a licence to sign the account out everywhere.
+      const callerSession = await transaction.authSession.findFirst({
         where: { id: sessionId, userId, revokedAt: null },
-        data: { revokedAt: new Date() },
+        select: { id: true },
       });
-      if (revokedSession.count !== 1) {
+      if (!callerSession) {
         throw new UnauthorizedException();
       }
+
+      // Every session dies, not just the caller's. A password is normally
+      // changed because the old one or a token minted with it is suspected
+      // stolen, and this app has no reset flow and no "sign out everywhere",
+      // so leaving the other sessions alive would leave the user no way to
+      // evict a thief.
+      await transaction.authSession.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     });
   }
 

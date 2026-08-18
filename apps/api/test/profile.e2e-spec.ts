@@ -413,7 +413,7 @@ describe('Current user profile (e2e)', () => {
     await loginUser(user.email, validPassword);
   });
 
-  it('changes the password, revokes only the caller session, and permits login with the new password', async () => {
+  it('changes the password, revokes every session of the account, and permits login with the new password', async () => {
     const user = await registerUser('password-change-success');
     const secondSessionToken = await loginUser(user.email, validPassword);
     const newPassword = '😀'.repeat(18);
@@ -428,13 +428,78 @@ describe('Current user profile (e2e)', () => {
       .get('/users/me')
       .set('Authorization', `Bearer ${user.accessToken}`)
       .expect(401);
+
+    // A password is usually changed because the old one, or a token minted with
+    // it, is suspected stolen. The app offers no reset and no "sign out
+    // everywhere", so a session the caller is not holding must die here or not
+    // at all.
     await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${secondSessionToken}`)
-      .expect(200);
+      .expect(401);
     await request(app.getHttpServer())
       .post('/auth/login')
       .send({ email: user.email, password: validPassword })
+      .expect(401);
+    await loginUser(user.email, newPassword);
+  });
+
+  it('rejects a password change whose session another change revoked after the guard admitted it', async () => {
+    const user = await registerUser('password-change-concurrent-revocation');
+    const staleSessionToken = await loginUser(user.email, validPassword);
+    const newPassword = 'new-password-123';
+    const rivalPassword = 'rival-password-123';
+    const profileService = app.get(ProfileService);
+    const originalChangePassword = profileService.changePassword.bind(profileService);
+    let releaseStaleChange: (() => void) | undefined;
+    const staleChangeReleased = new Promise<void>((resolve) => {
+      releaseStaleChange = resolve;
+    });
+    let signalStaleChange: (() => void) | undefined;
+    const staleChangeAdmitted = new Promise<void>((resolve) => {
+      signalStaleChange = resolve;
+    });
+    // The guard reads the session outside the transaction that revokes it, so a
+    // request admitted a moment before another session changes the password
+    // reaches the service with a session that is already revoked. It carries the
+    // password that change installed, so only the service's own session check
+    // can stop it from sweeping the fresh sessions away and setting a password
+    // of its own.
+    const changePassword = jest
+      .spyOn(profileService, 'changePassword')
+      .mockImplementationOnce(async (userId, sessionId, dto) => {
+        signalStaleChange?.();
+        await staleChangeReleased;
+        return originalChangePassword(userId, sessionId, dto);
+      });
+
+    try {
+      const staleChange = request(app.getHttpServer())
+        .post('/users/me/password')
+        .set('Authorization', `Bearer ${staleSessionToken}`)
+        .send({
+          currentPassword: newPassword,
+          newPassword: rivalPassword,
+          confirmation: rivalPassword,
+        })
+        .then((response) => response);
+      await staleChangeAdmitted;
+
+      await request(app.getHttpServer())
+        .post('/users/me/password')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .send({ currentPassword: validPassword, newPassword, confirmation: newPassword })
+        .expect(204);
+
+      releaseStaleChange?.();
+      expect((await staleChange).status).toBe(401);
+    } finally {
+      changePassword.mockRestore();
+    }
+
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email: user.email, password: rivalPassword })
       .expect(401);
     await loginUser(user.email, newPassword);
   });

@@ -233,10 +233,16 @@ deleted account carry no `code`:
 | `PASSWORD_CONFIRMATION_MISMATCH` | 400    | `confirmation` differs from `newPassword`.          |
 | `PASSWORD_CHANGE_RATE_LIMITED`   | 429    | The attempt limit above was exceeded.               |
 
-On success, the password replacement and revocation of the calling JWT session
-are atomic. That JWT can no longer access protected routes, while the user's
-other existing sessions remain valid. Passwords and password hashes are never
-included in responses or application logs.
+On success, the password replacement and revocation of the account's JWT
+sessions are atomic. Every session is revoked, not only the calling one: the
+usual reason to change a password is a suspected compromise, and the API offers
+no reset flow and no separate "sign out everywhere", so a token the user no
+longer holds could not otherwise be evicted. Each of those JWTs is refused on
+protected routes from the moment the change commits, and every device has to
+sign in again with the new password. A legacy token without `sid` is the one
+exception below: it has no session row, so it survives until it expires.
+Passwords and password hashes are never included in responses or application
+logs.
 
 ### JWT session migration rollout
 
@@ -246,14 +252,15 @@ without globally invalidating still-valid tokens issued before `sid` existed,
 the API accepts those legacy tokens by default (`ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true`).
 They continue to work on protected routes until their normal JWT expiry, but
 cannot call `POST /users/me/password`: that operation returns `401` and requires
-the user to sign in again, because a legacy token has no session row that can be
-selectively revoked.
+the user to sign in again, because a legacy token has no session row to revoke.
+For the same reason a password change cannot evict a legacy token held by
+someone else; that gap closes when the flag is turned off below.
 
 Keep this compatibility setting enabled for at least the maximum JWT lifetime
 (currently one hour) after deploying the version that starts issuing `sid`
 tokens. Then set `ACCEPT_LEGACY_JWT_WITHOUT_SESSION=false` and redeploy. From
-that point the guard rejects missing session IDs and all protected JWTs support
-selective current-session revocation.
+that point the guard rejects missing session IDs, and every protected JWT is
+backed by a session row that a password change revokes.
 
 ## Meetings
 
