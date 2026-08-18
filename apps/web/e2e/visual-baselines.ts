@@ -17,6 +17,10 @@
  *   what the operator still owes instead of leaving an assertion that silently
  *   compares against nothing.
  *
+ * Pairing a name with its assertion means the name has to be readable from the
+ * source, so a `toHaveScreenshot` call here names its baseline with a
+ * single-quoted string literal; anything else is rejected rather than skipped.
+ *
  * This does not make the prohibition unbypassable: a session can render a PNG
  * and add the matching line itself. What it buys is that the addition becomes a
  * reviewable line of text beside an opaque binary, and that a fabricated entry
@@ -30,7 +34,30 @@ export const inventoryFileName = 'visual-baselines.json';
 
 const snapshotDirectorySuffix = '-snapshots';
 const specFileSuffix = '.spec.ts';
-const screenshotCallPattern = /toHaveScreenshot\(\s*'([^']+)'/g;
+const screenshotCallPattern = /toHaveScreenshot\(\s*(?:'([^']+)')?/g;
+
+/**
+ * The names one spec asserts, in the order they appear.
+ *
+ * Only a single-quoted string literal is recognised, and any other shape is a
+ * hard error rather than a call passed over. Playwright also accepts no argument
+ * at all, an array of path segments and a computed name, and a name this scan
+ * cannot resolve deadlocks the inventory: once the operator regenerates it, the
+ * PNG on disk is unlisted, and listing it then reports that no call produces it.
+ * No inventory satisfies both rules, and the only way out would be deleting the
+ * assertion — so an unreadable call has to say so where it is written.
+ */
+function readAssertedNames(spec: string, source: string): string[] {
+  return [...source.matchAll(screenshotCallPattern)].map(([call, name], index) => {
+    if (name === undefined) {
+      throw new Error(
+        `${spec} names screenshot #${index + 1} with an argument this scan cannot read: "${call.trim()}...". ` +
+          `${inventoryFileName} is keyed by baseline name, so a name it cannot resolve can be neither listed nor asserted; pass a single-quoted string literal.`,
+      );
+    }
+    return name;
+  });
+}
 
 type BaselineNames = Record<string, string[]>;
 
@@ -130,7 +157,7 @@ function readAssertedBaselines(e2eDir: string, projectNames: readonly string[]):
       }
 
       const source = readFileSync(path.join(e2eDir, child), 'utf8');
-      const names = [...source.matchAll(screenshotCallPattern)].flatMap(([, argument]) => {
+      const names = readAssertedNames(child, source).flatMap((argument) => {
         const extension = path.extname(argument);
         const stem = argument.slice(0, argument.length - extension.length);
         return projectNames.map((project) => `${stem}-${project}${extension}`);

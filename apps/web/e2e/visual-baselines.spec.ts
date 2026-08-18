@@ -26,20 +26,34 @@ type Tree = {
   present?: Record<string, string[]>;
   /** Screenshot arguments each spec asserts, keyed by spec path. */
   specs?: Record<string, string[]>;
+  /**
+   * Raw `toHaveScreenshot` argument text each spec passes, keyed by spec path,
+   * for the call shapes a plain name cannot express.
+   */
+  rawCalls?: Record<string, string[]>;
 };
 
 /**
- * The scan reads this spec too, so the assertion is assembled at runtime: a
- * literal call here would claim baselines this file never renders.
+ * The scan reads this spec too, so every call it writes is assembled at runtime:
+ * a literal one here would claim baselines this file never renders, and the
+ * unreadable shapes below would fail the reconciliation of the real tree.
  */
+function callSource(argumentText: string): string {
+  return `await expect(page).toHave${'Screenshot'}(${argumentText});\n`;
+}
+
 function specSource(screenshotArguments: string[]): string {
-  return screenshotArguments
-    .map((argument) => `await expect(page).toHave${'Screenshot'}('${argument}');\n`)
-    .join('');
+  return screenshotArguments.map((argument) => callSource(`'${argument}'`)).join('');
 }
 
 /** A tree shaped like `e2e/`: the inventory, the specs, and the baselines on disk. */
-function writeTree({ committed = {}, pending = {}, present = {}, specs = {} }: Tree): string {
+function writeTree({
+  committed = {},
+  pending = {},
+  present = {},
+  specs = {},
+  rawCalls = {},
+}: Tree): string {
   const root = mkdtempSync(path.join(tmpdir(), 'visual-baselines-'));
   writeFileSync(
     path.join(root, inventoryFileName),
@@ -56,6 +70,11 @@ function writeTree({ committed = {}, pending = {}, present = {}, specs = {} }: T
   for (const [spec, screenshotArguments] of Object.entries(specs)) {
     mkdirSync(path.dirname(path.join(root, spec)), { recursive: true });
     writeFileSync(path.join(root, spec), specSource(screenshotArguments));
+  }
+
+  for (const [spec, argumentTexts] of Object.entries(rawCalls)) {
+    mkdirSync(path.dirname(path.join(root, spec)), { recursive: true });
+    writeFileSync(path.join(root, spec), argumentTexts.map(callSource).join(''));
   }
 
   return root;
@@ -249,6 +268,24 @@ test.describe('committed visual baselines', () => {
     ]);
   });
 
+  // `pending` is the half of the inventory an agent writes by hand, so it is the
+  // half a fabricated or stale line lands in: the pairing requirement is what
+  // keeps an entry from claiming a baseline no assertion ever asks for, and what
+  // catches the line left behind when a visual assertion is deleted.
+  test('reports a pending baseline that no screenshot assertion produces', () => {
+    const root = tree({
+      pending: { 'profile.spec.ts-snapshots': ['orphan-desktop-chromium.png'] },
+      specs: { 'profile.spec.ts': ['renamed.png'] },
+    });
+
+    expect(findBaselineViolations(root, treeProjects)).toEqual([
+      expect.stringContaining('profile.spec.ts-snapshots/orphan-desktop-chromium.png'),
+      // The assertion the spec does make, which nothing owes a baseline for.
+      expect.stringContaining('profile.spec.ts-snapshots/renamed-desktop-chromium.png'),
+    ]);
+    expect(findBaselineViolations(root, treeProjects)[0]).toContain('no toHaveScreenshot call');
+  });
+
   test('reports a screenshot assertion with neither a baseline nor a pending entry', () => {
     const root = tree({ specs: { 'profile.spec.ts': ['password-change-form.png'] } });
 
@@ -291,6 +328,39 @@ test.describe('committed visual baselines', () => {
     expect(pendingBaselines(root)).toEqual([
       'profile.spec.ts-snapshots/password-change-form-desktop-chromium.png',
     ]);
+  });
+
+  // The inventory is keyed by baseline name, and both rules that pair a name
+  // with its assertion need the scan to resolve every call. A call it cannot
+  // read is worse than unsupported: the regenerated PNG is then unlisted, and
+  // listing it reports "no toHaveScreenshot call produces this name", so no
+  // inventory passes and the only escape is deleting the assertion. Say so at
+  // the call instead.
+  for (const [shape, argumentText] of [
+    ['no argument', ''],
+    ['an array of path segments', "['nested', 'form.png']"],
+    ['a computed name', '`form-${variant}.png`'],
+    ['a double-quoted literal', '"form.png"'],
+  ]) {
+    test(`refuses a screenshot call named by ${shape}`, () => {
+      const root = tree({ rawCalls: { 'profile.spec.ts': [argumentText] } });
+
+      expect(() => findBaselineViolations(root, treeProjects)).toThrow(
+        /profile\.spec\.ts.*single-quoted/s,
+      );
+      expect(() => unrenderedBaselines(root, treeProjects)).toThrow(/single-quoted/);
+    });
+  }
+
+  // An unreadable call anywhere in the spec is enough: the scan does not stop at
+  // the first name it can resolve.
+  test('refuses a spec that mixes a resolvable screenshot call with one it cannot read', () => {
+    const root = tree({
+      pending: { 'profile.spec.ts-snapshots': ['first-desktop-chromium.png'] },
+      rawCalls: { 'profile.spec.ts': ["'first.png'", '`second-${variant}.png`'] },
+    });
+
+    expect(() => findBaselineViolations(root, treeProjects)).toThrow(/single-quoted/);
   });
 
   test('ignores directories that are not snapshot directories', () => {
