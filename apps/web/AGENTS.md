@@ -13,7 +13,8 @@
   handling belong in a hook; rendering belongs in components the shell arranges.
 - Renaming or splitting a spec that owns visual snapshots orphans its baselines:
   `snapshotPathTemplate` contains the spec path, and
-  `e2e/profile.spec.ts-snapshots/` holds 18 PNGs. Move the directory in the same
+  `e2e/profile.spec.ts-snapshots/` holds the committed PNGs listed in
+  `e2e/visual-baselines.json`. Move the directory in the same
   commit, or the next visual run silently compares against nothing.
 - For user-visible changes, verify affected interactions, keyboard accessibility,
   and the configured desktop, mobile, and mobile-landscape Playwright projects.
@@ -33,6 +34,14 @@
   is never compared against anything and only misleads the next reader. Write
   the visual test; the operator regenerates baselines with
   `npm run test:e2e:web:visual`.
+- That rule is enforced by `e2e/visual-baselines.spec.ts`, which reconciles the
+  `toHaveScreenshot()` calls in every spec against `e2e/visual-baselines.json`.
+  A new visual assertion goes into that inventory under `pending`, without a
+  committed PNG; the operator regenerates the baseline and moves the entry.
+  The guard reads the baseline name textually, so it must be a single-quoted
+  literal in the call: `toHaveScreenshot('password-change-form.png')`. A
+  computed name, or none at all, fails the guard by design rather than
+  silently.
 - Save manual screenshots under the repository-relative `screenshot/` directory;
   keep Playwright snapshots and failure artifacts in their configured locations.
 
