@@ -381,7 +381,8 @@ export function PasswordChangeForm({
           />
         </div>
         <p id="password-change-help" className="mt-3 text-sm leading-6 text-slate-500">
-          Не менее 9 символов и не более 72 байт UTF-8. После изменения потребуется войти снова.
+          Не менее 9 символов и не более 72 байт UTF-8. После изменения потребуется войти снова на
+          всех устройствах.
         </p>
         {requestError ? (
           <p

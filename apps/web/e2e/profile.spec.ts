@@ -986,7 +986,7 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(currentPassword).toHaveAccessibleDescription(
     'Слишком много попыток изменить пароль. Повторите через 15 минут.' +
       ' Не менее 9 символов и не более 72 байт UTF-8.' +
-      ' После изменения потребуется войти снова.',
+      ' После изменения потребуется войти снова на всех устройствах.',
   );
   await expect(page).toHaveURL('/profile');
 
@@ -994,7 +994,8 @@ test('validates and recovers from password-change failures without clearing the 
   // goes back to the help text alone.
   await currentPassword.fill('retyped-current-password');
   await expect(currentPassword).toHaveAccessibleDescription(
-    'Не менее 9 символов и не более 72 байт UTF-8. После изменения потребуется войти снова.',
+    'Не менее 9 символов и не более 72 байт UTF-8.' +
+      ' После изменения потребуется войти снова на всех устройствах.',
   );
   await currentPassword.fill(password);
 
@@ -1272,7 +1273,7 @@ test('changes the password by keyboard, signs out, blocks protected routes, and 
   await page.unroute(isSignInPage);
   await expect(page.getByRole('heading', { name: 'С возвращением' })).toBeVisible();
   await expect(page.getByRole('status')).toHaveText(
-    'Пароль изменён. Войдите заново с новым паролем.',
+    'Пароль изменён. Сессии на всех устройствах завершены — войдите заново с новым паролем.',
   );
   // The notice carries the only explanation of the sign-out, so it takes focus
   // instead of relying on a live region that mounted with its own text.

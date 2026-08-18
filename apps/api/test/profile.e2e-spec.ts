@@ -444,6 +444,38 @@ describe('Current user profile (e2e)', () => {
     await loginUser(user.email, newPassword);
   });
 
+  it('revokes only the changing account, leaving every other account signed in', async () => {
+    const user = await registerUser('password-change-scope-caller');
+    const bystander = await registerUser('password-change-scope-bystander');
+    const bystanderSecondToken = await loginUser(bystander.email, validPassword);
+    const newPassword = 'scoped-new-password-123';
+
+    await request(app.getHttpServer())
+      .post('/users/me/password')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ currentPassword: validPassword, newPassword, confirmation: newPassword })
+      .expect(204);
+
+    // The sweep revokes by user alone, so the only thing keeping it from
+    // signing every account in the service out is the `userId` in its `where`.
+    // Losing that key would still pass every other assertion in this file: the
+    // caller's sessions die either way, and no other test changes a password
+    // while a second account holds a token.
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${bystander.accessToken}`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .get('/users/me')
+      .set('Authorization', `Bearer ${bystanderSecondToken}`)
+      .expect(200);
+
+    // The bystander's credential is untouched too: a sweep bound to the wrong
+    // subject could revoke rows without touching hashes, which the token checks
+    // above would catch, but the reverse mistake is worth pinning as well.
+    await loginUser(bystander.email, validPassword);
+  });
+
   it('rejects a password change whose session another change revoked after the guard admitted it', async () => {
     const user = await registerUser('password-change-concurrent-revocation');
     const staleSessionToken = await loginUser(user.email, validPassword);

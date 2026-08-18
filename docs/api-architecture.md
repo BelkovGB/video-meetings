@@ -63,15 +63,16 @@ updates, and avatar operations are not credential operations. Its one credential
 boundary is the authenticated `POST /users/me/password` operation: it accepts
 only the verified JWT subject and session ID, selects that subject's password
 hash inside its transaction, verifies the current password, atomically replaces
-the hash, and revokes that same session. It never returns or logs a password or
-hash, has no operation accepting a target user ID or an email update, and rate
-limits password verification by both caller account and client IP. Other profile
-operations use `PrismaModule` only for safe fields (`id`, `email`, `displayName`,
-and private avatar metadata). Thus the credential flow in `AuthModule` has no
-direct `User` model dependency, `AuthSessionService` is its only Prisma-backed
-authentication state, `UsersModule` does not expose general user CRUD, and the
-profile HTTP surface is limited to the authenticated caller endpoints documented
-in `docs/api.md`.
+the hash, and revokes every authentication session of that subject, including
+the caller's. It never returns or logs a password or hash, has no operation
+accepting a target user ID or an email update, and rate limits password
+verification by both caller account and client IP. Other profile operations use
+`PrismaModule` only for safe fields (`id`, `email`, `displayName`, and private
+avatar metadata). Thus the credential flow in `AuthModule` has no direct `User`
+model dependency, `AuthSessionService` is its only Prisma-backed authentication
+state, `UsersModule` does not expose general user CRUD, and the profile HTTP
+surface is limited to the authenticated caller endpoints documented in
+`docs/api.md`.
 
 There is no general users controller: user creation and credential lookup are
 available only through the security port, while the profile controller exposes

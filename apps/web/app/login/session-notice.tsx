@@ -18,15 +18,22 @@ type Notice = { status: 'success' | 'warning'; message: string };
 const noticesByReason = new Map<string, Notice>([
   [
     passwordChangedNotice,
-    { status: 'success', message: 'Пароль изменён. Войдите заново с новым паролем.' },
+    {
+      status: 'success',
+      // Names the full blast radius: the change revokes every session of the
+      // account, so a phone or a second browser was signed out too and the
+      // user is told here rather than discovering it on the next device.
+      message:
+        'Пароль изменён. Сессии на всех устройствах завершены — войдите заново с новым паролем.',
+    },
   ],
   [
     sessionRejectedNotice,
     {
       status: 'warning',
       // The state of the password is deliberately left open. A change commits
-      // and revokes the calling session in one transaction, so a lost response
-      // followed by a retry is answered `401` with the new password already in
+      // and revokes every session of the account in one transaction, so a lost
+      // response followed by a retry is answered `401` with the new password in
       // force: claiming "пароль не изменён" would send that user back with the
       // old one, and this app has no password reset to recover from it.
       message:
