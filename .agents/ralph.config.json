@@ -5,12 +5,17 @@
   "draftPullRequest": true,
   "stopAfterFirstIssue": false,
   "phases": [
-    {
-      "milestone": ["Phase 5: User Identity in Shared Activity API", "Phase 6: User Identity in Shared Activity UI"],
-      "branch": "features/profile-phase-5-6",
-      "baseBranch": "master"
-    }
-  ],
+  {
+    "milestone": "Phase 5: User Identity in Shared Activity API",
+    "branch": "features/profile-phase-5",
+    "baseBranch": "master"
+  },
+  {
+    "milestone": "Phase 6: User Identity in Shared Activity UI",
+    "branch": "features/profile-phase-6",
+    "baseBranch": "features/profile-phase-5"
+  }
+]
   "maxIterations": 36,
   "maxTurns": 100,
   "maxTestFixAttempts": 5,
