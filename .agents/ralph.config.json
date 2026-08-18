@@ -15,7 +15,7 @@
     "branch": "features/profile-phase-6",
     "baseBranch": "features/profile-phase-5"
   }
-]
+],
   "maxIterations": 36,
   "maxTurns": 100,
   "maxTestFixAttempts": 5,
