@@ -7,6 +7,7 @@ import { ProfileService } from './profile.service';
 import { AvatarValidationService } from './avatar-validation.service';
 import { LocalAvatarStorageService } from './local-avatar-storage.service';
 import { PasswordChangeRateLimitGuard } from './password-change-rate-limit.guard';
+import { UserAvatarService } from './user-avatar.service';
 
 @Module({
   imports: [AuthModule, PrismaModule],
@@ -16,6 +17,8 @@ import { PasswordChangeRateLimitGuard } from './password-change-rate-limit.guard
     AvatarValidationService,
     LocalAvatarStorageService,
     PasswordChangeRateLimitGuard,
+    UserAvatarService,
   ],
+  exports: [UserAvatarService],
 })
 export class ProfileModule {}

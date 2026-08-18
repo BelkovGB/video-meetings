@@ -7,7 +7,6 @@ import {
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
-import { ReadStream } from 'node:fs';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -243,30 +242,6 @@ export class ProfileService {
       return user?.avatarStorageKey === storageKey;
     } catch {
       return undefined;
-    }
-  }
-
-  async openCurrentAvatar(
-    userId: string,
-  ): Promise<{ mimeType: string; sizeBytes: number; stream: ReadStream }> {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { avatarStorageKey: true, avatarMimeType: true, avatarSizeBytes: true },
-    });
-    if (!user?.avatarStorageKey || !user.avatarMimeType || user.avatarSizeBytes === null) {
-      throw new NotFoundException('Avatar not found');
-    }
-    try {
-      return {
-        mimeType: user.avatarMimeType,
-        sizeBytes: user.avatarSizeBytes,
-        stream: await this.avatars.open(user.avatarStorageKey),
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new NotFoundException('Avatar not found');
-      }
-      throw error;
     }
   }
 

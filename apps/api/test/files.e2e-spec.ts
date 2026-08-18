@@ -7,6 +7,7 @@ import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { configureHttpApplication } from '../src/http-application';
 import { MeetingFileDeletionReconciliationService } from '../src/files/services/meeting-file-deletion-reconciliation.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
@@ -22,6 +23,10 @@ const validDate = '2026-08-03T10:00:00.000Z';
 const uploadRoot = join(tmpdir(), 'video-meetings-api-e2e-uploads');
 const validPng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4z8AAAAMBAQCc479ZAAAAAElFTkSuQmCC',
+  'base64',
+);
+const replacementPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEklEQVQImWM4IRd1Qi6KAUIBACTGBQFoaYMtAAAAAElFTkSuQmCC',
   'base64',
 );
 
@@ -40,15 +45,22 @@ function createTicketHash() {
 describe('Meeting files (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
+  // Each registration comes from its own client address: the suite creates more
+  // accounts per minute than one client may, and sharing an address would fail
+  // it on the authentication rate limit instead of on a meeting-file defect.
+  let registrationCount = 0;
+  const originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
 
   beforeAll(async () => {
     await rm(uploadRoot, { recursive: true, force: true });
+    process.env.TRUSTED_PROXY_IPS = 'loopback';
 
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
 
     app = moduleRef.createNestApplication();
+    configureHttpApplication(app);
     await app.init();
     prisma = app.get(PrismaService);
   });
@@ -56,11 +68,19 @@ describe('Meeting files (e2e)', () => {
   afterAll(async () => {
     await app.close();
     await rm(uploadRoot, { recursive: true, force: true });
+
+    if (originalTrustedProxyIps === undefined) {
+      delete process.env.TRUSTED_PROXY_IPS;
+    } else {
+      process.env.TRUSTED_PROXY_IPS = originalTrustedProxyIps;
+    }
   });
 
   async function registerUser(): Promise<UserSession> {
+    registrationCount += 1;
     const response = await request(app.getHttpServer())
       .post('/auth/register')
+      .set('X-Forwarded-For', `198.51.100.${registrationCount}`)
       .send({ email: createEmail('file-user'), password: validPassword })
       .expect(201);
 
@@ -99,11 +119,11 @@ describe('Meeting files (e2e)', () => {
       .expect(200);
   }
 
-  async function uploadAvatar(user: UserSession): Promise<void> {
+  async function uploadAvatar(user: UserSession, image: Buffer = validPng): Promise<void> {
     await request(app.getHttpServer())
       .post('/users/me/avatar')
       .set('Authorization', `Bearer ${user.accessToken}`)
-      .attach('avatar', validPng, { filename: 'portrait.png', contentType: 'image/png' })
+      .attach('avatar', image, { filename: 'portrait.png', contentType: 'image/png' })
       .expect(201);
   }
 
@@ -538,5 +558,116 @@ describe('Meeting files (e2e)', () => {
       .expect(404);
 
     expect(JSON.stringify(denied.body)).not.toContain('Hidden Owner');
+  });
+  it('streams the uploader current avatar to the meeting owner and to participants', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await uploadAvatar(participant);
+    const uploaded = await uploadPdf(meeting.id, participant);
+
+    for (const viewer of [owner, participant]) {
+      const response = await request(app.getHttpServer())
+        .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+        .set('Authorization', `Bearer ${viewer.accessToken}`)
+        .expect('Content-Type', /image\/png/)
+        .expect('Cache-Control', 'private, no-store')
+        .expect('X-Content-Type-Options', 'nosniff')
+        .expect(200);
+
+      expect(Buffer.from(response.body as Buffer)).toEqual(validPng);
+    }
+  });
+
+  it('denies the uploader avatar outside the meeting and to an unauthenticated caller', async () => {
+    const owner = await registerUser();
+    const outsider = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Hidden Uploader');
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    const denied = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`)
+      .expect(404);
+
+    expect(denied.body).toMatchObject({ message: 'Meeting not found' });
+    expect(JSON.stringify(denied.body)).not.toContain('Hidden Uploader');
+
+    await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .expect(401);
+  });
+
+  it('refuses a file that belongs to another meeting the caller can access', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const otherMeeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    await request(app.getHttpServer())
+      .get(`/meetings/${otherMeeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+  });
+
+  it('serves the replacement avatar for a file uploaded before the replacement', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    await uploadAvatar(owner, replacementPng);
+
+    const response = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(Buffer.from(response.body as Buffer)).toEqual(replacementPng);
+  });
+
+  it('stops serving the avatar once the uploader removes it', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await uploadAvatar(participant);
+    const uploaded = await uploadPdf(meeting.id, participant);
+
+    await request(app.getHttpServer())
+      .delete('/users/me/avatar')
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+  });
+
+  it('reports an avatar the uploader never had and a deleted uploader account as absent', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    const withoutAvatar = await uploadPdf(meeting.id, participant);
+
+    await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${withoutAvatar.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    await uploadAvatar(participant);
+    const uploaded = await uploadPdf(meeting.id, participant);
+    await prisma.user.delete({ where: { id: getUserId(participant.accessToken) } });
+
+    await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
   });
 });

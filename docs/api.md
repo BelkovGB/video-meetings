@@ -20,6 +20,7 @@ JSON except for the multipart file-upload endpoint.
 | GET    | `/meetings/:id`                                      | Bearer JWT         |
 | POST   | `/meetings/:meetingId/files`                         | Bearer JWT         |
 | GET    | `/meetings/:meetingId/files`                         | Bearer JWT         |
+| GET    | `/meetings/:meetingId/files/:fileId/uploader-avatar` | Bearer JWT         |
 | POST   | `/meetings/:meetingId/files/:fileId/download-ticket` | Bearer JWT         |
 | GET    | `/file-downloads/:ticket`                            | One-time ticket    |
 | DELETE | `/meetings/:meetingId/files/:fileId`                 | Bearer JWT (owner) |
@@ -352,11 +353,14 @@ enumeration and ownership disclosure.
 
 ## Current-user avatars
 
-Avatars are private user assets. Every avatar route uses the JWT subject from
-the bearer token; neither a target user ID nor another user's avatar route is
-accepted. The profile's `avatar` field is `null` until an avatar exists, then
-contains only verified media metadata (`mimeType`, `sizeBytes`, and `updatedAt`)
-and never an internal storage key.
+Avatars are private user assets. Every route in this section uses the JWT subject
+from the bearer token; neither a target user ID nor another user's avatar route
+is accepted. Another user reads an avatar only through the shared activity that
+carries its owner's identity — see
+`GET /meetings/:meetingId/files/:fileId/uploader-avatar`. The profile's `avatar`
+field is `null` until an avatar exists, then contains only verified media
+metadata (`mimeType`, `sizeBytes`, and `updatedAt`) and never an internal
+storage key.
 
 ### `POST /users/me/avatar`
 
@@ -451,9 +455,11 @@ Successful requests return `201 Created`:
 `uploadedBy` is the uploader's safe identity, read from the user record on every
 request, so a renamed uploader or a replaced avatar shows the current value
 without rewriting stored files. It carries only a display name and the avatar
-state: email, the user ID, and every other private profile value stay out, and
-the avatar bytes remain private to their owner. `displayName` is `null` until the
-uploader sets one, `avatar` is `null` while the uploader has none, and
+state: email, the user ID, and every other private profile value stay out. The
+avatar bytes are served only by
+`GET /meetings/:meetingId/files/:fileId/uploader-avatar` below, never by a route
+that names the uploader. `displayName` is `null` until the uploader sets one,
+`avatar` is `null` while the uploader has none, and
 `uploadedBy` itself is `null` when the uploading account no longer exists — the
 file stays listed and downloadable. Only the meeting owner and its participants
 ever see it; an outsider receives the same `404 Meeting not found` as before.
@@ -468,6 +474,27 @@ meeting returns the same `404 Meeting not found` response.
 
 Returns `200 OK` with the same metadata representation for each ready file,
 newest first. Internal storage keys and uploader IDs are never returned.
+
+### `GET /meetings/:meetingId/files/:fileId/uploader-avatar`
+
+Streams the avatar of the file's `uploadedBy` identity to the meeting owner or a
+participant, with the verified content type, `Content-Length`,
+`Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`. This
+is the only way another user reads that avatar: the meeting file is the subject,
+so the caller needs no uploader ID, gets no other profile field, and cannot
+reach the avatar of a user they share no meeting file with.
+
+Access is the containing meeting's own. An outsider receives the same
+`404 Meeting not found` as the other meeting-file routes, an unauthenticated
+request receives `401`, and a file ID outside the named meeting — including a
+deleted or not-yet-ready file — receives `404 File not found`.
+
+The user record is read on every request rather than captured at upload time, so
+a historical file never serves a stale avatar: after a replacement the route
+streams the new image, and after a removal, for an uploader who never set one,
+or for a deleted uploader account it returns `404 Avatar not found`. The
+`avatar.updatedAt` value in `uploadedBy` changes with each replacement, so a
+client can key its own cache on it.
 
 ### `POST /meetings/:meetingId/files/:fileId/download-ticket`
 
