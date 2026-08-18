@@ -11,7 +11,7 @@
       "baseBranch": "master"
     }
   ],
-  "maxIterations": 20,
+  "maxIterations": 36,
   "maxTurns": 100,
   "maxTestFixAttempts": 5,
   "runtime": {
@@ -19,7 +19,7 @@
     "validationTimeoutMs": 1800000,
     "validationRunTimeoutMs": 3600000,
     "agentTimeoutMs": 5400000,
-    "networkRetryAttempts": 3,
+    "networkRetryAttempts": 30,
     "networkRetryBaseDelayMs": 2000,
     "maxPages": 20,
     "reviewRetryAttempts": 3
