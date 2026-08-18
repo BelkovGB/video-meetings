@@ -1074,12 +1074,14 @@ test('validates and recovers from password-change failures without clearing the 
   );
   await expect(currentPassword).toBeFocused();
 
-  // The request that never reached the server is the only one that is a
-  // connection problem, and it is the only one worded as such.
+  // A request whose answer never arrived is the only one worded as a connection
+  // problem — and it still claims no outcome: `fetch` cannot tell a request that
+  // never left the browser from one that committed and lost its response, so the
+  // sentence names the missing answer and the password to sign in with.
   passwordChangeReachesServer = false;
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
   await expect(page.locator('#password-change-error')).toHaveText(
-    'Не удалось изменить пароль: нет связи с сервером. Проверьте соединение и повторите попытку.',
+    'Ответ сервера не получен: проверьте соединение и повторите попытку. Если смена пароля прошла, войдите с новым паролем.',
   );
   await expect(currentPassword).toBeFocused();
   await expect(page).toHaveURL('/profile');
@@ -1138,7 +1140,7 @@ test('explains the sign-out when the password endpoint rejects the session', asy
 
   // The documented `401` of a session the endpoint will not act on: a token
   // minted before the session migration carries no `sid`, and the body has no
-  // `code` to route on. The current password is correct and stays in force.
+  // `code` to route on.
   // The first attempt is dropped on the way back instead, which is the sequence
   // the notice must survive: a change can commit and revoke the calling session
   // while its response is lost, so the retry that follows is answered `401` by a
@@ -1169,7 +1171,7 @@ test('explains the sign-out when the password endpoint rejects the session', asy
     .fill('unchanged-secure-password-789');
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
   await expect(page.locator('#password-change-error')).toHaveText(
-    'Не удалось изменить пароль: нет связи с сервером. Проверьте соединение и повторите попытку.',
+    'Ответ сервера не получен: проверьте соединение и повторите попытку. Если смена пароля прошла, войдите с новым паролем.',
   );
   await expect(page).toHaveURL('/profile');
 

@@ -73,8 +73,13 @@ const serverRefusalError: ServerError = {
   message: 'Не удалось изменить пароль: сервер ответил ошибкой. Повторите попытку позже.',
 };
 
+// The request whose answer never arrived. `fetch` rejects identically whether it
+// never left the browser or whether a change committed server-side and lost its
+// response, so the sentence claims no outcome: a change revokes the calling
+// session in the same transaction, and a user told "пароль не изменён" here
+// signs in later with the old one — this app has no password reset to recover.
 const connectionFailureMessage =
-  'Не удалось изменить пароль: нет связи с сервером. Проверьте соединение и повторите попытку.';
+  'Ответ сервера не получен: проверьте соединение и повторите попытку. Если смена пароля прошла, войдите с новым паролем.';
 
 const rateLimitedCode = 'PASSWORD_CHANGE_RATE_LIMITED';
 // The account window `PasswordChangeRateLimitGuard` enforces, used only when the

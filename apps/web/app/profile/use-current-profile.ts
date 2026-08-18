@@ -18,7 +18,7 @@ type CurrentProfile = {
   handleUnauthorized: () => void;
   /** Clears the session and returns to the login screen explaining the new sign-in. */
   handlePasswordChanged: () => void;
-  /** Clears the session and returns to the login screen saying the password is unchanged. */
+  /** Clears the session and returns to the login screen explaining the ended session. */
   handleSessionRejected: () => void;
   retryLoad: () => void;
 };

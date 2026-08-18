@@ -396,6 +396,16 @@ describe('Current user profile (e2e)', () => {
       .expect(429);
     expect(limited.body).toMatchObject({ code: 'PASSWORD_CHANGE_RATE_LIMITED' });
 
+    // The wait is carried in the body as well as the header, because a browser
+    // cannot read `Retry-After`: the API exposes no custom headers through CORS,
+    // so the web client words its message from `retryAfterSeconds` alone.
+    // Dropping it here would degrade that message to a hard-coded guess.
+    expect(limited.body.retryAfterSeconds).toEqual(expect.any(Number));
+    expect(limited.body.retryAfterSeconds).toBeGreaterThan(0);
+    expect(limited.body.retryAfterSeconds).toBeLessThanOrEqual(15 * 60);
+    expect(Number.isInteger(limited.body.retryAfterSeconds)).toBe(true);
+    expect(String(limited.headers['retry-after'])).toBe(String(limited.body.retryAfterSeconds));
+
     await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${user.accessToken}`)

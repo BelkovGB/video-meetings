@@ -201,8 +201,24 @@ returns `400 Bad Request`; the password and the caller session remain valid.
 
 Password-change attempts are limited to five per account in fifteen minutes and
 thirty per client IP per minute. A rejected excess attempt returns `429 Too Many
-Requests` with `Retry-After`; it does not change the password or revoke the
-caller session.
+Requests`; it does not change the password or revoke the caller session. The
+wait is carried twice: in the `Retry-After` header and in the `retryAfterSeconds`
+body field, both holding the number of whole seconds until the relevant window
+resets.
+
+```json
+{
+  "statusCode": 429,
+  "message": "Too many password-change attempts. Please try again later.",
+  "code": "PASSWORD_CHANGE_RATE_LIMITED",
+  "retryAfterSeconds": 900
+}
+```
+
+Browser clients read `retryAfterSeconds`, because the API exposes no custom
+response headers through CORS and `Retry-After` is therefore unreadable from
+page scripts. Dropping or renaming the field silently degrades the wait a client
+can show to a guess.
 
 These five codes are exhaustive for the `400` and `429` rejections of this
 endpoint, because `message` is English prose that a localized client must not
