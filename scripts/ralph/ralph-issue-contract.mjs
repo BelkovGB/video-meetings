@@ -105,15 +105,24 @@ export function assertTrustedIssue(config, issue, repository) {
   };
 }
 
-export function formatReviewComment(review) {
-  const findings = review.findings
+function formatFindingList(list) {
+  return list
     .map((finding) => {
       const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
       return `- **${finding.severity} — ${finding.title}** (${location})\n  ${finding.body}`;
     })
     .join('\n');
+}
 
-  return `## Ralph Loop: independent review found problems\n\n${review.summary}\n\n${findings}\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.`;
+export function formatReviewComment(review) {
+  const findings = formatFindingList(review.findings);
+  // Замечания ниже порога важности печатаются здесь же: они не отклоняют
+  // работу, но читателю нужен их текст, а не число.
+  const belowFloor = review.belowFloorFindings?.length
+    ? `\n\n### Below the severity floor (not blocking)\n\n${formatFindingList(review.belowFloorFindings)}`
+    : '';
+
+  return `## Ralph Loop: independent review found problems\n\n${review.summary}\n\n${findings}${belowFloor}\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.`;
 }
 
 export function assertReviewPayloadShape(review, label) {

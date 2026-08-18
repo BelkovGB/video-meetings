@@ -89,15 +89,26 @@ export function limitMilestoneReviewFindings(review, pullRequest, maxFindings) {
   };
 }
 
+function formatFindingList(list) {
+  return list
+    .map((finding) => {
+      const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
+      return `- **${finding.severity} — ${finding.title}** (${location})\n  ${finding.body}`;
+    })
+    .join('\n');
+}
+
 function formatMilestoneReview(config, milestone, pullRequest, review) {
   const findings = review.findings.length
-    ? review.findings
-        .map((finding) => {
-          const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
-          return `- **${finding.severity} — ${finding.title}** (${location})\n  ${finding.body}`;
-        })
-        .join('\n')
+    ? formatFindingList(review.findings)
     : 'No actionable findings.';
+  // Замечания ниже порога печатаются целиком, а не пересчитываются. Первая
+  // версия вырезала их до сборки комментария, и отчёт выходил с пустым списком
+  // под фразой «четыре замечания ниже порога» — то есть ровно тем, чего порог
+  // обещал не делать: замечания исчезали из виду.
+  const belowFloor = review.belowFloorFindings?.length
+    ? `\n### Below the severity floor (not blocking)\n\n${formatFindingList(review.belowFloorFindings)}\n`
+    : '';
   const verdict = review.verdict === 'pass' ? 'PASS' : 'FINDINGS';
 
   const nextStep =
@@ -118,7 +129,7 @@ ${review.summary}
 ### Findings
 
 ${findings}
-
+${belowFloor}
 ${nextStep}`;
 }
 
