@@ -6,10 +6,11 @@
   `JwtAuthGuard` and its JWT configuration for protected modules.
 - `UsersModule` owns credential-oriented user persistence. It exposes
   `UsersSecurityPort` as its security boundary for creating users and finding a
-  user by email. It also owns `users/models/user-identity.response.ts`, the
-  single contract for the user fields shared activity may show to another user;
-  every module that embeds a user in a response another user can read builds it
-  from there, so widening that contract widens all of them at once.
+  user by email. It also owns
+  `apps/api/src/users/models/user-identity.response.ts`, the single contract for
+  the user fields shared activity may show to another user; every module that
+  embeds a user in a response another user can read builds it from there, so
+  widening that contract widens all of them at once.
 - `ProfileModule` owns the protected current-user profile, avatar, and
   self-service password-change HTTP APIs. It owns private avatar storage
   separately from meeting files, and it is the only module that resolves an
@@ -177,10 +178,11 @@ IDs are returned in the API representation. `MeetingFile` is associated with one
 meeting and records its original display name, inferred category, verified MIME
 type, byte size, status, and upload timestamp. Its representation also carries
 `uploadedBy`, the uploader's safe identity built by the shared
-`users/models/user-identity.response.ts` contract: a display name and, when the
-user has an avatar, the timestamp of its current version, on which a client can
-key its own cache for the uploader-avatar route. It is read from the user record
-on every response and is `null` when the uploading account no longer exists.
+`apps/api/src/users/models/user-identity.response.ts` contract: a display name
+and, when the user has an avatar, the timestamp of its current version, on
+which a client can key its own cache for the uploader-avatar route. It is read
+from the user record on every response and is `null` when the uploading account
+no longer exists.
 Listing and download ticket creation return only `READY` records.
 
 Downloads use a two-step flow so a browser does not need to place its JWT in a
