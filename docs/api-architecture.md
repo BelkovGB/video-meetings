@@ -6,12 +6,21 @@
   `JwtAuthGuard` and its JWT configuration for protected modules.
 - `UsersModule` owns credential-oriented user persistence. It exposes
   `UsersSecurityPort` as its security boundary for creating users and finding a
-  user by email.
+  user by email. It also owns `users/models/user-identity.response.ts`, the
+  single contract for the user fields shared activity may show to another user;
+  every module that embeds a user in a response another user can read builds it
+  from there, so widening that contract widens all of them at once.
 - `ProfileModule` owns the protected current-user profile, avatar, and
   self-service password-change HTTP APIs. It owns private avatar storage
-  separately from meeting files.
+  separately from meeting files, and it is the only module that resolves an
+  avatar object: it exports `UserAvatarService` so another module can stream a
+  user's avatar bytes after enforcing its own access rule, without learning the
+  storage key or reading any other profile field.
 - `MeetingsModule` owns the meetings HTTP API and uses CQRS for all operations.
-- `FilesModule` owns local meeting-file storage and its protected HTTP API.
+- `FilesModule` owns local meeting-file storage and its protected HTTP API. It
+  imports `ProfileModule` for the exported `UserAvatarService`; this is the only
+  place where avatar bytes cross a module boundary, and they do so behind the
+  meeting's own access rule.
 - `PrismaModule` owns the shared Prisma database client.
 
 ## CQRS in `MeetingsModule`
@@ -90,9 +99,18 @@ private `AVATAR_DIR/<storageKey>/content` object store and the profile service
 writes its metadata to the user row. Failed validation and failed persistence
 discard the candidate or final object. Startup removes only `.part` files older
 than the configured safety window, so a second API instance cannot remove an
-active upload on a shared storage volume. Retrieval has only `GET /users/me/avatar`, which
-streams the requesting user's verified object with private, non-sniffable
-headers. Neither the profile response nor the HTTP API exposes storage keys.
+active upload on a shared storage volume. Retrieval has two routes, both
+streaming a verified object with private, non-sniffable headers.
+`GET /users/me/avatar` streams the requesting user's own object.
+`GET /meetings/:meetingId/files/:fileId/uploader-avatar`, owned by
+`FilesModule`, streams the avatar of the identity that uploaded a meeting file:
+`MeetingFileUploaderAvatarService` first requires the caller's access to the
+meeting, then resolves the file's uploader and delegates to the exported
+`UserAvatarService`, which opens the object but decides nothing about who may
+read it. An avatar is therefore reachable only through a file of a meeting the
+caller owns or takes part in, never through a user identifier, and the rest of
+that uploader's profile stays private. Neither the profile response nor the HTTP
+API exposes storage keys.
 Avatar removal clears the user-row metadata atomically before private-object
 cleanup. A transient cleanup failure leaves the user in the stable
 avatar-absent state and is reconciled by the storage service without exposing
@@ -154,11 +172,16 @@ request completion path and prevents concurrent uploads from violating the
 configured free-space reserve.
 
 The filesystem implementation is isolated in `LocalMeetingFileStorageService`.
-No database record stores an absolute path, and neither storage keys nor uploader
+No database record stores an absolute path, and neither storage keys nor user
 IDs are returned in the API representation. `MeetingFile` is associated with one
 meeting and records its original display name, inferred category, verified MIME
-type, byte size, status, and upload timestamp. Listing and download ticket
-creation return only `READY` records.
+type, byte size, status, and upload timestamp. Its representation also carries
+`uploadedBy`, the uploader's safe identity built by the shared
+`users/models/user-identity.response.ts` contract: a display name and, when the
+user has an avatar, the timestamp of its current version, on which a client can
+key its own cache for the uploader-avatar route. It is read from the user record
+on every response and is `null` when the uploading account no longer exists.
+Listing and download ticket creation return only `READY` records.
 
 Downloads use a two-step flow so a browser does not need to place its JWT in a
 URL or buffer a potentially 1 GiB response. An authenticated owner or participant
