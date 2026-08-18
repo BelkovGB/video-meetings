@@ -314,7 +314,8 @@ export function PasswordChangeForm({
     } finally {
       // A successful change leaves the form submitted while the router leaves
       // the page: re-enabling it would let a repeated Enter run again without a
-      // token and replace the sign-out notice with the unchanged-password one.
+      // token and replace the password-changed notice with the session-rejected
+      // one.
       if (!hasChanged) {
         setIsSubmitting(false);
       }
