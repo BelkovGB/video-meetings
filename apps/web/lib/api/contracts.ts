@@ -23,6 +23,12 @@ export type ApiError = {
 export type CodedApiError = ApiError & {
   code?: string;
   fields?: string[];
+  /**
+   * Seconds left on a rate-limit window, mirroring the `Retry-After` header.
+   * The header is not exposed to browser code by `app.enableCors(...)`, so a
+   * screen that wants to quote the wait reads it here.
+   */
+  retryAfterSeconds?: number;
 };
 
 export type Avatar = {

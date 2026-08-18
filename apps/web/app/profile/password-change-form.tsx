@@ -10,7 +10,12 @@ const minimumPasswordLength = 9;
 const maximumPasswordBytes = 72;
 
 type PasswordChangeFormProps = {
-  /** The session cannot authorize the change; the password is unchanged. */
+  /**
+   * The session can no longer authorize the change, so the screen hands over to
+   * the sign-out notice. Whether the password changed is not known here: a
+   * request whose response was lost may have committed before the retry that
+   * hit the `401`.
+   */
   onSessionRejected: () => void;
   onPasswordChanged: () => void;
 };
@@ -58,10 +63,55 @@ function validatePasswordChange(
 /** A server rejection as the screen shows it: Russian text, and its field if any. */
 type ServerError = { field: PasswordField | null; message: string };
 
-const unknownServerError: ServerError = {
+// The server answered and refused. Only the request that never arrived is a
+// connection problem, so only that one says so: sending the user after their
+// connection for a `404`, a `5xx` or a body that is not JSON hides the real
+// failure, and every retry it invites spends one of the five account attempts
+// per fifteen minutes the API allows.
+const serverRefusalError: ServerError = {
   field: null,
-  message: 'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+  message: 'Не удалось изменить пароль: сервер ответил ошибкой. Повторите попытку позже.',
 };
+
+const connectionFailureMessage =
+  'Не удалось изменить пароль: нет связи с сервером. Проверьте соединение и повторите попытку.';
+
+const rateLimitedCode = 'PASSWORD_CHANGE_RATE_LIMITED';
+// The account window `PasswordChangeRateLimitGuard` enforces, used only when the
+// refusal carries no usable wait of its own. Naming "a few minutes" instead
+// invites a retry at minute five of fifteen, which is refused again.
+const documentedRetryMinutes = 15;
+
+function minutesWord(minutes: number): string {
+  const lastDigit = minutes % 10;
+  const lastTwoDigits = minutes % 100;
+
+  if (lastDigit === 1 && lastTwoDigits !== 11) {
+    return 'минуту';
+  }
+  if (lastDigit >= 2 && lastDigit <= 4 && (lastTwoDigits < 12 || lastTwoDigits > 14)) {
+    return 'минуты';
+  }
+  return 'минут';
+}
+
+/** Words the wait the API returned, rounded up so the retry is never too early. */
+function rateLimitedError(retryAfterSeconds: unknown): ServerError {
+  // The value is whatever the wire carried, so it is checked rather than typed:
+  // a `null`, a string or a `0` falls back instead of rendering "через NaN минут".
+  const seconds =
+    typeof retryAfterSeconds === 'number' &&
+    Number.isFinite(retryAfterSeconds) &&
+    retryAfterSeconds > 0
+      ? retryAfterSeconds
+      : null;
+  const minutes = seconds === null ? documentedRetryMinutes : Math.ceil(seconds / 60);
+
+  return {
+    field: null,
+    message: `Слишком много попыток изменить пароль. Повторите через ${minutes} ${minutesWord(minutes)}.`,
+  };
+}
 
 // Server errors are routed by `code` and worded here, because everything else on
 // this screen is Russian and the API answers in English. Matching its prose
@@ -76,13 +126,6 @@ const serverErrorsByCode = new Map<string, ServerError>([
     { field: 'newPassword', message: 'Новый пароль должен отличаться от текущего.' },
   ],
   ['PASSWORD_CONFIRMATION_MISMATCH', { field: 'confirmation', message: 'Пароли не совпадают.' }],
-  [
-    'PASSWORD_CHANGE_RATE_LIMITED',
-    {
-      field: null,
-      message: 'Слишком много попыток изменить пароль. Повторите через несколько минут.',
-    },
-  ],
 ]);
 
 // A `VALIDATION_FAILED` response names the rejected request properties instead.
@@ -119,6 +162,8 @@ async function readServerError(response: Response): Promise<ServerError> {
         return rejection;
       }
     }
+  } else if (body?.code === rateLimitedCode) {
+    return rateLimitedError(body.retryAfterSeconds);
   } else if (body?.code) {
     const rejection = serverErrorsByCode.get(body.code);
     if (rejection) {
@@ -126,7 +171,7 @@ async function readServerError(response: Response): Promise<ServerError> {
     }
   }
 
-  return unknownServerError;
+  return serverRefusalError;
 }
 
 /** Changes the signed-in user's password while retaining field-level recovery feedback. */
@@ -146,6 +191,11 @@ export function PasswordChangeForm({
   // there instead of being left to an alert that mounts already filled — the
   // pattern the sign-in notice rejects because it is announced unreliably.
   const requestErrorId = requestError ? 'password-change-error' : undefined;
+  // The in-flight notice follows the sign-in notice: a live region that enters
+  // the DOM already filled is announced unreliably, so it mounts empty and is
+  // filled in a following commit.
+  const [isSubmitAnnounced, setIsSubmitAnnounced] = useState(false);
+  const submitStatusRef = useRef<HTMLParagraphElement>(null);
   const currentPasswordRef = useRef<HTMLInputElement>(null);
   const newPasswordRef = useRef<HTMLInputElement>(null);
   const confirmationRef = useRef<HTMLInputElement>(null);
@@ -175,6 +225,20 @@ export function PasswordChangeForm({
       focusField(field);
     }
   }, [errors, isSubmitting]);
+
+  useEffect(() => {
+    setIsSubmitAnnounced(isSubmitting);
+  }, [isSubmitting]);
+
+  // Disabling every control disables the one the user activated, and focus falls
+  // back to `<body>`: for the length of the request the caret would be outside
+  // the form with nothing to read. The status region takes it instead, so the
+  // notice is heard where focus lands as well as through the live region.
+  useEffect(() => {
+    if (isSubmitAnnounced) {
+      submitStatusRef.current?.focus();
+    }
+  }, [isSubmitAnnounced]);
 
   const clearErrors = (field: PasswordField) => {
     setErrors((currentErrors) => ({ ...currentErrors, [field]: undefined }));
@@ -214,9 +278,12 @@ export function PasswordChangeForm({
       });
 
       // A `401` here is not only an expired token: the endpoint answers it for a
-      // legacy session too, so a correct current password can land on it while
-      // the password stays unchanged. Signing out is still the only recovery,
-      // but it has to say so instead of dropping the user on a bare /login.
+      // legacy session too, so a correct current password can land on it. What
+      // the password is afterwards cannot be decided here — a change revokes the
+      // calling session as it commits, so a retry after a lost response is
+      // refused with the new password already in force. Signing out is still the
+      // only recovery, but it has to say so instead of dropping the user on a
+      // bare /login.
       if (response.status === 401) {
         onSessionRejected();
         return;
@@ -237,7 +304,7 @@ export function PasswordChangeForm({
       hasChanged = true;
       onPasswordChanged();
     } catch {
-      setRequestError(unknownServerError.message);
+      setRequestError(connectionFailureMessage);
       focusField('currentPassword');
     } finally {
       // A successful change leaves the form submitted while the router leaves
@@ -320,8 +387,14 @@ export function PasswordChangeForm({
           </p>
         ) : null}
         {isSubmitting ? (
-          <p id="password-change-status" role="status" className="sr-only">
-            Изменяем пароль…
+          <p
+            ref={submitStatusRef}
+            id="password-change-status"
+            role="status"
+            tabIndex={-1}
+            className="sr-only"
+          >
+            {isSubmitAnnounced ? 'Изменяем пароль…' : null}
           </p>
         ) : null}
         <button

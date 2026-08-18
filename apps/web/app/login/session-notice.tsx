@@ -24,7 +24,13 @@ const noticesByReason = new Map<string, Notice>([
     sessionRejectedNotice,
     {
       status: 'warning',
-      message: 'Пароль не изменён: сессия устарела. Войдите заново и повторите попытку.',
+      // The state of the password is deliberately left open. A change commits
+      // and revokes the calling session in one transaction, so a lost response
+      // followed by a retry is answered `401` with the new password already in
+      // force: claiming "пароль не изменён" would send that user back with the
+      // old one, and this app has no password reset to recover from it.
+      message:
+        'Сессия завершена. Войдите заново; если смена пароля прошла, используйте новый пароль.',
     },
   ],
 ]);

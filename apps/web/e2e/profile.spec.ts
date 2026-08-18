@@ -669,8 +669,16 @@ test('validates and recovers from password-change failures without clearing the 
     body: { message: 'Current password is incorrect', code: 'CURRENT_PASSWORD_INCORRECT' },
   };
   let submittedPasswordChange: unknown;
+  // A dropped request, as opposed to a refused one: the fetch rejects and the
+  // screen never sees a status.
+  let passwordChangeReachesServer = true;
 
   await page.route('**/users/me/password', async (route) => {
+    if (!passwordChangeReachesServer) {
+      await route.abort('failed');
+      return;
+    }
+
     submittedPasswordChange = route.request().postDataJSON();
     await new Promise((resolve) => setTimeout(resolve, 250));
     const { status, body } = passwordChangeFailure;
@@ -796,6 +804,29 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(confirmation).toBeFocused();
   expect(submittedPasswordChange).toBeUndefined();
 
+  // The in-flight window is recorded from inside the page instead of asserted
+  // against it: both facts under test happen once, within the 250 ms the stub
+  // holds the request, and neither survives into a state a polled assertion
+  // could catch. The status region must enter the DOM empty and be filled in a
+  // following commit — a live region that mounts already populated is announced
+  // unreliably, which is why `SessionNotice` fills itself the same way — and the
+  // focus that disabling the submit button drops on `<body>` must land somewhere
+  // inside the form.
+  await page.evaluate(() => {
+    const flight = { statusText: [] as string[], focused: [] as string[] };
+    (window as unknown as { passwordChangeFlight: typeof flight }).passwordChangeFlight = flight;
+    new MutationObserver(() => {
+      const status = document.getElementById('password-change-status');
+      if (status) {
+        flight.statusText.push(status.textContent ?? '');
+      }
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+    document.addEventListener('focusin', (event) => {
+      const target = event.target as HTMLElement | null;
+      flight.focused.push(target?.id || target?.tagName.toLowerCase() || 'unknown');
+    });
+  });
+
   await currentPassword.fill('wrong-password');
   await newPassword.fill('new-secure-password-456');
   await confirmation.fill('new-secure-password-456');
@@ -804,6 +835,15 @@ test('validates and recovers from password-change failures without clearing the 
   await expect(currentPassword).toBeDisabled();
   await expect(page.locator('#password-change-status')).toHaveText('Изменяем пароль…');
   await expect(page.locator('#current-password-error')).toHaveText('Неверный текущий пароль.');
+
+  const flight = await page.evaluate(
+    () =>
+      (window as unknown as { passwordChangeFlight: { statusText: string[]; focused: string[] } })
+        .passwordChangeFlight,
+  );
+  expect(flight.statusText).toContain('');
+  expect(flight.statusText.indexOf('')).toBeLessThan(flight.statusText.indexOf('Изменяем пароль…'));
+  expect(flight.focused).toContain('password-change-status');
   expect(submittedPasswordChange).toEqual({
     currentPassword: 'wrong-password',
     newPassword: 'new-secure-password-456',
@@ -909,7 +949,7 @@ test('validates and recovers from password-change failures without clearing the 
   };
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
   await expect(page.locator('#password-change-error')).toHaveText(
-    'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+    'Не удалось изменить пароль: сервер ответил ошибкой. Повторите попытку позже.',
   );
   await expect(page.locator('#password-confirmation-error')).toHaveCount(0);
 
@@ -923,8 +963,11 @@ test('validates and recovers from password-change failures without clearing the 
     },
   };
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  // The wait is the one the API returns, not "a few minutes": the account window
+  // is fifteen minutes long, and a user who retries at minute five is refused
+  // again and spends nothing but the wording's credibility.
   await expect(page.locator('#password-change-error')).toHaveText(
-    'Слишком много попыток изменить пароль. Повторите через несколько минут.',
+    'Слишком много попыток изменить пароль. Повторите через 15 минут.',
   );
   // The refusal belongs to no field, so the caret returns to «Текущий пароль».
   // That field has to describe itself with the refusal: a screen reader reads the
@@ -941,7 +984,7 @@ test('validates and recovers from password-change failures without clearing the 
   // interruptible, and the guidance is what the user has already heard.
   await expect(currentPassword).toBeFocused();
   await expect(currentPassword).toHaveAccessibleDescription(
-    'Слишком много попыток изменить пароль. Повторите через несколько минут.' +
+    'Слишком много попыток изменить пароль. Повторите через 15 минут.' +
       ' Не менее 9 символов и не более 72 байт UTF-8.' +
       ' После изменения потребуется войти снова.',
   );
@@ -955,6 +998,55 @@ test('validates and recovers from password-change failures without clearing the 
   );
   await currentPassword.fill(password);
 
+  // A shorter remaining window is quoted as it stands, and the noun agrees with
+  // the number: a message hard-coded to fifteen minutes would keep the user
+  // waiting far longer than the API asks.
+  passwordChangeFailure = {
+    status: 429,
+    body: {
+      statusCode: 429,
+      message: 'Too many password-change attempts. Please try again later.',
+      code: 'PASSWORD_CHANGE_RATE_LIMITED',
+      retryAfterSeconds: 61,
+    },
+  };
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText(
+    'Слишком много попыток изменить пароль. Повторите через 2 минуты.',
+  );
+
+  passwordChangeFailure = {
+    status: 429,
+    body: {
+      statusCode: 429,
+      message: 'Too many password-change attempts. Please try again later.',
+      code: 'PASSWORD_CHANGE_RATE_LIMITED',
+      retryAfterSeconds: 30,
+    },
+  };
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText(
+    'Слишком много попыток изменить пароль. Повторите через 1 минуту.',
+  );
+
+  // A refusal that carries no usable wait falls back to the window the API
+  // documents, never to "a few minutes".
+  for (const retryAfterSeconds of [undefined, 0, -1, 'soon', Number.NaN]) {
+    passwordChangeFailure = {
+      status: 429,
+      body: {
+        statusCode: 429,
+        message: 'Too many password-change attempts. Please try again later.',
+        code: 'PASSWORD_CHANGE_RATE_LIMITED',
+        retryAfterSeconds,
+      },
+    };
+    await page.getByRole('button', { name: 'Изменить пароль' }).click();
+    await expect(page.locator('#password-change-error')).toHaveText(
+      'Слишком много попыток изменить пароль. Повторите через 15 минут.',
+    );
+  }
+
   // A failure the browser does not recognise still says something in Russian
   // and keeps the caret in the form, instead of pasting server prose on screen.
   passwordChangeFailure = {
@@ -963,21 +1055,35 @@ test('validates and recovers from password-change failures without clearing the 
   };
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
   await expect(page.locator('#password-change-error')).toHaveText(
-    'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+    'Не удалось изменить пароль: сервер ответил ошибкой. Повторите попытку позже.',
   );
   await expect(page.getByText('Current credentials were rejected')).toHaveCount(0);
   await expect(currentPassword).toBeFocused();
   await expect(page).toHaveURL('/profile');
 
   // A body that is not JSON at all has nothing to route on, and gets the same
-  // recoverable sentence rather than an unhandled rejection.
+  // recoverable sentence rather than an unhandled rejection. The server answered
+  // and refused, so the sentence must not send the user after their connection:
+  // every retry it invites spends one of five account attempts per fifteen
+  // minutes.
   await currentPassword.fill(password);
   passwordChangeFailure = { status: 502, body: 'Bad Gateway' };
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
   await expect(page.locator('#password-change-error')).toHaveText(
-    'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+    'Не удалось изменить пароль: сервер ответил ошибкой. Повторите попытку позже.',
   );
   await expect(currentPassword).toBeFocused();
+
+  // The request that never reached the server is the only one that is a
+  // connection problem, and it is the only one worded as such.
+  passwordChangeReachesServer = false;
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText(
+    'Не удалось изменить пароль: нет связи с сервером. Проверьте соединение и повторите попытку.',
+  );
+  await expect(currentPassword).toBeFocused();
+  await expect(page).toHaveURL('/profile');
+  passwordChangeReachesServer = true;
 
   // A `code` or a rejected field named after an `Object.prototype` member is
   // still just an unknown failure. Looking it up in a plain object would find
@@ -994,7 +1100,7 @@ test('validates and recovers from password-change failures without clearing the 
     passwordChangeFailure = { status: 400, body: { message: 'Rejected', code: inherited } };
     await page.getByRole('button', { name: 'Изменить пароль' }).click();
     await expect(page.locator('#password-change-error')).toHaveText(
-      'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+      'Не удалось изменить пароль: сервер ответил ошибкой. Повторите попытку позже.',
     );
 
     passwordChangeFailure = {
@@ -1010,7 +1116,7 @@ test('validates and recovers from password-change failures without clearing the 
     };
     await page.getByRole('button', { name: 'Изменить пароль' }).click();
     await expect(page.locator('#password-change-error')).toHaveText(
-      'Не удалось изменить пароль. Проверьте соединение и повторите попытку.',
+      'Не удалось изменить пароль: сервер ответил ошибкой. Повторите попытку позже.',
     );
   }
 });
@@ -1033,7 +1139,19 @@ test('explains the sign-out when the password endpoint rejects the session', asy
   // The documented `401` of a session the endpoint will not act on: a token
   // minted before the session migration carries no `sid`, and the body has no
   // `code` to route on. The current password is correct and stays in force.
+  // The first attempt is dropped on the way back instead, which is the sequence
+  // the notice must survive: a change can commit and revoke the calling session
+  // while its response is lost, so the retry that follows is answered `401` by a
+  // token that is already revoked — with the new password in force.
+  let passwordChangeResponseArrives = false;
+
   await page.route('**/users/me/password', async (route) => {
+    if (!passwordChangeResponseArrives) {
+      passwordChangeResponseArrives = true;
+      await route.abort('failed');
+      return;
+    }
+
     await route.fulfill({
       status: 401,
       contentType: 'application/json',
@@ -1050,13 +1168,22 @@ test('explains the sign-out when the password endpoint rejects the session', asy
     .getByLabel('Подтвердите новый пароль', { exact: true })
     .fill('unchanged-secure-password-789');
   await page.getByRole('button', { name: 'Изменить пароль' }).click();
+  await expect(page.locator('#password-change-error')).toHaveText(
+    'Не удалось изменить пароль: нет связи с сервером. Проверьте соединение и повторите попытку.',
+  );
+  await expect(page).toHaveURL('/profile');
+
+  await page.getByRole('button', { name: 'Изменить пароль' }).click();
 
   // The eject is unavoidable, but it must not look like the successful sign-out
-  // with the notice missing: the reason says the password is still the old one.
+  // with the notice missing: the reason explains the sign-out and names the
+  // password to sign in with. It must not claim an outcome the screen never
+  // observed — after the sequence above the change may well have gone through.
   await expect(page).toHaveURL('/login?reason=session-rejected');
   await expect(page.getByRole('status')).toHaveText(
-    'Пароль не изменён: сессия устарела. Войдите заново и повторите попытку.',
+    'Сессия завершена. Войдите заново; если смена пароля прошла, используйте новый пароль.',
   );
+  await expect(page.getByText('Пароль не изменён')).toHaveCount(0);
   await expect(page.getByRole('status')).toBeFocused();
   await expect(
     page.evaluate(() => window.sessionStorage.getItem('accessToken')),
