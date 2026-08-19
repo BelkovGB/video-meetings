@@ -20,7 +20,7 @@ JSON except for the multipart file-upload endpoint.
 | GET    | `/meetings/:id`                                      | Bearer JWT         |
 | POST   | `/meetings/:meetingId/files`                         | Bearer JWT         |
 | GET    | `/meetings/:meetingId/files`                         | Bearer JWT         |
-| GET    | `/meetings/:meetingId/files/:fileId/uploader-avatar` | Bearer JWT         |
+| GET    | `/meetings/:meetingId/uploaders/:handle/avatar`      | Bearer JWT         |
 | POST   | `/meetings/:meetingId/files/:fileId/download-ticket` | Bearer JWT         |
 | GET    | `/file-downloads/:ticket`                            | One-time ticket    |
 | DELETE | `/meetings/:meetingId/files/:fileId`                 | Bearer JWT (owner) |
@@ -357,7 +357,7 @@ Avatars are private user assets. Every route in this section uses the JWT subjec
 from the bearer token; neither a target user ID nor another user's avatar route
 is accepted. Another user reads an avatar only through the shared activity that
 carries its owner's identity — see
-`GET /meetings/:meetingId/files/:fileId/uploader-avatar`. The profile's `avatar`
+`GET /meetings/:meetingId/uploaders/:handle/avatar`. The profile's `avatar`
 field is `null` until an avatar exists, then contains only verified media
 metadata (`mimeType`, `sizeBytes`, and `updatedAt`) and never an internal
 storage key.
@@ -446,6 +446,7 @@ Successful requests return `201 Created`:
   "sizeBytes": 734003200,
   "uploadedAt": "2026-08-11T10:00:00.000Z",
   "uploadedBy": {
+    "handle": "T5cfLgm1Vb2VhV8Xz3rRDQ",
     "displayName": "Ada Lovelace",
     "avatar": { "updatedAt": "2026-08-11T09:00:00.000Z" }
   }
@@ -454,12 +455,19 @@ Successful requests return `201 Created`:
 
 `uploadedBy` is the uploader's safe identity, read from the user record on every
 request, so a renamed uploader or a replaced avatar shows the current value
-without rewriting stored files. It carries only a display name and the avatar
-state: email, the user ID, and every other private profile value stay out. The
-avatar bytes are served only by
-`GET /meetings/:meetingId/files/:fileId/uploader-avatar` below, never by a route
-that names the uploader. `displayName` is `null` until the uploader sets one,
-`avatar` is `null` while the uploader has none, and
+without rewriting stored files. It carries only an opaque handle, a display
+name, and the avatar state: email, the user ID, and every other private profile
+value stay out. The avatar bytes are served only by
+`GET /meetings/:meetingId/uploaders/:handle/avatar` below, never by a route that
+names the uploader.
+
+`handle` identifies the uploader within this meeting alone. Every file the same
+person uploaded to the meeting carries the same value, so a client can group
+them and fetch one avatar for all of them; the same person in another meeting
+gets an unrelated value, and the user ID cannot be derived from either.
+
+`displayName` is `null` until the uploader sets one, `avatar` is `null` while
+the uploader has none, and
 `uploadedBy` itself is `null` when the uploading account no longer exists — the
 file stays listed and downloadable. Only the meeting owner and its participants
 ever see it; an outsider receives the same `404 Meeting not found` as before.
@@ -475,26 +483,34 @@ meeting returns the same `404 Meeting not found` response.
 Returns `200 OK` with the same metadata representation for each ready file,
 newest first. Internal storage keys and uploader IDs are never returned.
 
-### `GET /meetings/:meetingId/files/:fileId/uploader-avatar`
+### `GET /meetings/:meetingId/uploaders/:handle/avatar`
 
-Streams the avatar of the file's `uploadedBy` identity to the meeting owner or a
-participant, with the verified content type, `Content-Length`,
-`Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`. This
-is the only way another user reads that avatar: the meeting file is the subject,
-so the caller needs no uploader ID, gets no other profile field, and cannot
-reach the avatar of a user they share no meeting file with.
+`:handle` is the `uploadedBy.handle` value of a meeting file. The route streams
+that uploader's avatar to the meeting owner or a participant, with the verified
+content type, `Content-Length`, and `X-Content-Type-Options: nosniff`. This is
+the only way another user reads that avatar: the meeting is the subject, so the
+caller needs no uploader ID, gets no other profile field, and cannot reach the
+avatar of a user they share no meeting with.
 
 Access is the containing meeting's own. An outsider receives the same
-`404 Meeting not found` as the other meeting-file routes, an unauthenticated
-request receives `401`, and a file ID outside the named meeting — including a
-deleted or not-yet-ready file — receives `404 File not found`.
+`404 Meeting not found` as the meeting-file routes, an unauthenticated request
+receives `401`, and a handle that names nobody with a ready file in this
+meeting — including one minted for another meeting — receives
+`404 Avatar not found`.
 
 The user record is read on every request rather than captured at upload time, so
 a historical file never serves a stale avatar: after a replacement the route
 streams the new image, and after a removal, for an uploader who never set one,
-or for a deleted uploader account it returns `404 Avatar not found`. The
-`avatar.updatedAt` value in `uploadedBy` changes with each replacement, so a
-client can key its own cache on it.
+or for a deleted uploader account it returns `404 Avatar not found`.
+
+Caching is revalidated, not skipped, because the URL is authorization-dependent:
+the response carries `Cache-Control: private, must-revalidate`,
+`Vary: Authorization`, and an `ETag` derived from the avatar's current version.
+A request repeating that tag in `If-None-Match` receives `304 Not Modified`
+without a body, and receives the new image with a new tag once the uploader
+replaces the avatar. Because the handle is shared by every file of one uploader,
+a meeting with many files from one person costs one avatar request, then one
+revalidation per view.
 
 ### `POST /meetings/:meetingId/files/:fileId/download-ticket`
 

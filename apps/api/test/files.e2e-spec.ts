@@ -15,7 +15,11 @@ type Meeting = { id: string };
 type UserSession = { accessToken: string };
 type UploadedFile = {
   id: string;
-  uploadedBy: { displayName: string | null; avatar: { updatedAt: string } | null } | null;
+  uploadedBy: {
+    handle: string;
+    displayName: string | null;
+    avatar: { updatedAt: string } | null;
+  } | null;
 };
 
 const validPassword = 'secure-password-123';
@@ -138,6 +142,14 @@ describe('Meeting files (e2e)', () => {
       .expect(201);
 
     return response.body as UploadedFile;
+  }
+
+  function getUploaderHandle(file: UploadedFile): string {
+    if (!file.uploadedBy) {
+      throw new Error('The uploaded file carries no uploader identity');
+    }
+
+    return file.uploadedBy.handle;
   }
 
   it('stores an allowed file and returns its metadata in the meeting list', async () => {
@@ -448,6 +460,7 @@ describe('Meeting files (e2e)', () => {
     const uploaded = await uploadPdf(meeting.id, participant);
 
     expect(uploaded.uploadedBy).toEqual({
+      handle: expect.any(String),
       displayName: 'Ada Lovelace',
       avatar: { updatedAt: expect.any(String) },
     });
@@ -461,7 +474,11 @@ describe('Meeting files (e2e)', () => {
       expect(listed.body).toEqual([
         expect.objectContaining({
           id: uploaded.id,
-          uploadedBy: { displayName: 'Ada Lovelace', avatar: { updatedAt: expect.any(String) } },
+          uploadedBy: {
+            handle: getUploaderHandle(uploaded),
+            displayName: 'Ada Lovelace',
+            avatar: { updatedAt: expect.any(String) },
+          },
         }),
       ]);
     }
@@ -482,7 +499,7 @@ describe('Meeting files (e2e)', () => {
     const serialized = JSON.stringify(listed.body);
     expect(serialized).not.toContain('@example.com');
     expect(serialized).not.toContain(getUserId(owner.accessToken));
-    expect(Object.keys(listed.body[0].uploadedBy)).toEqual(['displayName', 'avatar']);
+    expect(Object.keys(listed.body[0].uploadedBy)).toEqual(['handle', 'displayName', 'avatar']);
     expect(Object.keys(listed.body[0].uploadedBy.avatar)).toEqual(['updatedAt']);
   });
 
@@ -501,7 +518,11 @@ describe('Meeting files (e2e)', () => {
     expect(listed.body).toEqual([
       expect.objectContaining({
         id: uploaded.id,
-        uploadedBy: { displayName: 'Renamed Owner', avatar: null },
+        uploadedBy: {
+          handle: getUploaderHandle(uploaded),
+          displayName: 'Renamed Owner',
+          avatar: null,
+        },
       }),
     ]);
   });
@@ -523,7 +544,14 @@ describe('Meeting files (e2e)', () => {
       .expect(200);
 
     expect(listed.body).toEqual([
-      expect.objectContaining({ id: uploaded.id, uploadedBy: { displayName: null, avatar: null } }),
+      expect.objectContaining({
+        id: uploaded.id,
+        uploadedBy: {
+          handle: getUploaderHandle(uploaded),
+          displayName: null,
+          avatar: null,
+        },
+      }),
     ]);
   });
 
@@ -559,6 +587,32 @@ describe('Meeting files (e2e)', () => {
 
     expect(JSON.stringify(denied.body)).not.toContain('Hidden Owner');
   });
+  it('gives every file of one uploader the same meeting-scoped handle', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const otherMeeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+
+    const first = await uploadPdf(meeting.id, owner);
+    const second = await uploadPdf(meeting.id, owner);
+    const byParticipant = await uploadPdf(meeting.id, participant);
+    const elsewhere = await uploadPdf(otherMeeting.id, owner);
+
+    expect(getUploaderHandle(second)).toBe(getUploaderHandle(first));
+    expect(getUploaderHandle(byParticipant)).not.toBe(getUploaderHandle(first));
+    expect(getUploaderHandle(elsewhere)).not.toBe(getUploaderHandle(first));
+    expect(getUploaderHandle(first)).not.toContain(getUserId(owner.accessToken));
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const handles = (listed.body as UploadedFile[]).map(getUploaderHandle);
+    expect(new Set(handles).size).toBe(2);
+  });
+
   it('streams the uploader current avatar to the meeting owner and to participants', async () => {
     const owner = await registerUser();
     const participant = await registerUser();
@@ -569,15 +623,59 @@ describe('Meeting files (e2e)', () => {
 
     for (const viewer of [owner, participant]) {
       const response = await request(app.getHttpServer())
-        .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+        .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
         .set('Authorization', `Bearer ${viewer.accessToken}`)
         .expect('Content-Type', /image\/png/)
-        .expect('Cache-Control', 'private, no-store')
+        .expect('Cache-Control', 'private, must-revalidate')
+        .expect('Vary', 'Authorization')
         .expect('X-Content-Type-Options', 'nosniff')
         .expect(200);
 
+      expect(response.headers.etag).toEqual(expect.any(String));
       expect(Buffer.from(response.body as Buffer)).toEqual(validPng);
     }
+  });
+
+  it('answers a revalidation with 304 until the avatar is replaced', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+    const first = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const etag = first.headers.etag as string;
+    expect(etag).toMatch(/^"[^"]+"$/);
+
+    const revalidated = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .set('If-None-Match', etag)
+      .expect(304);
+
+    expect(revalidated.headers['content-length']).toBeUndefined();
+    expect(revalidated.body).toEqual({});
+
+    await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .set('If-None-Match', `W/${etag}, "other"`)
+      .expect(304);
+
+    await uploadAvatar(owner, replacementPng);
+
+    const refreshed = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .set('If-None-Match', etag)
+      .expect(200);
+
+    expect(refreshed.headers.etag).not.toBe(etag);
+    expect(Buffer.from(refreshed.body as Buffer)).toEqual(replacementPng);
   });
 
   it('denies the uploader avatar outside the meeting and to an unauthenticated caller', async () => {
@@ -587,29 +685,34 @@ describe('Meeting files (e2e)', () => {
     await setDisplayName(owner, 'Hidden Uploader');
     await uploadAvatar(owner);
     const uploaded = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
 
     const denied = await request(app.getHttpServer())
-      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .get(url)
       .set('Authorization', `Bearer ${outsider.accessToken}`)
       .expect(404);
 
     expect(denied.body).toMatchObject({ message: 'Meeting not found' });
     expect(JSON.stringify(denied.body)).not.toContain('Hidden Uploader');
 
-    await request(app.getHttpServer())
-      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
-      .expect(401);
+    await request(app.getHttpServer()).get(url).expect(401);
   });
 
-  it('refuses a file that belongs to another meeting the caller can access', async () => {
+  it('refuses a handle minted for another meeting and an unknown handle', async () => {
     const owner = await registerUser();
     const meeting = await createMeeting(owner.accessToken);
     const otherMeeting = await createMeeting(owner.accessToken);
     await uploadAvatar(owner);
     const uploaded = await uploadPdf(meeting.id, owner);
+    const handle = getUploaderHandle(uploaded);
 
     await request(app.getHttpServer())
-      .get(`/meetings/${otherMeeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .get(`/meetings/${otherMeeting.id}/uploaders/${handle}/avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/uploaders/${getUserId(owner.accessToken)}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
   });
@@ -623,7 +726,7 @@ describe('Meeting files (e2e)', () => {
     await uploadAvatar(owner, replacementPng);
 
     const response = await request(app.getHttpServer())
-      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(200);
 
@@ -644,7 +747,7 @@ describe('Meeting files (e2e)', () => {
       .expect(200);
 
     await request(app.getHttpServer())
-      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
   });
@@ -657,16 +760,17 @@ describe('Meeting files (e2e)', () => {
     const withoutAvatar = await uploadPdf(meeting.id, participant);
 
     await request(app.getHttpServer())
-      .get(`/meetings/${meeting.id}/files/${withoutAvatar.id}/uploader-avatar`)
+      .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(withoutAvatar)}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
 
     await uploadAvatar(participant);
     const uploaded = await uploadPdf(meeting.id, participant);
+    const handle = getUploaderHandle(uploaded);
     await prisma.user.delete({ where: { id: getUserId(participant.accessToken) } });
 
     await request(app.getHttpServer())
-      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .get(`/meetings/${meeting.id}/uploaders/${handle}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
   });

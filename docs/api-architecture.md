@@ -103,15 +103,17 @@ than the configured safety window, so a second API instance cannot remove an
 active upload on a shared storage volume. Retrieval has two routes, both
 streaming a verified object with private, non-sniffable headers.
 `GET /users/me/avatar` streams the requesting user's own object.
-`GET /meetings/:meetingId/files/:fileId/uploader-avatar`, owned by
-`FilesModule`, streams the avatar of the identity that uploaded a meeting file:
-`MeetingFileUploaderAvatarService` first requires the caller's access to the
-meeting, then resolves the file's uploader and delegates to the exported
-`UserAvatarService`, which opens the object but decides nothing about who may
-read it. An avatar is therefore reachable only through a file of a meeting the
-caller owns or takes part in, never through a user identifier, and the rest of
-that uploader's profile stays private. Neither the profile response nor the HTTP
-API exposes storage keys.
+`GET /meetings/:meetingId/uploaders/:handle/avatar`, owned by `FilesModule`,
+streams the avatar of an identity that uploaded a meeting file:
+`MeetingUploaderAvatarService` first requires the caller's access to the
+meeting, then matches the handle against the uploaders of its ready files and
+delegates to the exported `UserAvatarService`, which opens the object but
+decides nothing about who may read it. An avatar is therefore reachable only
+through a meeting the caller owns or takes part in, never through a user
+identifier, and the rest of that uploader's profile stays private. The service
+resolves the avatar's version before opening it, so the controller answers a
+revalidated request with `304` and no file access. Neither the profile response
+nor the HTTP API exposes storage keys.
 Avatar removal clears the user-row metadata atomically before private-object
 cleanup. A transient cleanup failure leaves the user in the stable
 avatar-absent state and is reconciled by the storage service without exposing
@@ -178,11 +180,18 @@ IDs are returned in the API representation. `MeetingFile` is associated with one
 meeting and records its original display name, inferred category, verified MIME
 type, byte size, status, and upload timestamp. Its representation also carries
 `uploadedBy`, the uploader's safe identity built by the shared
-`apps/api/src/users/models/user-identity.response.ts` contract: a display name
-and, when the user has an avatar, the timestamp of its current version, on
-which a client can key its own cache for the uploader-avatar route. It is read
-from the user record on every response and is `null` when the uploading account
-no longer exists.
+`apps/api/src/users/models/user-identity.response.ts` contract: an opaque
+handle, a display name and, when the user has an avatar, the timestamp of its
+current version. It is read from the user record on every response and is
+`null` when the uploading account no longer exists.
+
+The handle is `HMAC-SHA256(key, length-prefixed scope + user ID)` truncated to
+128 bits, under a key derived from the JWT secret so a handle can never be
+confused with a token. The scope is the meeting ID, which makes the value stable
+for one uploader inside one meeting — the property that lets a client collapse
+many files onto a single avatar URL — while keeping it unlinkable across
+meetings and non-invertible to the user ID.
+
 Listing and download ticket creation return only `READY` records.
 
 Downloads use a two-step flow so a browser does not need to place its JWT in a

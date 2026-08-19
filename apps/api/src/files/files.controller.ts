@@ -24,7 +24,6 @@ import { AuthenticatedRequest, JwtAuthGuard } from '../auth/guards/jwt-auth.guar
 import { MulterExceptionFilter } from './filters/multer-exception.filter';
 import { MeetingFileAccessGuard } from './guards/meeting-file-access.guard';
 import { UploadCapacityGuard } from './guards/upload-capacity.guard';
-import { MeetingFileUploaderAvatarService } from './services/meeting-file-uploader-avatar.service';
 import { MeetingFilesService } from './services/meeting-files.service';
 import { LocalMeetingFileStorageService } from './services/local-meeting-file-storage.service';
 import { getDeclaredFile } from './services/meeting-file-validation.service';
@@ -33,10 +32,7 @@ import { uploadConfig } from './upload.config';
 @Controller('meetings/:meetingId/files')
 @UseGuards(JwtAuthGuard, MeetingFileAccessGuard)
 export class FilesController {
-  constructor(
-    private readonly files: MeetingFilesService,
-    private readonly uploaderAvatars: MeetingFileUploaderAvatarService,
-  ) {}
+  constructor(private readonly files: MeetingFilesService) {}
 
   @Post()
   @UseGuards(UploadCapacityGuard)
@@ -81,26 +77,6 @@ export class FilesController {
   @Get()
   list(@Param('meetingId') meetingId: string, @Req() request: AuthenticatedRequest) {
     return this.files.list(meetingId, request.user.sub);
-  }
-
-  @Get(':fileId/uploader-avatar')
-  async getUploaderAvatar(
-    @Param('meetingId') meetingId: string,
-    @Param('fileId') fileId: string,
-    @Req() request: AuthenticatedRequest,
-    @Res({ passthrough: true }) response: Response,
-  ): Promise<StreamableFile> {
-    const avatar = await this.uploaderAvatars.open(meetingId, fileId, request.user.sub);
-
-    response.set({
-      'Cache-Control': 'private, no-store',
-      'Content-Length': String(avatar.sizeBytes),
-      'Content-Type': avatar.mimeType,
-      'Referrer-Policy': 'no-referrer',
-      'X-Content-Type-Options': 'nosniff',
-    });
-
-    return new StreamableFile(avatar.stream);
   }
 
   @Post(':fileId/download-ticket')
