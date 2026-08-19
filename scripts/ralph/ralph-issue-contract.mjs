@@ -105,7 +105,7 @@ export function assertTrustedIssue(config, issue, repository) {
   };
 }
 
-function formatFindingList(list) {
+export function formatFindingList(list) {
   return list
     .map((finding) => {
       const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
@@ -184,11 +184,20 @@ export function issueBodyWithReviewContext(issue, review) {
   const originalBody = issueBodyWithoutCompletionState(issue)
     .replace(reviewContextPattern, '')
     .trimEnd();
-  const reviewContext = formatReviewComment(review).replace(
+  // В тело issue попадают только блокирующие замечания: этот блок читает
+  // следующая fix-сессия, и замечания ниже порога в нём означали бы приказ
+  // чинить то, что порог осознанно не блокирует. Их текст живёт в комментарии
+  // ревью и в отложенных issues; здесь — только счётчик со ссылкой на них.
+  const belowFloorCount = review.belowFloorFindings?.length ?? 0;
+  const reviewContext = formatReviewComment({ ...review, belowFloorFindings: undefined }).replace(
     '\n\nIssue reopened. Fix the findings, rerun the relevant checks, and start Ralph Loop again.',
     '',
   );
-  return `${originalBody}\n\n${startMarker}\n${reviewContext}\n${endMarker}`.trim();
+  const belowFloorNote =
+    belowFloorCount > 0
+      ? `\n\n${belowFloorCount} finding(s) below the severity floor are tracked as separate deferred GitHub issues and are not part of this issue. Do not fix them here.`
+      : '';
+  return `${originalBody}\n\n${startMarker}\n${reviewContext}${belowFloorNote}\n${endMarker}`.trim();
 }
 
 export function updateIssueReviewContext(repository, issue, review) {

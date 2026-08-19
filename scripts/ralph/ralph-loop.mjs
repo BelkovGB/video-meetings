@@ -95,6 +95,7 @@ import {
   assertReviewPayloadShape,
   assertTrustedIssue,
   clearIssueCompletionState,
+  formatFindingList,
   formatReviewComment,
   issueBodyWithoutRalphMetadata,
   normalizeReviewResult,
@@ -104,7 +105,11 @@ import {
 
 import { buildIndependentReviewPrompt, renderPrompt } from './ralph-prompts.mjs';
 
-import { createOrReopenReviewIssues, runMilestoneReview } from './ralph-milestone-review.mjs';
+import {
+  createOrReopenReviewIssues,
+  recordDeferredFindingsSafely,
+  runMilestoneReview,
+} from './ralph-milestone-review.mjs';
 
 // -----------------------------------------------------------------------------
 // Пути проекта и режим запуска
@@ -298,11 +303,17 @@ async function runIndependentReview(config, repository, issue, commit) {
 // Подготовка commit и закрытие issue силами оркестратора
 // -----------------------------------------------------------------------------
 
-function closeIssue(config, repository, issue, commit) {
+function closeIssue(config, repository, issue, commit, review = null) {
   const completion = config.review.enabled
     ? 'Ralph Loop validations and independent review passed.'
     : 'Ralph Loop validations passed; independent review is disabled in config.';
   const commentMarker = `<!-- ralph-issue-complete commit:${commit} -->`;
+  // На PASS с замечаниями ниже порога комментарий закрытия — единственный
+  // гарантированный след этих замечаний в GitHub: запись отложенных issues
+  // может отказать и осознанно не роняет прогон.
+  const belowFloor = review?.belowFloorFindings?.length
+    ? `\n\n### Below the severity floor (recorded as deferred issues)\n\n${formatFindingList(review.belowFloorFindings)}`
+    : '';
   // Комментарий — след для человека, а не часть контракта: его marker никто не
   // читает, а связь issue с работой держат trailer коммита, тело issue и PR.
   // Закрытие ниже обязательно, публикация — нет.
@@ -310,7 +321,7 @@ function closeIssue(config, repository, issue, commit) {
     postIssueCommentOnce(
       repository,
       issue.number,
-      `Implemented in commit ${commit}. ${completion}`,
+      `Implemented in commit ${commit}. ${completion}${belowFloor}`,
       commentMarker,
     );
   } catch (error) {
@@ -416,6 +427,14 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
       `Review issue #${issue.number}`,
     );
     endReview();
+    // Замечания ниже порога не блокируют работу, но и не теряются: каждое
+    // становится отложенной GitHub issue для ручного разбора.
+    recordDeferredFindingsSafely(
+      config,
+      repository,
+      review,
+      `independent review of issue #${issue.number} at commit ${commit}`,
+    );
   } catch (error) {
     endReview({ failed: true });
     activeStateStore()?.updateIssue({
@@ -493,7 +512,7 @@ async function reviewAndCloseCommittedIssue(config, repository, issue, commit) {
   // стоило повторного ревью того же самого дерева на следующем прогоне.
   activeStateStore()?.updateIssue({ phase: reviewPassedPhase, reviewedCommit: commit });
   verifyPushedHead(config, pushedHead);
-  closeIssue(config, repository, issue, commit);
+  closeIssue(config, repository, issue, commit, review);
   activeStateStore()?.clearIssue();
   return { completed: true, commit, review };
 }
@@ -567,7 +586,13 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
 
   activeStateStore()?.updateIssue({ phase: 'validating' });
   try {
-    measuredValidation(() => runConfiguredValidation(config, agentPaths));
+    // Дешёвая дорожка разрешена только здесь: agentPaths — незакоммиченная
+    // работа агента, и сравнение дерева с HEAD описывает именно её. На
+    // already-fixed и committed recovery выше проверяется уже закоммиченное
+    // изменение, там разрешение не передаётся.
+    measuredValidation(() =>
+      runConfiguredValidation(config, agentPaths, { allowCommentOnlyLane: true }),
+    );
   } catch (error) {
     const attempts = (activeStateStore()?.issue?.validationFixAttempts ?? 0) + 1;
     activeStateStore()?.updateIssue({

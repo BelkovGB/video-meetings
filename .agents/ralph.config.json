@@ -31,6 +31,8 @@
   },
   "developmentModel": "claude-opus-5",
   "developmentEffort": "medium",
+  "reviewSeverityFloor": "P1",
+  "commentOnlyValidation": true,
   "autoApproveConfiguredIssues": true,
   "trustedIssueAuthors": [
     "codex-ai-Goo",
@@ -63,6 +65,7 @@
     "effort": "max",
     "maxTurns": 75,
     "maxFindings": 10,
+    "incremental": true,
     "schemaFile": ".agents/review.schema.json",
     "outputFile": ".agents/last-milestone-review.json"
   }

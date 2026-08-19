@@ -7,7 +7,7 @@ import {
   isRalphInfrastructurePath,
   scopeMilestoneReviewToProduct,
 } from './ralph-scope.mjs';
-import { run, runtimeSettings } from './ralph-process-runner.mjs';
+import { run, runNetwork, runtimeSettings } from './ralph-process-runner.mjs';
 import { retryTransientOperation } from './ralph-runtime.mjs';
 import { runReviewWithRetries } from './ralph-agent-session.mjs';
 import { runReviewSession } from './ralph-agent-backends.mjs';
@@ -19,7 +19,7 @@ import {
   postIssueCommentOnce,
   postPullRequestReview,
 } from './ralph-github-client.mjs';
-import { branchChangeInventory } from './ralph-git.mjs';
+import { branchChangeInventory, isAncestorCommit } from './ralph-git.mjs';
 import { assertReviewPayloadShape, normalizeReviewResult } from './ralph-issue-contract.mjs';
 import { buildMilestoneReviewPrompt } from './ralph-prompts.mjs';
 
@@ -27,14 +27,70 @@ import { buildMilestoneReviewPrompt } from './ralph-prompts.mjs';
  * Итоговое ревью milestone на Sol и превращение его замечаний в GitHub issues.
  */
 
-export function milestoneReviewMarker(config, milestone, pullRequest) {
-  const milestoneId = createHash('sha256')
+function milestoneReviewIdentity(config, milestone) {
+  return createHash('sha256')
     .update(
       `${milestone.number}\n${milestone.title}\n${milestone.description ?? ''}\n${config.baseBranch}`,
     )
     .digest('hex')
     .slice(0, 16);
-  return `<!-- ralph-milestone-review milestone:${milestoneId} head:${pullRequest.headRefOid} model:${config.milestoneReview.model} effort:${config.milestoneReview.effort} -->`;
+}
+
+export function milestoneReviewMarker(config, milestone, pullRequest) {
+  return `<!-- ralph-milestone-review milestone:${milestoneReviewIdentity(config, milestone)} head:${pullRequest.headRefOid} model:${config.milestoneReview.model} effort:${config.milestoneReview.effort} -->`;
+}
+
+// Второй маркер рядом с основным: ревью, которое не вместило все findings в
+// maxFindings, не имеет права быть базой инкрементального круга — отрезанные
+// findings живут только в невыполненном обещании «deferred to the next full
+// review», и сузить следующий круг значило бы потерять их навсегда.
+export const milestonePartialCoverageMarker = '<!-- ralph-milestone-review-coverage:partial -->';
+
+/**
+ * Последнее опубликованное milestone-ревью этого PR: его head и полный текст.
+ *
+ * Источник — сам PR, а не локальный state: выходной файл ревью перезаписывается
+ * каждым прогоном и не переживает смену машины, а опубликованный review — это
+ * ровно тот результат, который оркестратор признал и показал людям. Маркер
+ * привязан к milestone (номер, title, description, база), поэтому ревью чужой
+ * фазы на том же PR не считается предыдущим. Маркеры технических отказов
+ * (`ralph-milestone-review-failed`) префиксом не совпадают и не учитываются.
+ *
+ * Базой инкрементального круга признаётся только новейшее подходящее ревью, и
+ * только целиком совместимое: сделанное текущей моделью с текущим effort (смена
+ * модели — документированный способ заказать свежий полный аудит) и не
+ * помеченное как partial. Несовместимое новейшее ревью не заменяется более
+ * старым: старое уже перекрыто новым, и опираться на него значило бы проверять
+ * закрытие устаревших findings.
+ */
+export function lastPublishedMilestoneReview(
+  config,
+  milestone,
+  repository,
+  pullRequest,
+  dependencies = {},
+) {
+  const listPages = dependencies.githubPagedArray ?? githubPagedArray;
+  const prefix = `<!-- ralph-milestone-review milestone:${milestoneReviewIdentity(config, milestone)} head:`;
+  const reviews = listPages(
+    repository,
+    `pulls/${pullRequest.number}/reviews`,
+    [],
+    `GitHub reviews for PR #${pullRequest.number}`,
+  );
+  for (let index = reviews.length - 1; index >= 0; index -= 1) {
+    const body = reviews[index]?.body;
+    if (typeof body !== 'string') continue;
+    const markerStart = body.indexOf(prefix);
+    if (markerStart === -1) continue;
+    const head = body.slice(markerStart + prefix.length).match(/^[0-9a-f]{40}/)?.[0];
+    if (!head) return null;
+    const expectedMarker = milestoneReviewMarker(config, milestone, { headRefOid: head });
+    if (!body.includes(expectedMarker)) return null;
+    if (body.includes(milestonePartialCoverageMarker)) return null;
+    return { head, body };
+  }
+  return null;
 }
 
 export function milestonePassReviewIsClean(body, marker) {
@@ -44,10 +100,14 @@ export function milestonePassReviewIsClean(body, marker) {
 
   const normalized = body.replace(/\r\n/g, '\n').trim();
   const findingsSections = normalized.match(/^### Findings\s*$/gm) ?? [];
+  // Секция «ниже порога» не мешает чистоте PASS: такие замечания по определению
+  // не блокируют работу, вынесены в отложенные issues, и повторное ревью того
+  // же head вернуло бы тот же вердикт. Без этого допуска short-circuit не
+  // срабатывал бы ни на одном PASS при поднятом reviewSeverityFloor.
   return (
     findingsSections.length === 1 &&
     normalized.includes('**Verdict:** **PASS**') &&
-    /### Findings\s*\n\s*No actionable findings\.\s*\n\s*The pull request remains draft so a human can make the final merge decision\.\s*$/.test(
+    /### Findings\s*\n\s*No actionable findings\.\s*\n(?:\s*### Below the severity floor \(not blocking\)\s*\n[\s\S]*?)?\s*The pull request remains draft so a human can make the final merge decision\.\s*$/.test(
       normalized,
     )
   );
@@ -86,6 +146,9 @@ export function limitMilestoneReviewFindings(review, pullRequest, maxFindings) {
         ? `${review.summary} Ralph queued the first ${maxFindings} unique findings by severity; ${omitted} findings were deferred to the next full review.`
         : review.summary,
     findings: sorted.slice(0, maxFindings),
+    // Признак неполного покрытия попадает в публикуемый маркер: такое ревью не
+    // может служить базой инкрементального круга.
+    omittedFindings: omitted,
   };
 }
 
@@ -116,7 +179,9 @@ function formatMilestoneReview(config, milestone, pullRequest, review) {
       ? 'The pull request remains draft so a human can make the final merge decision.'
       : 'Ralph Loop will create or reopen one milestone issue per finding, run the implementation loop, push the fixes, and review the new head again.';
 
-  return `${milestoneReviewMarker(config, milestone, pullRequest)}
+  const coverageMarker = review.omittedFindings > 0 ? `\n${milestonePartialCoverageMarker}` : '';
+
+  return `${milestoneReviewMarker(config, milestone, pullRequest)}${coverageMarker}
 ## Ralph Loop: milestone review
 
 - **Model:** \`${config.milestoneReview.model}\`
@@ -166,10 +231,52 @@ export async function runMilestoneReview(config, repository, milestone, pullRequ
     };
   }
 
-  // База берётся с origin, а не с локальной ветки: локальная может отставать, и
-  // тогда в diff попадёт чужая работа, которую ревьюер обязан игнорировать.
+  // Со второго круга ревью инкрементально: инвентарь сужается до коммитов после
+  // уже отревьюенного head, а прежнее ревью передаётся дословно с требованием
+  // проверить закрытие его findings. Полный аудит остаётся на первом круге, при
+  // выключенном milestoneReview.incremental и когда прежний head не является
+  // предком текущего (force-push, другая база).
+  let changes = null;
+  let previousReview = null;
+  if (config.milestoneReview.incremental) {
+    const previous = lastPublishedMilestoneReview(config, milestone, repository, pullRequest);
+    if (previous?.head === pullRequest.headRefOid) {
+      // Тот же head: новых коммитов нет, инвентарь не нужен — только проверка
+      // закрытия прежних findings.
+      previousReview = { head: previous.head, body: previous.body, hasNewCommits: false };
+    } else if (previous && isAncestorCommit(previous.head, pullRequest.headRefOid)) {
+      // Merge базы в ветку («Update branch» на PR) оставляет прежний head
+      // предком, но заливает диапазон всей чужой работой из базы: инвентарь
+      // распух бы упущенным, а настоящие правки milestone утонули бы за
+      // бюджетом diff. Любой merge в диапазоне — и любая неуверенность в его
+      // отсутствии — возвращает полный аудит.
+      const merges = run(
+        'git',
+        ['rev-list', '--merges', `${previous.head}..${pullRequest.headRefOid}`],
+        { allowFailure: true },
+      );
+      const incrementalChanges =
+        merges.status === 0 && merges.stdout === ''
+          ? branchChangeInventory(previous.head, pullRequest.headRefOid)
+          : null;
+      if (incrementalChanges) {
+        changes = incrementalChanges;
+        previousReview = { head: previous.head, body: previous.body, hasNewCommits: true };
+        console.log(
+          `Milestone review инкрементально: предыдущее ревью на ${previous.head.slice(0, 8)}, ` +
+            'проверяются коммиты после него.',
+        );
+      }
+    }
+  }
+  if (!previousReview) {
+    // База берётся с origin, а не с локальной ветки: локальная может отставать,
+    // и тогда в diff попадёт чужая работа, которую ревьюер обязан игнорировать.
+    changes = branchChangeInventory(`origin/${config.baseBranch}`, pullRequest.headRefOid);
+  }
   const reviewPrompt = buildMilestoneReviewPrompt(config, milestone, pullRequest, {
-    changes: branchChangeInventory(`origin/${config.baseBranch}`, pullRequest.headRefOid),
+    changes,
+    previousReview,
   });
 
   console.log(
@@ -241,6 +348,12 @@ export async function runMilestoneReview(config, repository, milestone, pullRequ
     repository,
     pullRequest,
     formatMilestoneReview(config, milestone, pullRequest, review),
+  );
+  recordDeferredFindingsSafely(
+    config,
+    repository,
+    review,
+    `milestone review of PR #${pullRequest.number} at head ${pullRequest.headRefOid}`,
   );
   console.log(
     `Milestone review опубликован в ${pullRequest.url}: ${review.verdict.toUpperCase()} (${review.findings.length} findings).`,
@@ -514,4 +627,222 @@ function matchingIssueFor(existingIssues, pullRequest, finding) {
   return existingIssues.find(
     (candidate) => typeof candidate.body === 'string' && candidate.body.includes(marker),
   );
+}
+
+// -----------------------------------------------------------------------------
+// Отложенные замечания: находки ниже порога важности записываются в GitHub
+// -----------------------------------------------------------------------------
+
+/**
+ * Порог важности убирает замечание из цикла, но не имеет права его терять:
+ * каждое пропущенное замечание становится issue с label ниже — без milestone,
+ * поэтому в очередь Ralph оно не попадает и закрытию milestone не мешает.
+ * Разбирает такие issues человек: группирует, закрывает как wontfix или
+ * назначает milestone, после чего задачу берёт обычный цикл.
+ */
+export const deferredFindingLabel = 'ralph-deferred';
+
+/**
+ * Отпечаток без привязки к PR и кругу ревью: одно и то же замечание, найденное
+ * повторно другим ревью, находит свою issue, а не заводит дубликат. Плата
+ * двусторонняя, и обе стороны разбираются вручную: переформулированное
+ * замечание станет новой issue, а два действительно разных замечания с
+ * одинаковыми title, файлом и важностью склеятся в одну — номер строки в
+ * отпечаток не входит намеренно, иначе каждый сдвиг кода плодил бы дубликаты.
+ */
+export function deferredFindingFingerprint(finding) {
+  const normalizedTitle = finding.title
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+  const source = [finding.severity, finding.file, normalizedTitle].join('\n');
+  return createHash('sha256').update(source).digest('hex').slice(0, 20);
+}
+
+export function deferredFindingMarker(finding) {
+  return `<!-- ralph-deferred-finding id:${deferredFindingFingerprint(finding)} -->`;
+}
+
+function listDeferredIssues(repository) {
+  return githubPagedArray(
+    repository,
+    'issues',
+    [
+      ['state', 'all'],
+      ['labels', deferredFindingLabel],
+    ],
+    `GitHub issues with label ${deferredFindingLabel}`,
+  )
+    .filter((issue) => !issue.pull_request)
+    .map((issue) => ({
+      number: issue.number,
+      state: issue.state?.toUpperCase(),
+      body: issue.body,
+      url: issue.html_url,
+    }));
+}
+
+const ensuredDeferredLabelRepositories = new Set();
+
+// `--force` делает команду идемпотентной: существующий label обновляется, а не
+// вызывает ошибку. Без label дедупликация не работает, поэтому отказ здесь
+// прерывает запись отложенных замечаний целиком.
+function ensureDeferredFindingLabel(repository) {
+  if (ensuredDeferredLabelRepositories.has(repository)) return;
+  runNetwork('gh', [
+    'label',
+    'create',
+    deferredFindingLabel,
+    '--repo',
+    repository,
+    '--force',
+    '--color',
+    'D4C5F9',
+    '--description',
+    'Ralph: review finding below the severity floor, deferred for manual triage',
+  ]);
+  ensuredDeferredLabelRepositories.add(repository);
+}
+
+function deferredFindingIssueBody(config, batch, source) {
+  const location =
+    batch.length === 1 && batch[0].line ? `${batch[0].file}:${batch[0].line}` : batch[0].file;
+  const markers = batch.map((finding) => deferredFindingMarker(finding)).join('\n');
+  const findings = batch
+    .map((finding, index) => {
+      const at = finding.line ? ` (line ${finding.line})` : '';
+      const heading =
+        batch.length === 1
+          ? '## Finding'
+          : `### ${index + 1}. [${finding.severity}] ${finding.title}${at}`;
+      return `${heading}\n\n${finding.body}`;
+    })
+    .join('\n\n');
+
+  return `${markers}
+## Context
+
+**Source:** ${source}
+**Severity:** ${batchSeverity(batch)}
+**Location:** \`${location}\`
+**Deferred:** below the "${config.reviewSeverityFloor}" review severity floor; not queued for the Ralph loop.
+
+${findings}
+
+## Definition of done
+
+${batch.map((finding) => `- [ ] [${finding.severity}] ${finding.title}`).join('\n')}
+
+## Triage
+
+This finding did not block the work and was recorded for a human decision. Close it as wontfix, fold it into another issue, or assign it to a milestone to schedule the fix; Ralph ignores it while it carries no milestone.`;
+}
+
+// Тот же принцип повтора, что и у createReviewFindingIssue: POST не
+// идемпотентен, поэтому внутри повтора список перечитывается и задача с тем же
+// marker принимается как уже созданная.
+function createDeferredFindingIssue(config, repository, batch, source) {
+  const issue = retryTransientOperation(
+    () => {
+      const existing = listDeferredIssues(repository).find((candidate) =>
+        batch.some((finding) =>
+          String(candidate.body ?? '').includes(deferredFindingMarker(finding)),
+        ),
+      );
+      if (existing) {
+        console.log(`Отложенное замечание уже записано: #${existing.number}.`);
+        return { ...existing, html_url: existing.url };
+      }
+      return parseJson(
+        run('gh', ['api', `repos/${repository}/issues`, '--method', 'POST', '--input', '-'], {
+          input: JSON.stringify({
+            title: findingIssueTitle(batch),
+            body: deferredFindingIssueBody(config, batch, source),
+            labels: [deferredFindingLabel],
+          }),
+        }).stdout,
+        'GitHub deferred issue creation',
+      );
+    },
+    {
+      attempts: runtimeSettings().networkRetryAttempts,
+      baseDelayMs: runtimeSettings().networkRetryBaseDelayMs,
+      onRetry: (error, attempt, delay) =>
+        console.error(
+          `Временная ошибка записи отложенного замечания (попытка ${attempt}): ${error.message}. ` +
+            `Повтор через ${delay} ms.`,
+        ),
+    },
+  );
+  return {
+    number: issue.number,
+    state: issue.state?.toUpperCase() ?? 'OPEN',
+    body: issue.body,
+    url: issue.html_url,
+  };
+}
+
+export function recordDeferredFindings(
+  config,
+  repository,
+  review,
+  source,
+  dependencies = {
+    listDeferredIssues,
+    createDeferredFindingIssue,
+    ensureDeferredFindingLabel,
+  },
+) {
+  const findings = review.belowFloorFindings ?? [];
+  if (findings.length === 0) return [];
+
+  dependencies.ensureDeferredFindingLabel(repository);
+  const existingIssues = dependencies.listDeferredIssues(repository);
+  const recorded = [];
+  for (const batch of groupFindingsIntoBatches(findings)) {
+    // Дедупликация по каждому замечанию, а не по группе: группа собирается
+    // заново на каждом ревью, и одно уже записанное замечание в ней не должно
+    // топить остальные. Закрытая issue не переоткрывается: закрыл её человек,
+    // и повторная находка того же текста не отменяет его решения.
+    const fresh = batch.filter((finding) => {
+      const existing = existingIssues.find((candidate) =>
+        String(candidate.body ?? '').includes(deferredFindingMarker(finding)),
+      );
+      if (existing) {
+        console.log(
+          `Отложенное замечание «${finding.title}» уже записано в issue #${existing.number} ` +
+            `(${existing.state}).`,
+        );
+      }
+      return !existing;
+    });
+    if (fresh.length === 0) continue;
+    const issue = dependencies.createDeferredFindingIssue(config, repository, fresh, source);
+    existingIssues.push(issue);
+    recorded.push(issue);
+    console.log(`Создана отложенная issue #${issue.number}: ${issue.url}`);
+  }
+  if (recorded.length > 0) {
+    console.log(
+      `Записано отложенных замечаний: ${recorded.length} issue(s) с label ${deferredFindingLabel}; ` +
+        'в очередь Ralph они не попадают.',
+    );
+  }
+  return recorded;
+}
+
+/**
+ * Обёртка для вызова из цикла: отказ GitHub на записи отложенного замечания не
+ * имеет права ронять прогон. Текст замечаний при этом не теряется: при FAIL он
+ * опубликован в комментарии ревью, при PASS — в комментарии закрытия issue или
+ * в milestone-ревью на PR; теряется только карточка в трекере.
+ */
+export function recordDeferredFindingsSafely(config, repository, review, source) {
+  try {
+    return recordDeferredFindings(config, repository, review, source);
+  } catch (error) {
+    console.error(`Не удалось записать отложенные замечания (${source}): ${error.message}`);
+    return [];
+  }
 }

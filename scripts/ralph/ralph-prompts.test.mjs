@@ -652,3 +652,54 @@ test('порог важности убирает право останавлив
   // Незнакомая важность считается блокирующей: молча пропустить опаснее.
   assert.equal(findingBlocks({ severity: 'critical' }, 'P1'), true);
 });
+
+test('повторное milestone-ревью сужается до новых коммитов и прежних findings', () => {
+  const previousBody = '## Ralph Loop: milestone review\n\nПрежний текст ревью.';
+  const prompt = buildMilestoneReviewPrompt(
+    { agentCli: 'claude', baseBranch: 'master' },
+    { title: 'Phase 6', description: 'Uploader identity.' },
+    { number: 89, url: 'https://example.test/pull/89', headRefOid: 'b'.repeat(40) },
+    {
+      changes: {
+        range: 'a'.repeat(40) + '...' + 'b'.repeat(40),
+        commits: 'abc1234 fix: bound the variant',
+        stat: ' file | 1 +',
+        nameStatus: 'M\tfile',
+        diff: '--- a/file',
+        truncated: false,
+      },
+      previousReview: { head: 'a'.repeat(40), body: previousBody, hasNewCommits: true },
+    },
+  );
+
+  assert.match(prompt, /already audited this pull request up to head a{40}/);
+  assert.match(prompt, /covers only the commits added since that head/);
+  // Прежнее ревью цитируется blockquote: голый `### Findings` из него, переехав
+  // в summary нового ревью, ломал бы распознавание чистого PASS.
+  assert.match(prompt, /> Прежний текст ревью\./);
+  assert.match(prompt, /review the changes since the previously reviewed head/);
+  assert.doesNotMatch(prompt, /review the complete current implementation/);
+  assert.match(prompt, /Use the change inventory above as evidence/);
+  assert.doesNotMatch(prompt, /branch diff against master as evidence/);
+  assert.match(prompt, /handled outside this review/);
+});
+
+test('повторное milestone-ревью того же head обходится без инвентаря', () => {
+  const prompt = buildMilestoneReviewPrompt(
+    { agentCli: 'claude', baseBranch: 'master' },
+    { title: 'Phase 6', description: 'Uploader identity.' },
+    { number: 89, url: 'https://example.test/pull/89', headRefOid: 'b'.repeat(40) },
+    {
+      changes: null,
+      previousReview: { head: 'b'.repeat(40), body: 'Тот же head.', hasNewCommits: false },
+    },
+  );
+
+  assert.match(prompt, /No commits were added since that head/);
+  assert.doesNotMatch(prompt, /```diff/);
+  // Без новых коммитов prompt не имеет права ссылаться на инвентарь, которого
+  // нет, и требовать аудита несуществующих изменений.
+  assert.doesNotMatch(prompt, /Use the change inventory above/);
+  assert.doesNotMatch(prompt, /Audit the new changes in full/);
+  assert.match(prompt, /verify the resolution of every finding of the previous review/);
+});
