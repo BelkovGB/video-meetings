@@ -1,11 +1,15 @@
 import { Prisma } from '@prisma/client';
 
+import { deriveAvatarKey } from './avatar-key';
+
 /**
  * The only user fields shared activity may show to another user. Email and every
  * other private profile value stay out, so adding a field here changes what all
- * shared responses expose.
+ * shared responses expose. `id` is read only to derive the opaque avatar key
+ * and is never emitted.
  */
 export const userIdentitySelect = {
+  id: true,
   displayName: true,
   avatarMimeType: true,
   avatarSizeBytes: true,
@@ -14,19 +18,27 @@ export const userIdentitySelect = {
 
 export type UserIdentityResponse = {
   displayName: string | null;
-  avatar: { updatedAt: Date } | null;
+  avatar: { key: string; updatedAt: Date } | null;
 };
 
 type SelectedUser = Prisma.UserGetPayload<{ select: typeof userIdentitySelect }>;
 
-export function toUserIdentityResponse(user: SelectedUser | null): UserIdentityResponse | null {
+/**
+ * @param avatarKeyScope the context the identity is shown in, which bounds how
+ *   far the returned avatar key can be compared — a meeting ID for a meeting's
+ *   activity, so the same user in another meeting is a different key.
+ */
+export function toUserIdentityResponse(
+  user: SelectedUser | null,
+  avatarKeyScope: string,
+): UserIdentityResponse | null {
   if (!user) {
     return null;
   }
 
   const avatar =
     user.avatarMimeType && user.avatarSizeBytes !== null && user.avatarUpdatedAt
-      ? { updatedAt: user.avatarUpdatedAt }
+      ? { key: deriveAvatarKey(avatarKeyScope, user.id), updatedAt: user.avatarUpdatedAt }
       : null;
 
   return { displayName: user.displayName, avatar };

@@ -15,7 +15,10 @@ type Meeting = { id: string };
 type UserSession = { accessToken: string };
 type UploadedFile = {
   id: string;
-  uploadedBy: { displayName: string | null; avatar: { updatedAt: string } | null } | null;
+  uploadedBy: {
+    displayName: string | null;
+    avatar: { key: string; updatedAt: string } | null;
+  } | null;
 };
 
 const validPassword = 'secure-password-123';
@@ -449,7 +452,7 @@ describe('Meeting files (e2e)', () => {
 
     expect(uploaded.uploadedBy).toEqual({
       displayName: 'Ada Lovelace',
-      avatar: { updatedAt: expect.any(String) },
+      avatar: { key: expect.any(String), updatedAt: expect.any(String) },
     });
 
     for (const viewer of [owner, participant]) {
@@ -461,7 +464,10 @@ describe('Meeting files (e2e)', () => {
       expect(listed.body).toEqual([
         expect.objectContaining({
           id: uploaded.id,
-          uploadedBy: { displayName: 'Ada Lovelace', avatar: { updatedAt: expect.any(String) } },
+          uploadedBy: {
+            displayName: 'Ada Lovelace',
+            avatar: { key: expect.any(String), updatedAt: expect.any(String) },
+          },
         }),
       ]);
     }
@@ -483,7 +489,35 @@ describe('Meeting files (e2e)', () => {
     expect(serialized).not.toContain('@example.com');
     expect(serialized).not.toContain(getUserId(owner.accessToken));
     expect(Object.keys(listed.body[0].uploadedBy)).toEqual(['displayName', 'avatar']);
-    expect(Object.keys(listed.body[0].uploadedBy.avatar)).toEqual(['updatedAt']);
+    expect(Object.keys(listed.body[0].uploadedBy.avatar)).toEqual(['key', 'updatedAt']);
+  });
+
+  it('gives every file of one uploader the same opaque avatar key, per meeting', async () => {
+    const owner = await registerUser();
+    const other = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const otherMeeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, other);
+    await uploadAvatar(owner);
+    await uploadAvatar(other);
+
+    const first = await uploadPdf(meeting.id, owner);
+    const second = await uploadPdf(meeting.id, owner);
+    const byOther = await uploadPdf(meeting.id, other);
+    const elsewhere = await uploadPdf(otherMeeting.id, owner);
+
+    const ownerKey = first.uploadedBy?.avatar?.key;
+
+    // One uploader, one download: a client that has this avatar for one file
+    // recognises it on the next one instead of fetching the same image again.
+    expect(ownerKey).toEqual(expect.any(String));
+    expect(second.uploadedBy?.avatar?.key).toBe(ownerKey);
+    expect(byOther.uploadedBy?.avatar?.key).not.toBe(ownerKey);
+
+    // The key names the avatar, never its owner: it is not the user ID, and
+    // does not follow that user into another meeting.
+    expect(ownerKey).not.toContain(getUserId(owner.accessToken));
+    expect(elsewhere.uploadedBy?.avatar?.key).not.toBe(ownerKey);
   });
 
   it('reports the display name the uploader has now, not the one stored at upload time', async () => {

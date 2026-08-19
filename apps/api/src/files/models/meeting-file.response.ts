@@ -8,6 +8,7 @@ import {
 
 export const meetingFileSelect = {
   id: true,
+  meetingId: true,
   originalName: true,
   category: true,
   mimeType: true,
@@ -36,6 +37,8 @@ export function toMeetingFileResponse(file: SelectedMeetingFile): MeetingFileRes
     mimeType: file.mimeType,
     sizeBytes: file.sizeBytes,
     uploadedAt: file.createdAt,
-    uploadedBy: toUserIdentityResponse(file.uploadedBy),
+    // The meeting scopes the uploader's avatar key, and is not emitted: the
+    // caller already knows which meeting it asked about.
+    uploadedBy: toUserIdentityResponse(file.uploadedBy, file.meetingId),
   };
 }

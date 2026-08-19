@@ -51,7 +51,11 @@ export type CurrentUserProfile = {
  */
 export type UserIdentity = {
   displayName: string | null;
-  avatar: { updatedAt: string } | null;
+  /**
+   * `key` names the image without naming its owner: it is equal for every file
+   * the same person uploaded to this meeting, and comparable nowhere else.
+   */
+  avatar: { key: string; updatedAt: string } | null;
 };
 
 export type Meeting = {

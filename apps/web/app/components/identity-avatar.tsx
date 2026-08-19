@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
 import { readAccessToken } from '../../lib/auth/session';
+import { acquireAvatarImage, discardAvatarImage } from './avatar-image-cache';
 
 type IdentityAvatarImage = {
   /**
@@ -15,6 +16,12 @@ type IdentityAvatarImage = {
   path: string;
   /** Changes when the image is replaced, and re-fetches it. */
   updatedAt: string;
+  /**
+   * Names the image itself, so two components showing one person's avatar
+   * through different paths download and hold it once. Omitted where the path
+   * already identifies the image, as `/users/me/avatar` does.
+   */
+  sharedKey?: string;
 };
 
 type IdentityAvatarProps = {
@@ -40,8 +47,7 @@ export function IdentityAvatar({
   className = '',
 }: IdentityAvatarProps) {
   const [loaded, setLoaded] = useState<{ url: string; key: string } | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
-  const imageKey = image ? `${image.path}|${image.updatedAt}` : null;
+  const imageKey = image ? `${image.sharedKey ?? image.path}|${image.updatedAt}` : null;
   const imageUrl = loaded && loaded.key === imageKey ? loaded.url : null;
 
   useEffect(() => {
@@ -57,40 +63,36 @@ export function IdentityAvatar({
     }
 
     let isActive = true;
-    let objectUrl: string | null = null;
+    const path = image.path;
+    const lease = acquireAvatarImage(imageKey, async (signal) => {
+      const response = await fetch(`${apiUrl}${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal,
+      });
+      if (!response.ok) {
+        throw new Error('Unable to load avatar');
+      }
 
-    const loadAvatar = async () => {
-      try {
-        const response = await fetch(`${apiUrl}${image.path}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) {
-          throw new Error('Unable to load avatar');
-        }
+      return response.blob();
+    });
 
-        objectUrl = URL.createObjectURL(await response.blob());
+    void lease.url.then(
+      (url) => {
         if (isActive) {
-          objectUrlRef.current = objectUrl;
-          setLoaded({ url: objectUrl, key: imageKey });
-        } else {
-          URL.revokeObjectURL(objectUrl);
-          objectUrl = null;
+          setLoaded({ url, key: imageKey });
         }
-      } catch {
+      },
+      () => {
         if (isActive) {
           setLoaded(null);
         }
-      }
-    };
-
-    void loadAvatar();
+      },
+    );
 
     return () => {
       isActive = false;
-      if (objectUrl && objectUrlRef.current === objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-        objectUrlRef.current = null;
-      }
+      // The image outlives this component only while another one still holds it.
+      lease.release();
     };
   }, [imageKey]);
 
@@ -102,9 +104,10 @@ export function IdentityAvatar({
         alt={accessibleName}
         className={`shrink-0 rounded-full object-cover ${className}`}
         onError={() => {
-          if (objectUrlRef.current === imageUrl) {
-            URL.revokeObjectURL(imageUrl);
-            objectUrlRef.current = null;
+          // The image belongs to every component sharing this key, so it is the
+          // cache that frees it and lets the next one try again.
+          if (imageKey) {
+            discardAvatarImage(imageKey);
           }
           setLoaded(null);
         }}

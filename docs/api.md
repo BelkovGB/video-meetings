@@ -447,7 +447,10 @@ Successful requests return `201 Created`:
   "uploadedAt": "2026-08-11T10:00:00.000Z",
   "uploadedBy": {
     "displayName": "Ada Lovelace",
-    "avatar": { "updatedAt": "2026-08-11T09:00:00.000Z" }
+    "avatar": {
+      "key": "8f14e45fce5fa3b1c0c9d6ef2a7b41d3",
+      "updatedAt": "2026-08-11T09:00:00.000Z"
+    }
   }
 }
 ```
@@ -455,8 +458,12 @@ Successful requests return `201 Created`:
 `uploadedBy` is the uploader's safe identity, read from the user record on every
 request, so a renamed uploader or a replaced avatar shows the current value
 without rewriting stored files. It carries only a display name and the avatar
-state: email, the user ID, and every other private profile value stay out. The
-avatar bytes are served only by
+state: email, the user ID, and every other private profile value stay out.
+`avatar.key` names that avatar without naming its owner: it is derived from a
+secret the API generates at startup, scoped to the containing meeting, so two
+files of one uploader share a key and a client can download and hold the image
+once, while the key reveals no user ID and matches nothing in another meeting or
+after a restart. The avatar bytes are served only by
 `GET /meetings/:meetingId/files/:fileId/uploader-avatar` below, never by a route
 that names the uploader. `displayName` is `null` until the uploader sets one,
 `avatar` is `null` while the uploader has none, and
@@ -494,7 +501,8 @@ a historical file never serves a stale avatar: after a replacement the route
 streams the new image, and after a removal, for an uploader who never set one,
 or for a deleted uploader account it returns `404 Avatar not found`. The
 `avatar.updatedAt` value in `uploadedBy` changes with each replacement, so a
-client can key its own cache on it.
+client can key its own cache on `avatar.key` together with `avatar.updatedAt`
+and read this route once per uploader instead of once per file.
 
 ### `POST /meetings/:meetingId/files/:fileId/download-ticket`
 

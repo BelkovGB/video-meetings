@@ -729,6 +729,64 @@ test('shows the uploader avatar through the meeting, and falls back neutrally', 
   await expect(page.getByTestId('meeting-file-uploader-avatar')).toHaveCount(0);
 });
 
+test('reads one uploader avatar for all of their rows, and drops it on leaving', async ({
+  page,
+  request,
+}) => {
+  const avatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const owner = await register(request, 'phase-6-avatar-shared');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(request, owner, avatar);
+  for (const name of ['phase-6-shared-1.pdf', 'phase-6-shared-2.pdf', 'phase-6-shared-3.pdf']) {
+    await uploadPdf(request, owner, meeting, { name });
+  }
+  await authenticate(page, owner);
+
+  const avatarRequests: string[] = [];
+  page.on('request', (sent) => {
+    if (sent.method() === 'GET' && sent.url().includes('/uploader-avatar')) {
+      avatarRequests.push(sent.url());
+    }
+  });
+
+  await page.goto(`/meetings/${meeting.id}`);
+
+  const avatars = page.getByTestId('meeting-file-uploader-avatar');
+  await expect(avatars).toHaveCount(3);
+  for (const index of [0, 1, 2]) {
+    await expect(avatars.nth(index)).toHaveAttribute('src', /^blob:/);
+  }
+
+  // The rows differ only by file: the picture behind them is one download and
+  // one decoded image, not one per row.
+  const sources = await avatars.evaluateAll((elements) =>
+    elements.map((element) => (element as HTMLImageElement).src),
+  );
+  expect(new Set(sources).size).toBe(1);
+  expect(avatarRequests).toHaveLength(1);
+
+  // Leaving the list while the image is still arriving stops the download,
+  // instead of letting a page nobody is looking at finish it.
+  await page.route('**/uploader-avatar', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    await route.fulfill({ status: 200, contentType: 'image/png', body: avatar }).catch(() => {});
+  });
+  const abandoned = page.waitForEvent('requestfailed', (failed) =>
+    failed.url().includes('/uploader-avatar'),
+  );
+  await page.reload();
+  await expect(avatars.first()).toBeVisible();
+  await page.getByRole('link', { name: 'Все встречи' }).click();
+
+  await expect(page).toHaveURL('/');
+  expect((await abandoned).failure()?.errorText).toBeTruthy();
+  await page.unroute('**/uploader-avatar');
+});
+
 test('participant can download but never sees the delete action', async ({ page, request }) => {
   const owner = await register(request, 'phase-3-shared-owner');
   const participant = await register(request, 'phase-3-participant');
