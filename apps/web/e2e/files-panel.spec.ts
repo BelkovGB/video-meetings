@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { PrismaClient } from '@prisma/client';
 
 type Session = {
@@ -632,6 +632,28 @@ test('names the uploader of every file and shows none of it outside the meeting'
   await expect(page.getByText('Ада Лавлейс')).toHaveCount(0);
 });
 
+/**
+ * How many times assistive technology says one name while reading a row: the
+ * text it speaks, plus every label and alternative text an element adds on top
+ * of that text.
+ */
+async function countAnnouncements(row: Locator, name: string): Promise<number> {
+  return row.evaluate((element, spoken) => {
+    const labels = Array.from(element.querySelectorAll('[aria-label], img, [title]')).flatMap(
+      (node) => [
+        node.getAttribute('aria-label') ?? '',
+        node.getAttribute('alt') ?? '',
+        node.getAttribute('title') ?? '',
+      ],
+    );
+
+    return [element.textContent ?? '', ...labels].reduce(
+      (total, value) => total + value.split(spoken).length - 1,
+      0,
+    );
+  }, name);
+}
+
 test('shows the uploader avatar through the meeting, and falls back neutrally', async ({
   page,
   request,
@@ -677,13 +699,21 @@ test('shows the uploader avatar through the meeting, and falls back neutrally', 
   const decodedWidth = () =>
     namedAvatar.evaluate((element) => (element as HTMLImageElement).naturalWidth);
 
-  await expect(namedAvatar).toHaveAccessibleName('Аватар: Ада Лавлейс');
   await expect(namedAvatar).toHaveAttribute('src', /^blob:/);
   await expect.poll(decodedWidth).toBe(2);
 
+  // The text beside the avatar already names the uploader, so the picture is
+  // decorative: the row says that name once, not once for the image and once
+  // for the text.
+  await expect(namedAvatar).toHaveAttribute('alt', '');
+  await expect(namedRow.getByRole('img')).toHaveCount(0);
+  expect(await countAnnouncements(namedRow, 'Ада Лавлейс')).toBe(1);
+
   // An uploader who never set an avatar gets the neutral fallback, and the
   // avatar adds no email and no way into a private profile.
-  await expect(plainAvatar).toHaveAccessibleName('Аватар: участник без имени');
+  await expect(plainAvatar).toHaveAttribute('aria-hidden', 'true');
+  await expect(plainRow.getByRole('img')).toHaveCount(0);
+  expect(await countAnnouncements(plainRow, 'участник без имени')).toBe(1);
   await expect(plainAvatar).toHaveText('?');
   await expect(plainAvatar).not.toHaveAttribute('src');
   await expect(namedRow.getByRole('link')).toHaveCount(0);
@@ -703,24 +733,23 @@ test('shows the uploader avatar through the meeting, and falls back neutrally', 
   await removeAvatar(request, owner);
   await page.reload();
 
-  await expect(namedAvatar).toHaveAccessibleName('Аватар: Ада Лавлейс');
   await expect(namedAvatar).toHaveText('А');
   await expect(namedAvatar).not.toHaveAttribute('src');
+  expect(await countAnnouncements(namedRow, 'Ада Лавлейс')).toBe(1);
 
   // A deleted uploading account leaves the file listed under an identity that
   // names nobody.
   await prisma.user.delete({ where: { id: uploaderWithoutAvatar.userId } });
   await page.reload();
 
-  await expect(plainAvatar).toHaveAccessibleName('Аватар: участник недоступен');
   await expect(plainAvatar).toHaveText('?');
+  expect(await countAnnouncements(plainRow, 'участник недоступен')).toBe(1);
 
   // An image the browser cannot load falls back instead of showing a broken one.
   await setAvatar(request, owner, firstAvatar);
   await page.route('**/uploader-avatar', (route) => route.fulfill({ status: 500 }));
   await page.reload();
 
-  await expect(namedAvatar).toHaveAccessibleName('Аватар: Ада Лавлейс');
   await expect(namedAvatar).toHaveText('А');
   await expect(namedAvatar).not.toHaveAttribute('src');
   await page.unroute('**/uploader-avatar');
@@ -905,7 +934,7 @@ test('keeps the other rows of an uploader when the row that fetched fails', asyn
   const staleAvatar = avatarOf('phase-6-stale-row.pdf');
 
   await expect(healthyAvatar).toHaveAttribute('src', /^blob:/);
-  await expect(healthyAvatar).toHaveAccessibleName('Аватар: Ада Лавлейс');
+  await expect(healthyAvatar).toHaveAttribute('alt', '');
   await expect
     .poll(() => healthyAvatar.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBe(2);

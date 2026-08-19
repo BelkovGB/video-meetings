@@ -29,15 +29,33 @@ type IdentityAvatarImage = {
   sharedKey?: string;
 };
 
-type IdentityAvatarProps = {
+type IdentityAvatarBaseProps = {
   /** `null` when there is no image to load, which renders the fallback. */
   image: IdentityAvatarImage | null;
-  accessibleName: string;
   /** Neutral glyph shown whenever no image is displayed. */
   fallback: string;
   testId: string;
   className?: string;
 };
+
+type IdentityAvatarProps = IdentityAvatarBaseProps &
+  (
+    | {
+        /** Names the avatar wherever nothing beside it names the person. */
+        accessibleName: string;
+        decorative?: false;
+      }
+    | {
+        /**
+         * Hides the avatar from assistive technology where adjacent text
+         * already names the person. Without it a list of files reads the
+         * uploader name twice in every row, once for the avatar and once for
+         * the text next to it.
+         */
+        decorative: true;
+        accessibleName?: never;
+      }
+  );
 
 /**
  * Tells the one failure the cache may answer by reading another holder's route
@@ -67,6 +85,7 @@ async function readAvatarFailure(response: Response): Promise<Error> {
 export function IdentityAvatar({
   image,
   accessibleName,
+  decorative = false,
   fallback,
   testId,
   className = '',
@@ -132,7 +151,8 @@ export function IdentityAvatar({
       <img
         data-testid={testId}
         src={imageUrl}
-        alt={accessibleName}
+        alt={decorative ? '' : accessibleName}
+        aria-hidden={decorative || undefined}
         className={`shrink-0 rounded-full object-cover ${className}`}
         onError={() => {
           // The image belongs to every component sharing this key, so it is the
@@ -149,8 +169,9 @@ export function IdentityAvatar({
   return (
     <span
       data-testid={testId}
-      role="img"
-      aria-label={accessibleName}
+      role={decorative ? undefined : 'img'}
+      aria-label={decorative ? undefined : accessibleName}
+      aria-hidden={decorative || undefined}
       className={`grid shrink-0 place-items-center rounded-full bg-slate-700 font-semibold text-cyan-50 ${className}`}
     >
       {fallback}

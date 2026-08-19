@@ -24,8 +24,3 @@ export function formatIdentityInitial(displayName: string | null): string {
 
   return trimmed ? Array.from(trimmed)[0].toLocaleUpperCase('ru-RU') : '?';
 }
-
-/** Names an uploader's avatar with the same identity the file row shows. */
-export function formatUploaderAvatarLabel(uploadedBy: UserIdentity | null): string {
-  return `Аватар: ${formatUploaderName(uploadedBy)}`;
-}

@@ -1,10 +1,7 @@
 'use client';
 
 import type { MeetingFile } from '../../../lib/api/contracts';
-import {
-  formatIdentityInitial,
-  formatUploaderAvatarLabel,
-} from '../../../lib/format/user-identity';
+import { formatIdentityInitial } from '../../../lib/format/user-identity';
 import { IdentityAvatar } from '../../components/identity-avatar';
 
 type MeetingFileUploaderAvatarProps = {
@@ -35,7 +32,9 @@ export function MeetingFileUploaderAvatar({ meetingId, file }: MeetingFileUpload
             }
           : null
       }
-      accessibleName={formatUploaderAvatarLabel(file.uploadedBy)}
+      // The row names the uploader in the text right beside this avatar, so a
+      // labelled image would make every row read that name twice.
+      decorative
       fallback={formatIdentityInitial(file.uploadedBy?.displayName ?? null)}
       testId="meeting-file-uploader-avatar"
       className="h-6 w-6 text-xs"
