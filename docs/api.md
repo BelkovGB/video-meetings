@@ -505,14 +505,20 @@ or EXIF payloads — is re-encoded as well, which strips what no viewer sees. On
 an avatar that is both within the box and already small is served byte for byte,
 as is one that no decoder accepts or that re-encodes no smaller; in those cases
 the response is the stored original at its full size. The derived picture keeps
-the source colour profile but not animation, so an animated avatar is a still
-first frame in a row while the profile page keeps its frames.
+the source colour profile when the profile is small, and drops it when it is
+not, because a colour profile of hundreds of kilobytes or more costs far more
+than the 96 px picture it describes; animation is dropped either way, so an
+animated avatar is a still first frame in a row while the profile page keeps its
+frames.
 
-The variant is derived when the avatar is uploaded, and on the first request for
-an avatar stored before that, then kept beside the original under the same
-storage key, so a replacement or a removal drops it with the avatar it was
-derived from and the route never serves a stale picture. `GET /users/me/avatar`
-is not a list context and still serves the original.
+The variant is derived when the avatar is uploaded, from the bytes the upload
+was verified against, and on the first request for an avatar stored before that,
+then kept beside the original under the same storage key, so a replacement or a
+removal drops it with the avatar it was derived from and the route never serves
+a stale picture. A decision not to derive is recorded and never revisited, while
+a derivation that failed is not: the next request tries again rather than
+leaving the avatar at full size for the life of the picture.
+`GET /users/me/avatar` is not a list context and still serves the original.
 
 Because the response stays `private, no-store`, a browser downloads it again on
 every view of the file list; what the variant bounds is the cost of each of

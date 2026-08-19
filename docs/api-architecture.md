@@ -91,11 +91,15 @@ writes its metadata to the user row. Failed validation and failed persistence
 discard the candidate or final object. Startup removes only `.part` files older
 than the configured safety window, so a second API instance cannot remove an
 active upload on a shared storage volume. `AvatarListVariantService`, also owned
-by `ProfileModule`, then derives a list-sized picture from the accepted upload
-and stores it beside the original as `AVATAR_DIR/<storageKey>/list-96`,
-publishing it through a `.part` file in `AVATAR_TEMP_DIR` like every other
-write; an empty `list-96` records that the original is already list-sized, so it
-is never copied twice. Deriving at upload keeps reads a plain file open, and
+by `ProfileModule`, then derives a list-sized picture from the bytes validation
+already read and stores it beside the original as
+`AVATAR_DIR/<storageKey>/list-96`, publishing it through a `.part` file in
+`AVATAR_TEMP_DIR` like every other write; an empty `list-96` records the
+decision that the original is what a list should receive — it is within the box
+and the byte budget, or re-encoding it pays nothing — so it is never copied
+twice. That marker is written only for a decision: a derivation that threw
+leaves nothing behind, so a transient decode failure does not pin the avatar to
+full-size delivery. Deriving at upload keeps reads a plain file open, and
 keeping the derived file under the avatar's own storage key means replacement,
 removal and reconciliation drop it with the avatar it belongs to. Retrieval has
 `GET /users/me/avatar`, which streams the requesting user's verified original

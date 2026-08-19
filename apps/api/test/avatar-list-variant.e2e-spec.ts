@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { stat, writeFile } from 'node:fs/promises';
+import { access, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import { deflateSync } from 'node:zlib';
 
 const sharp = createRequire(__filename)('sharp') as typeof import('sharp').default;
 
@@ -55,6 +56,37 @@ function withTextChunk(png: Buffer, payloadBytes: number): Buffer {
   // The IEND chunk is the trailing 12 bytes; ancillary chunks precede it.
   const end = png.length - 12;
   return Buffer.concat([png.subarray(0, end), chunk, png.subarray(end)]);
+}
+
+/**
+ * A valid PNG whose `iCCP` chunk holds a real colour profile padded with
+ * incompressible bytes, the way a LUT-based or device-link profile is
+ * legitimately hundreds of kilobytes. Validation accepts it untouched, so it is
+ * the payload that survives a resize when the profile is carried over.
+ */
+async function withIccProfile(png: Buffer, paddingBytes: number): Promise<Buffer> {
+  const source = await sharp(png).withMetadata({ icc: 'p3' }).png().toBuffer();
+  const profile = Buffer.concat([
+    (await sharp(source).metadata()).icc ?? Buffer.alloc(0),
+    randomBytes(paddingBytes),
+  ]);
+  profile.writeUInt32BE(profile.length, 0);
+
+  const payload = Buffer.concat([
+    Buffer.from('c', 'latin1'),
+    Buffer.from([0, 0]),
+    deflateSync(profile),
+  ]);
+  const chunk = Buffer.alloc(payload.length + 12);
+  chunk.writeUInt32BE(payload.length, 0);
+  chunk.write('iCCP', 4, 'latin1');
+  payload.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, 8 + payload.length)), 8 + payload.length);
+
+  // `iCCP` must precede the image data, so it goes straight after the 25-byte
+  // IHDR chunk that follows the 8-byte signature.
+  const at = 8 + 25;
+  return Buffer.concat([png.subarray(0, at), chunk, png.subarray(at)]);
 }
 
 async function createPng(size: number, tone: number): Promise<Buffer> {
@@ -201,6 +233,66 @@ describe('AvatarListVariantService', () => {
 
     const metadata = await sharp(await collect(content.stream)).metadata();
     expect(metadata.icc).toBeDefined();
+  });
+
+  it('drops a colour profile that costs more than the picture it describes', async () => {
+    // 96 px on both sides, so the box guard alone would serve it whole, and a
+    // megabyte of colour profile that a 24 px row cannot possibly use.
+    const original = await withIccProfile(await createPng(96, 20), 1024 * 1024);
+    const storageKey = await store(original);
+
+    const content = await variants.open(avatar(storageKey, original.length));
+    const served = await collect(content.stream);
+
+    // Carrying the profile over would leave the variant the size of the
+    // original, which is the per-view cost the variant exists to remove.
+    expect(served.length).toBeLessThan(16 * 1024);
+    expect(content.sizeBytes).toBe(served.length);
+    const metadata = await sharp(served).metadata();
+    expect(metadata.width).toBe(96);
+  });
+
+  it('retries a derivation that failed instead of recording it as a decision', async () => {
+    const original = await createPng(256, 60);
+    const storageKey = await store(original);
+    // One derivation sees bytes no decoder accepts, the way a libvips hiccup or
+    // memory pressure fails a decode that would otherwise succeed.
+    const readContent = jest
+      .spyOn(storage, 'readContent')
+      .mockResolvedValueOnce(Buffer.alloc(32 * 1024, 0x7f));
+
+    const failed = await variants.open(avatar(storageKey, original.length));
+    expect(await collect(failed.stream)).toEqual(original);
+    readContent.mockRestore();
+
+    // A transient failure must not be published as the "already list-sized"
+    // marker: that would pin this avatar to full-size delivery on every view
+    // of every file list for as long as it is the user's picture.
+    await expect(
+      access(join(avatarConfig.directory, storageKey, VARIANT_FILE)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const served = await collect((await variants.open(avatar(storageKey, original.length))).stream);
+    expect(served.length).toBeLessThan(original.length);
+  });
+
+  it('derives from the bytes it is handed at upload without reading the original again', async () => {
+    const original = await createPng(256, 150);
+    const storageKey = await store(original);
+    const readContent = jest.spyOn(storage, 'readContent');
+
+    try {
+      await variants.prepare(storageKey, 'image/png', original);
+
+      // The upload request already holds the picture it validated: reading it
+      // back off disk would double the peak cost of every avatar upload.
+      expect(readContent).not.toHaveBeenCalled();
+      const variant = await stat(join(avatarConfig.directory, storageKey, VARIANT_FILE));
+      expect(variant.size).toBeGreaterThan(0);
+      expect(variant.size).toBeLessThan(original.length);
+    } finally {
+      readContent.mockRestore();
+    }
   });
 
   it('reports a storage key whose object is gone as missing', async () => {

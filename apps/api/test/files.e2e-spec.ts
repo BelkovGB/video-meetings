@@ -1,7 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { access, readdir, rm } from 'node:fs/promises';
+import { access, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
@@ -680,6 +680,24 @@ describe('Meeting files (e2e)', () => {
       .expect(200);
 
     expect(Buffer.from(original.body as Buffer)).toEqual(wideAvatar);
+  });
+
+  it('derives the list variant when the avatar is uploaded, before any row reads it', async () => {
+    const owner = await registerUser();
+    const wideAvatar = await createWideAvatarPng(90);
+
+    await uploadAvatar(owner, wideAvatar);
+
+    // Deriving at upload is what keeps the read path a plain file open: a first
+    // view must not buffer and decode the original inside the request, and a
+    // burst of first views must not each do it.
+    const user = await prisma.user.findUnique({
+      where: { id: getUserId(owner.accessToken) },
+      select: { avatarStorageKey: true },
+    });
+    const variant = await stat(join(avatarConfig.directory, user!.avatarStorageKey!, 'list-96'));
+    expect(variant.size).toBeGreaterThan(0);
+    expect(variant.size).toBeLessThan(wideAvatar.length);
   });
 
   it('serves a list-sized variant of the replacement, not of the replaced avatar', async () => {
