@@ -6,3 +6,18 @@ import { tmpdir } from 'node:os';
 // paths live here instead of being re-derived in every spec.
 export const uploadRoot = join(tmpdir(), 'video-meetings-api-e2e-uploads');
 export const avatarUploadRoot = join(tmpdir(), 'video-meetings-api-e2e-avatars');
+
+export const uploadDirectory = join(uploadRoot, 'files');
+export const uploadTempDirectory = join(uploadRoot, 'temp');
+export const avatarDirectory = join(avatarUploadRoot, 'files');
+export const avatarTempDirectory = join(avatarUploadRoot, 'temp');
+
+// Every application start recreates the four directories themselves, so only
+// their contents may not survive a run: a stored file or a per-user directory
+// left behind is what makes the next start pay a reconciliation transaction.
+export const storageDirectories = [
+  uploadDirectory,
+  uploadTempDirectory,
+  avatarDirectory,
+  avatarTempDirectory,
+];

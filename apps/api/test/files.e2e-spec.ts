@@ -78,9 +78,12 @@ describe('Meeting files (e2e)', () => {
   afterAll(async () => {
     try {
       await app.close();
+    } finally {
+      // A failing close must not keep the roots: the leftovers would make every
+      // later application start in this run pay a reconciliation transaction
+      // per stale directory.
       await rm(uploadRoot, { recursive: true, force: true });
       await rm(avatarUploadRoot, { recursive: true, force: true });
-    } finally {
       clients.restore();
     }
   });

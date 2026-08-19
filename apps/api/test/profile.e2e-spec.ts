@@ -86,8 +86,11 @@ describe('Current user profile (e2e)', () => {
   afterAll(async () => {
     try {
       await app.close();
-      await rm(avatarUploadRoot, { recursive: true, force: true });
     } finally {
+      // A failing close must not keep the avatar root: the leftovers would make
+      // every later application start in this run pay a reconciliation
+      // transaction per stale directory.
+      await rm(avatarUploadRoot, { recursive: true, force: true });
       clients.restore();
     }
   });
