@@ -50,12 +50,16 @@ export type CurrentUserProfile = {
  * `userIdentitySelect` first.
  */
 export type UserIdentity = {
-  displayName: string | null;
   /**
-   * `key` names the image without naming its owner: it is equal for every file
-   * the same person uploaded to this meeting, and comparable nowhere else.
+   * Names the person within one meeting without naming them anywhere else: it
+   * is equal for every file they uploaded to this meeting, unrelated in any
+   * other, and it addresses their avatar route. It is not the user ID and
+   * cannot be turned back into one.
    */
-  avatar: { key: string; updatedAt: string } | null;
+  handle: string;
+  displayName: string | null;
+  /** `null` when the person has no avatar; `updatedAt` re-fetches a replaced one. */
+  avatar: { updatedAt: string } | null;
 };
 
 export type Meeting = {

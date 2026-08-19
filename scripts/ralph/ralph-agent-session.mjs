@@ -394,6 +394,10 @@ export function genericExitFailure(result, stderr, label) {
 // 90 минут три попытки — это 4,5 часа до первого сообщения оператору. Путь
 // разработки уже считает RALPH_AGENT_AUTH фатальным (ralph-loop.mjs), и ревью
 // не должно расходиться с ним.
+//
+// RALPH_AGENT_REJECTED сюда намеренно не входит: 403 «Request not allowed»
+// приходит и уходит сам, и повтор той же сессии — единственный способ его
+// пережить, не потеряв уже сделанную работу.
 const nonRetryableReviewCodes = new Set([
   'RALPH_AGENT_AUTH',
   'RALPH_AGENT_TIMEOUT',

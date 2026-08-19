@@ -20,7 +20,7 @@ JSON except for the multipart file-upload endpoint.
 | GET    | `/meetings/:id`                                      | Bearer JWT         |
 | POST   | `/meetings/:meetingId/files`                         | Bearer JWT         |
 | GET    | `/meetings/:meetingId/files`                         | Bearer JWT         |
-| GET    | `/meetings/:meetingId/files/:fileId/uploader-avatar` | Bearer JWT         |
+| GET    | `/meetings/:meetingId/uploaders/:handle/avatar`      | Bearer JWT         |
 | POST   | `/meetings/:meetingId/files/:fileId/download-ticket` | Bearer JWT         |
 | GET    | `/file-downloads/:ticket`                            | One-time ticket    |
 | DELETE | `/meetings/:meetingId/files/:fileId`                 | Bearer JWT (owner) |
@@ -357,7 +357,7 @@ Avatars are private user assets. Every route in this section uses the JWT subjec
 from the bearer token; neither a target user ID nor another user's avatar route
 is accepted. Another user reads an avatar only through the shared activity that
 carries its owner's identity — see
-`GET /meetings/:meetingId/files/:fileId/uploader-avatar`. The profile's `avatar`
+`GET /meetings/:meetingId/uploaders/:handle/avatar`. The profile's `avatar`
 field is `null` until an avatar exists, then contains only verified media
 metadata (`mimeType`, `sizeBytes`, and `updatedAt`) and never an internal
 storage key.
@@ -446,6 +446,7 @@ Successful requests return `201 Created`:
   "sizeBytes": 734003200,
   "uploadedAt": "2026-08-11T10:00:00.000Z",
   "uploadedBy": {
+    "handle": "T5cfLgm1Vb2VhV8Xz3rRDQ",
     "displayName": "Ada Lovelace",
     "avatar": {
       "key": "8f14e45fce5fa3b1c0c9d6ef2a7b41d3",
@@ -457,19 +458,24 @@ Successful requests return `201 Created`:
 
 `uploadedBy` is the uploader's safe identity, read from the user record on every
 request, so a renamed uploader or a replaced avatar shows the current value
-without rewriting stored files. It carries only a display name and the avatar
-state: email, the user ID, and every other private profile value stay out.
-`avatar.key` names that avatar without naming its owner: it is a MAC of the
-uploader's identity under the configured server secret, scoped to the containing
-meeting, so two files of one uploader share a key and a client can download and
-hold the image once, while the key reveals no user ID and matches nothing in
-another meeting. The same secret is configured for every API process, so the key
-is also the same from every instance and across restarts, and a client may keep
-its cache across a list refetch or an upload answered by another instance. The
-avatar bytes are served only by
-`GET /meetings/:meetingId/files/:fileId/uploader-avatar` below, never by a route
-that names the uploader. `displayName` is `null` until the uploader sets one,
-`avatar` is `null` while the uploader has none, and
+without rewriting stored files. It carries only an opaque handle, a display
+name, and the avatar state: email, the user ID, and every other private profile
+value stay out. The avatar bytes are served only by
+`GET /meetings/:meetingId/uploaders/:handle/avatar` below, never by a route that
+names the uploader.
+
+`handle` identifies the uploader within this meeting alone. Every file the same
+person uploaded to the meeting carries the same value, so a client can group
+them and fetch one avatar for all of them; the same person in another meeting
+gets an unrelated value that this meeting's routes reject, and the user ID
+cannot be derived from either. That is an authorization boundary, not
+anonymity: `displayName` and `avatar.updatedAt` — the latter also driving the
+avatar route's `ETag` — are the same values in every meeting, so a caller who
+shares two meetings with the uploader can still match the two handles to one
+person.
+
+`displayName` is `null` until the uploader sets one, `avatar` is `null` while
+the uploader has none, and
 `uploadedBy` itself is `null` when the uploading account no longer exists — the
 file stays listed and downloadable. Only the meeting owner and its participants
 ever see it; an outsider receives the same `404 Meeting not found` as before.
@@ -485,14 +491,14 @@ meeting returns the same `404 Meeting not found` response.
 Returns `200 OK` with the same metadata representation for each ready file,
 newest first. Internal storage keys and uploader IDs are never returned.
 
-### `GET /meetings/:meetingId/files/:fileId/uploader-avatar`
+### `GET /meetings/:meetingId/uploaders/:handle/avatar`
 
-Streams the avatar of the file's `uploadedBy` identity to the meeting owner or a
-participant, with the verified content type, `Content-Length`,
-`Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`. This
-is the only way another user reads that avatar: the meeting file is the subject,
-so the caller needs no uploader ID, gets no other profile field, and cannot
-reach the avatar of a user they share no meeting file with.
+`:handle` is the `uploadedBy.handle` value of a meeting file. The route streams
+that uploader's avatar to the meeting owner or a participant, with the verified
+content type, `Content-Length`, and `X-Content-Type-Options: nosniff`. This is
+the only way another user reads that avatar: the meeting is the subject, so the
+caller needs no uploader ID, gets no other profile field, and cannot reach the
+avatar of a user they share no meeting with.
 
 What this route streams is normally a list variant of the avatar, not the
 stored original: at most 96 px on each side and re-encoded in the stored format,
@@ -520,30 +526,40 @@ a derivation that failed is not: the next request tries again rather than
 leaving the avatar at full size for the life of the picture.
 `GET /users/me/avatar` is not a list context and still serves the original.
 
-Because the response stays `private, no-store`, a browser downloads it again on
-every view of the file list; what the variant bounds is the cost of each of
-those downloads, not their number.
+The variant and the revalidated caching below bound different costs and are both
+needed: the `ETag` keeps a repeat view to a `304` when the picture has not
+changed, while the variant bounds what a view that does download actually pays.
 
 Access is the containing meeting's own. An outsider receives the same
-`404 Meeting not found` as the other meeting-file routes, an unauthenticated
-request receives `401`, and a file ID outside the named meeting — including a
-deleted or not-yet-ready file — receives `404 File not found` with
-`code: "FILE_NOT_FOUND"`. That code is the one failure scoped to a single route:
-the uploader's avatar may still be read through another of their files, so a
-client sharing one download per uploader may retry once through a different
-file. No other failure of this route carries it, because `404 Meeting not found`
-and `404 Avatar not found` answer the same for every file of that uploader.
+`404 Meeting not found` as the meeting-file routes, an unauthenticated request
+receives `401`, and a handle that names nobody with a ready file in this
+meeting — including one minted for another meeting — receives
+`404 Avatar not found`.
 
 The user record is read on every request rather than captured at upload time, so
 a historical file never serves a stale avatar: after a replacement the route
 streams the new image, and after a removal, for an uploader who never set one,
-or for a deleted uploader account it returns `404 Avatar not found`. The
-`avatar.updatedAt` value in `uploadedBy` changes with each replacement, so a
-client can key its own cache on `avatar.key` together with `avatar.updatedAt`
-and read this route once per uploader instead of once per file. That cache is
-all the sharing there is: `private, no-store` deliberately keeps avatars out of
-the browser cache, so every reload and every return to the meeting downloads
-each shown uploader's variant again.
+or for a deleted uploader account it returns `404 Avatar not found`.
+
+Caching is revalidated, not skipped, because the URL is authorization-dependent:
+a successful response carries `Cache-Control: private, max-age=0, must-revalidate`,
+an `ETag` derived from the avatar's current version, and `Authorization` appended
+to `Vary` — appended, so the `Origin` the CORS layer contributes survives and the
+full field reads `Vary: Origin, Authorization`.
+`max-age=0` is stated rather than implied so no cache assigns a heuristic
+lifetime and reuses a replaced avatar unchecked. A request repeating the tag in
+`If-None-Match` receives `304 Not Modified` without a body, carrying the same
+tag and directives, and receives the new image with a new tag once the uploader
+replaces the avatar. Every `404` of this route instead carries
+`Cache-Control: private, no-store` and never the avatar's validator, so a denial
+is neither stored and replayed to a caller who does have access, nor
+revalidated later and served in place of the image.
+
+Because the handle is shared by every file of one uploader, a meeting with many
+files from one person costs one avatar request per uploader instead of one per
+file. Whether the next view revalidates or refetches is not guaranteed:
+`Vary: Authorization` keys the stored response on the exact bearer token, so a
+token rotation produces a full response rather than a `304`.
 
 ### `POST /meetings/:meetingId/files/:fileId/download-ticket`
 

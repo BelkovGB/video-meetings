@@ -747,12 +747,12 @@ test('shows the uploader avatar through the meeting, and falls back neutrally', 
 
   // An image the browser cannot load falls back instead of showing a broken one.
   await setAvatar(request, owner, firstAvatar);
-  await page.route('**/uploader-avatar', (route) => route.fulfill({ status: 500 }));
+  await page.route('**/uploaders/*/avatar', (route) => route.fulfill({ status: 500 }));
   await page.reload();
 
   await expect(namedAvatar).toHaveText('А');
   await expect(namedAvatar).not.toHaveAttribute('src');
-  await page.unroute('**/uploader-avatar');
+  await page.unroute('**/uploaders/*/avatar');
 
   // The failure is not remembered: coming back in the same session — through
   // links, so no reload clears the shared cache — reads the picture again
@@ -813,7 +813,7 @@ test('reads one uploader avatar per uploader, and drops it on leaving', async ({
 
   const avatarRequests: string[] = [];
   page.on('request', (sent) => {
-    if (sent.method() === 'GET' && sent.url().includes('/uploader-avatar')) {
+    if (sent.method() === 'GET' && sent.url().includes('/uploaders/')) {
       avatarRequests.push(sent.url());
     }
   });
@@ -856,14 +856,14 @@ test('reads one uploader avatar per uploader, and drops it on leaving', async ({
 
   // Leaving the list while the image is still arriving stops the download,
   // instead of letting a page nobody is looking at finish it.
-  await page.route('**/uploader-avatar', async (route) => {
+  await page.route('**/uploaders/*/avatar', async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 10_000));
     await route
       .fulfill({ status: 200, contentType: 'image/png', body: ownerAvatar })
       .catch(() => {});
   });
   const abandoned = page.waitForEvent('requestfailed', (failed) =>
-    failed.url().includes('/uploader-avatar'),
+    failed.url().includes('/uploaders/'),
   );
   await page.reload();
   await expect(avatars.first()).toBeVisible();
@@ -871,7 +871,7 @@ test('reads one uploader avatar per uploader, and drops it on leaving', async ({
 
   await expect(page).toHaveURL('/');
   expect((await abandoned).failure()?.errorText).toBeTruthy();
-  await page.unroute('**/uploader-avatar');
+  await page.unroute('**/uploaders/*/avatar');
 
   // The abandoned download leaves nothing behind: coming back in the same
   // session — no reload, so the cache is the one the abort tore down — loads
@@ -881,76 +881,6 @@ test('reads one uploader avatar per uploader, and drops it on leaving', async ({
   await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
   await expect(avatarOf('phase-6-shared-1.pdf')).toHaveAttribute('src', /^blob:/);
   await expect.poll(() => widthOf('phase-6-shared-1.pdf')).toBe(2);
-});
-
-test('keeps the other rows of an uploader when the row that fetched fails', async ({
-  page,
-  request,
-}) => {
-  const avatar = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
-    'base64',
-  );
-  const owner = await register(request, 'phase-6-avatar-row-failure');
-  const meeting = await createMeeting(request, owner);
-  await setDisplayName(request, owner, 'Ада Лавлейс');
-  await setAvatar(request, owner, avatar);
-  const staleFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-stale-row.pdf' });
-  const healthyFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-healthy-row.pdf' });
-  // The list is newest first, so this puts the failing row on top, where it is
-  // the row that starts the shared download.
-  await prisma.meetingFile.update({
-    where: { id: staleFile.id },
-    data: { createdAt: new Date('2026-08-15T10:00:00.000Z') },
-  });
-  await prisma.meetingFile.update({
-    where: { id: healthyFile.id },
-    data: { createdAt: new Date('2026-08-14T10:00:00.000Z') },
-  });
-  await authenticate(page, owner);
-
-  // The route answers 404 for a file that is gone, whatever the uploader's
-  // avatar is doing — a list grown stale in another tab is enough. One such row
-  // must not take the picture away from every other row of the same person.
-  const staleRequests: string[] = [];
-  await page.route(`**/files/${staleFile.id}/uploader-avatar`, (route) => {
-    staleRequests.push(route.request().url());
-    // The coded body the API sends for this file-scoped 404, and the only
-    // failure that says the picture may still be read through another row.
-    return route.fulfill({
-      status: 404,
-      contentType: 'application/json',
-      body: JSON.stringify({ message: 'File not found', code: 'FILE_NOT_FOUND' }),
-    });
-  });
-  await page.goto(`/meetings/${meeting.id}`);
-
-  const avatarOf = (name: string) =>
-    page
-      .getByRole('listitem')
-      .filter({ hasText: name })
-      .getByTestId('meeting-file-uploader-avatar');
-  const healthyAvatar = avatarOf('phase-6-healthy-row.pdf');
-  const staleAvatar = avatarOf('phase-6-stale-row.pdf');
-
-  await expect(healthyAvatar).toHaveAttribute('src', /^blob:/);
-  await expect(healthyAvatar).toHaveAttribute('alt', '');
-  await expect
-    .poll(() => healthyAvatar.evaluate((element) => (element as HTMLImageElement).naturalWidth))
-    .toBe(2);
-
-  // The picture belongs to the uploader, not to the file that happened to be
-  // read first, so the stale row shows it too — through the healthy row's
-  // route, which the same viewer is just as authorized to read.
-  await expect(staleAvatar).toHaveAttribute('src', /^blob:/);
-  expect(await staleAvatar.evaluate((element) => (element as HTMLImageElement).src)).toBe(
-    await healthyAvatar.evaluate((element) => (element as HTMLImageElement).src),
-  );
-
-  // The failing route is read once and then left alone: falling through to
-  // another row's route is a fallback, not a retry loop over every row.
-  expect(staleRequests).toHaveLength(1);
-  await page.unroute(`**/files/${staleFile.id}/uploader-avatar`);
 });
 
 test('stops at one avatar request when the failure is the same for every row', async ({
@@ -972,7 +902,7 @@ test('stops at one avatar request when the failure is the same for every row', a
 
   const avatarRequests: string[] = [];
   page.on('request', (sent) => {
-    if (sent.method() === 'GET' && sent.url().includes('/uploader-avatar')) {
+    if (sent.method() === 'GET' && sent.url().includes('/uploaders/')) {
       avatarRequests.push(sent.url());
     }
   });
@@ -996,7 +926,7 @@ test('stops at one avatar request when the failure is the same for every row', a
   // answers the same for every one of their files, so reading a second row
   // would only repeat the refusal — once per row, which is the duplication the
   // shared cache exists to remove.
-  await page.route('**/uploader-avatar', (route) =>
+  await page.route('**/uploaders/*/avatar', (route) =>
     route.fulfill({
       status: 404,
       contentType: 'application/json',
@@ -1006,31 +936,16 @@ test('stops at one avatar request when the failure is the same for every row', a
   await page.goto(`/meetings/${meeting.id}`);
 
   expect(await settledAvatarRequests()).toBe(1);
-  await page.unroute('**/uploader-avatar');
+  await page.unroute('**/uploaders/*/avatar');
 
   // An expired token or a failing API is the same story: the count stays at
   // one however many rows the uploader has.
   avatarRequests.length = 0;
-  await page.route('**/uploader-avatar', (route) => route.fulfill({ status: 500 }));
+  await page.route('**/uploaders/*/avatar', (route) => route.fulfill({ status: 500 }));
   await page.reload();
 
   expect(await settledAvatarRequests()).toBe(1);
-  await page.unroute('**/uploader-avatar');
-
-  // Even the failure that may be answered by another row's route is bounded:
-  // a whole list gone stale reads one alternate, not one route per row.
-  avatarRequests.length = 0;
-  await page.route('**/uploader-avatar', (route) =>
-    route.fulfill({
-      status: 404,
-      contentType: 'application/json',
-      body: JSON.stringify({ message: 'File not found', code: 'FILE_NOT_FOUND' }),
-    }),
-  );
-  await page.reload();
-
-  expect(await settledAvatarRequests()).toBe(2);
-  await page.unroute('**/uploader-avatar');
+  await page.unroute('**/uploaders/*/avatar');
 });
 
 test('reads one replacement for every row when the picture cannot be decoded', async ({
@@ -1052,7 +967,7 @@ test('reads one replacement for every row when the picture cannot be decoded', a
 
   const avatarRequests: string[] = [];
   page.on('request', (sent) => {
-    if (sent.method() === 'GET' && sent.url().includes('/uploader-avatar')) {
+    if (sent.method() === 'GET' && sent.url().includes('/uploaders/')) {
       avatarRequests.push(sent.url());
     }
   });
@@ -1067,7 +982,7 @@ test('reads one replacement for every row when the picture cannot be decoded', a
   // could not have caught: it verifies the picture at upload, so the bytes on
   // disk are readable and a fresh download can still succeed.
   let servedBodies = 0;
-  await page.route('**/uploader-avatar', (route) => {
+  await page.route('**/uploaders/*/avatar', (route) => {
     servedBodies += 1;
     return route.fulfill({
       status: 200,
@@ -1093,14 +1008,14 @@ test('reads one replacement for every row when the picture cannot be decoded', a
     )
     .toBe(1);
   expect(avatarRequests).toHaveLength(2);
-  await page.unroute('**/uploader-avatar');
+  await page.unroute('**/uploaders/*/avatar');
 
   // Every attempt refused is the other half of the story: the key gives up for
   // all of its rows at once, and stays given up for the rows mounted after it,
   // even once the bytes on the wire are readable again.
   avatarRequests.length = 0;
   let servesReadableBytes = false;
-  await page.route('**/uploader-avatar', (route) =>
+  await page.route('**/uploaders/*/avatar', (route) =>
     route.fulfill({
       status: 200,
       contentType: 'image/png',
@@ -1166,7 +1081,7 @@ test('reads one replacement for every row when the picture cannot be decoded', a
   }
 
   expect(avatarRequests).toHaveLength(2);
-  await page.unroute('**/uploader-avatar');
+  await page.unroute('**/uploaders/*/avatar');
 });
 
 test('participant can download but never sees the delete action', async ({ page, request }) => {

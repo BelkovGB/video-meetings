@@ -3,10 +3,8 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
-import { readApiErrorBody } from '../../lib/api/errors';
 import { readAccessToken } from '../../lib/auth/session';
 import {
-  AvatarSourceGoneError,
   acquireAvatarImage,
   discardAvatarImage,
   readAvatarImageAttempt,
@@ -17,18 +15,14 @@ type IdentityAvatarImage = {
   /**
    * API path that streams the image to the bearer token of this session. Every
    * caller passes a path the API already authorizes for the current viewer —
-   * `/users/me/avatar` for the account itself, and the meeting-file route for
-   * an uploader — so no component here needs, or may take, a user ID.
+   * `/users/me/avatar` for the account itself, and the meeting-scoped uploader
+   * route for someone else — so no component here needs, or may take, a user
+   * ID. The path names the person rather than the row showing them, so every
+   * component displaying one person shares it, and the image is read once.
    */
   path: string;
   /** Changes when the image is replaced, and re-fetches it. */
   updatedAt: string;
-  /**
-   * Names the image itself, so two components showing one person's avatar
-   * through different paths download and hold it once. Omitted where the path
-   * already identifies the image, as `/users/me/avatar` does.
-   */
-  sharedKey?: string;
 };
 
 type IdentityAvatarBaseProps = {
@@ -60,26 +54,6 @@ type IdentityAvatarProps = IdentityAvatarBaseProps &
   );
 
 /**
- * Tells the one failure the cache may answer by reading another holder's route
- * from the ones it must not. `FILE_NOT_FOUND` is the API saying this route is
- * gone — the meeting file behind this row no longer exists — while the
- * uploader's avatar is still served through their other files. Every other
- * failure, including a bare 404 for an avatar that was removed, answers the
- * same on all of that uploader's routes, so it stops the read at one request
- * instead of one per row.
- */
-async function readAvatarFailure(response: Response): Promise<Error> {
-  if (response.status === 404) {
-    const body = await readApiErrorBody(response);
-    if (body?.code === 'FILE_NOT_FOUND') {
-      return new AvatarSourceGoneError();
-    }
-  }
-
-  return new Error(`Unable to load avatar (${response.status})`);
-}
-
-/**
  * A user's avatar as everyone else in the product sees it: the image when it
  * loads, and the same accessible neutral fallback when it is absent, removed,
  * or unavailable.
@@ -93,7 +67,7 @@ export function IdentityAvatar({
   className = '',
 }: IdentityAvatarProps) {
   const [loaded, setLoaded] = useState<{ url: string; key: string; attempt: number } | null>(null);
-  const imageKey = image ? `${image.sharedKey ?? image.path}|${image.updatedAt}` : null;
+  const imageKey = image ? `${image.path}|${image.updatedAt}` : null;
   // Which image of this key the cache is on. Any component reporting one the
   // browser could not decode moves it, and every other component showing the
   // same key re-runs the effect below: the picture belongs to all of them, so
@@ -124,22 +98,16 @@ export function IdentityAvatar({
 
     let isActive = true;
     const path = image.path;
-    const lease = acquireAvatarImage(imageKey, {
-      // The route this component was given: another component sharing the key
-      // reads the same picture through its own, and the cache falls through to
-      // it if this one is gone.
-      id: path,
-      load: async (signal) => {
-        const response = await fetch(`${apiUrl}${path}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal,
-        });
-        if (!response.ok) {
-          throw await readAvatarFailure(response);
-        }
+    const lease = acquireAvatarImage(imageKey, async (signal) => {
+      const response = await fetch(`${apiUrl}${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal,
+      });
+      if (!response.ok) {
+        throw new Error(`Unable to load avatar (${response.status})`);
+      }
 
-        return response.blob();
-      },
+      return response.blob();
     });
 
     void lease.url.then(

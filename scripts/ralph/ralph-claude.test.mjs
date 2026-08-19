@@ -19,6 +19,7 @@ import {
   reviewClaudeArguments,
   runClaudeWithTurnLimit,
   verifyClaudeAuthentication,
+  sessionFailureCode,
 } from './ralph-claude-session.mjs';
 import { addUsage, hostPlaywrightBrowsersPath } from './ralph-agent-session.mjs';
 import { withFakeClaude } from './ralph-test-support.mjs';
@@ -512,11 +513,16 @@ test('a 401 from the real CLI is an auth failure even though its text matches no
   // Цена промаха — не косметика: RALPH_AGENT_AUTH останавливает цикл, а без
   // него итерация считается обычным сбоем сессии и Ralph повторяет её
   // maxIterations раз, каждый раз получая тот же 401.
+  //
+  // 403 раньше стоял здесь же и получал тот же код. Оказалось, это разные
+  // отказы: 401 гасит рабочий токен насовсем, а 403 приходит и уходит сам —
+  // трижды за сутки на живом токене, каждый раз останавливая цикл на самом
+  // дорогом шаге. Свой код делает его повторяемым.
   assert.equal(
     claudeBackend.readEvent(
       JSON.stringify({ ...recorded, api_error_status: 403, result: 'Forbidden' }),
     ).error.code,
-    'RALPH_AGENT_AUTH',
+    'RALPH_AGENT_REJECTED',
   );
   // Текстовая ветка остаётся: статус приходит не при каждом виде отказа.
   assert.equal(
@@ -665,4 +671,35 @@ test('the fake-claude output file stays a valid review payload path', () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('403 «Request not allowed» повторяется, 401 остаётся фатальным', () => {
+  // Оба приходят под текстом «Failed to authenticate», но означают разное.
+  // 403 пришёл трижды за сутки на рабочем токене и каждый раз останавливал цикл
+  // на самом дорогом шаге — финальном ревью milestone.
+  assert.equal(
+    sessionFailureCode(
+      { api_error_status: 403 },
+      'Failed to authenticate. API Error: 403 Request not allowed',
+    ),
+    'RALPH_AGENT_REJECTED',
+  );
+  // Статуса может не быть — тогда решает текст.
+  assert.equal(
+    sessionFailureCode({}, 'Failed to authenticate. API Error: 403 Request not allowed'),
+    'RALPH_AGENT_REJECTED',
+  );
+
+  // 401 — задокументированный отказ учётных данных: повтор вернёт то же самое.
+  assert.equal(
+    sessionFailureCode(
+      { api_error_status: 401 },
+      'Failed to authenticate. API Error: 401 OAuth access token is invalid.',
+    ),
+    'RALPH_AGENT_AUTH',
+  );
+  assert.equal(sessionFailureCode({}, 'not logged in'), 'RALPH_AGENT_AUTH');
+
+  // Обычный сбой сессии кода не получает и обрабатывается как всегда.
+  assert.equal(sessionFailureCode({}, 'Something else went wrong'), null);
 });

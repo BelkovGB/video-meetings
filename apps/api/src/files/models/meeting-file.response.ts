@@ -3,7 +3,7 @@ import { MeetingFile, Prisma } from '@prisma/client';
 import {
   UserIdentityResponse,
   toUserIdentityResponse,
-  userIdentityReadSelect,
+  userIdentitySelect,
 } from '../../users/models/user-identity.response';
 
 export const meetingFileSelect = {
@@ -14,7 +14,7 @@ export const meetingFileSelect = {
   mimeType: true,
   sizeBytes: true,
   createdAt: true,
-  uploadedBy: { select: userIdentityReadSelect },
+  uploadedBy: { select: userIdentitySelect },
 } satisfies Prisma.MeetingFileSelect;
 
 export type MeetingFileResponse = {
@@ -37,8 +37,8 @@ export function toMeetingFileResponse(file: SelectedMeetingFile): MeetingFileRes
     mimeType: file.mimeType,
     sizeBytes: file.sizeBytes,
     uploadedAt: file.createdAt,
-    // The meeting scopes the uploader's avatar key, and is not emitted: the
-    // caller already knows which meeting it asked about.
+    // The meeting scopes the uploader handle: the same person appears under one
+    // handle within a meeting and under an unrelated one in every other.
     uploadedBy: toUserIdentityResponse(file.uploadedBy, file.meetingId),
   };
 }

@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 const loadModule = createRequire(__filename);
 const sharp = loadModule('sharp') as typeof import('sharp').default;
 
-import { AvatarContent } from './avatar-content';
+import { AvatarBytes } from './avatar-content';
 import { LocalAvatarStorageService } from './local-avatar-storage.service';
 
 /** Twice the 24 px a file row paints, so a dense display still looks sharp. */
@@ -72,7 +72,7 @@ export class AvatarListVariantService {
 
   constructor(private readonly avatars: LocalAvatarStorageService) {}
 
-  async open(stored: StoredAvatar): Promise<AvatarContent> {
+  async open(stored: StoredAvatar): Promise<AvatarBytes> {
     const published = await this.openDerived(stored);
     if (published) {
       return published;
@@ -120,7 +120,7 @@ export class AvatarListVariantService {
    * is the recorded decision that the original is what a list should receive,
    * so it is served as it is rather than stored a second time.
    */
-  private async openDerived(stored: StoredAvatar): Promise<AvatarContent | null> {
+  private async openDerived(stored: StoredAvatar): Promise<AvatarBytes | null> {
     const variant = await this.avatars.openVariant(stored.storageKey, LIST_VARIANT_FILE);
     if (!variant) {
       return null;

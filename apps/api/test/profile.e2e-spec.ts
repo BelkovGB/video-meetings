@@ -2,7 +2,6 @@ import { INestApplication } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
@@ -15,6 +14,9 @@ import { AvatarListVariantService } from '../src/profile/avatar-list-variant.ser
 import { ProfileService } from '../src/profile/profile.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { UsersService } from '../src/users/services/users.service';
+import { teardownStorageSuite } from './support/storage-cleanup';
+import { avatarUploadRoot } from './support/storage-roots';
+import { TrustedProxyClients } from './support/trusted-proxy';
 
 type UserSession = {
   accessToken: string;
@@ -30,7 +32,6 @@ type Profile = {
 };
 
 const validPassword = 'secure-password-123';
-const avatarUploadRoot = join(tmpdir(), 'video-meetings-api-e2e-avatars');
 const validPng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4z8AAAAMBAQCc479ZAAAAAElFTkSuQmCC',
   'base64',
@@ -70,12 +71,11 @@ function getUserId(accessToken: string): string {
 
 describe('Current user profile (e2e)', () => {
   let app: INestApplication;
-  let authenticationRequestCount = 0;
-  const originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
+  const clients = new TrustedProxyClients();
 
   beforeAll(async () => {
     await rm(avatarUploadRoot, { recursive: true, force: true });
-    process.env.TRUSTED_PROXY_IPS = 'loopback';
+    clients.enable();
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -86,22 +86,19 @@ describe('Current user profile (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
-    await rm(avatarUploadRoot, { recursive: true, force: true });
-
-    if (originalTrustedProxyIps === undefined) {
-      delete process.env.TRUSTED_PROXY_IPS;
-    } else {
-      process.env.TRUSTED_PROXY_IPS = originalTrustedProxyIps;
-    }
+    // A failing close must not keep the avatar root — the leftovers would make
+    // every later application start in this run pay a reconciliation
+    // transaction per stale directory — and a failing removal must not keep the
+    // trusted-proxy environment, which the rest of the in-band run depends on.
+    await teardownStorageSuite({
+      close: () => app.close(),
+      storageRoots: [avatarUploadRoot],
+      restoreEnvironment: () => clients.restore(),
+    });
   });
 
   function authenticationRequest(path: '/auth/register' | '/auth/login') {
-    authenticationRequestCount += 1;
-
-    return request(app.getHttpServer())
-      .post(path)
-      .set('X-Forwarded-For', `198.51.100.${authenticationRequestCount}`);
+    return request(app.getHttpServer()).post(path).set('X-Forwarded-For', clients.nextAddress());
   }
 
   async function registerUser(prefix: string, password = validPassword): Promise<UserSession> {

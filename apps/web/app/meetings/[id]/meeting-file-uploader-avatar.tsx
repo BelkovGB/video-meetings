@@ -11,31 +11,30 @@ type MeetingFileUploaderAvatarProps = {
 
 /**
  * The uploader's avatar inside meeting activity. The image is read through the
- * meeting file that names the uploader, which is the only route the API
- * authorizes for another user's avatar, so the viewer needs no uploader ID and
- * reaches nothing else of that profile. Every file of one uploader shares the
- * avatar key the API sends, so the image is read once for all of their rows.
+ * meeting-scoped handle the API sends beside the file, which is the only route
+ * it authorizes for another user's avatar, so the viewer needs no uploader ID
+ * and reaches nothing else of that profile. The handle is the uploader's, not
+ * the file's, so every row of one uploader names one URL and the image is read
+ * once for all of them.
  */
 export function MeetingFileUploaderAvatar({ meetingId, file }: MeetingFileUploaderAvatarProps) {
-  const avatar = file.uploadedBy?.avatar ?? null;
+  const uploader = file.uploadedBy ?? null;
+  const avatar = uploader?.avatar ?? null;
 
   return (
     <IdentityAvatar
       image={
-        avatar
+        uploader && avatar
           ? {
-              path: `/meetings/${meetingId}/files/${file.id}/uploader-avatar`,
+              path: `/meetings/${meetingId}/uploaders/${encodeURIComponent(uploader.handle)}/avatar`,
               updatedAt: avatar.updatedAt,
-              // The path is per file, so without the uploader's avatar key each
-              // row of one uploader would download the same image again.
-              sharedKey: avatar.key,
             }
           : null
       }
       // The row names the uploader in the text right beside this avatar, so a
       // labelled image would make every row read that name twice.
       decorative
-      fallback={formatIdentityInitial(file.uploadedBy?.displayName ?? null)}
+      fallback={formatIdentityInitial(uploader?.displayName ?? null)}
       testId="meeting-file-uploader-avatar"
       className="h-6 w-6 text-xs"
     />
