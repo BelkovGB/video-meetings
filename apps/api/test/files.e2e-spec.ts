@@ -71,9 +71,12 @@ describe('Meeting files (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
-    await rm(uploadRoot, { recursive: true, force: true });
-    clients.restore();
+    try {
+      await app.close();
+      await rm(uploadRoot, { recursive: true, force: true });
+    } finally {
+      clients.restore();
+    }
   });
 
   async function registerUser(): Promise<UserSession> {
@@ -867,10 +870,15 @@ describe('Meeting files (e2e)', () => {
       .set('Authorization', `Bearer ${participant.accessToken}`)
       .expect(200);
 
-    await request(app.getHttpServer())
+    const removed = await request(app.getHttpServer())
       .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
+
+    // The caller owns the meeting, so only the avatar lookup may refuse: a bare
+    // status assertion would keep passing if the meeting guard started
+    // answering `Meeting not found` here instead.
+    expect(removed.body).toMatchObject({ message: 'Avatar not found' });
   });
 
   it('reports an avatar the uploader never had and a deleted uploader account as absent', async () => {
@@ -880,7 +888,7 @@ describe('Meeting files (e2e)', () => {
     await addParticipant(meeting.id, participant);
     const withoutAvatar = await uploadPdf(meeting.id, participant);
 
-    await request(app.getHttpServer())
+    const neverSet = await request(app.getHttpServer())
       .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(withoutAvatar)}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
@@ -890,9 +898,14 @@ describe('Meeting files (e2e)', () => {
     const handle = getUploaderHandle(uploaded);
     await prisma.user.delete({ where: { id: getUserId(participant.accessToken) } });
 
-    await request(app.getHttpServer())
+    const deletedAccount = await request(app.getHttpServer())
       .get(`/meetings/${meeting.id}/uploaders/${handle}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
+
+    // As above: the caller owns the meeting, so both refusals must name the
+    // avatar rather than the meeting.
+    expect(neverSet.body).toMatchObject({ message: 'Avatar not found' });
+    expect(deletedAccount.body).toMatchObject({ message: 'Avatar not found' });
   });
 });

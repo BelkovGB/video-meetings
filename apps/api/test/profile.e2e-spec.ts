@@ -85,9 +85,12 @@ describe('Current user profile (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
-    await rm(avatarUploadRoot, { recursive: true, force: true });
-    clients.restore();
+    try {
+      await app.close();
+      await rm(avatarUploadRoot, { recursive: true, force: true });
+    } finally {
+      clients.restore();
+    }
   });
 
   function authenticationRequest(path: '/auth/register' | '/auth/login') {

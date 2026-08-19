@@ -215,8 +215,14 @@ describe('Authentication rate limiting (e2e)', () => {
   });
 
   afterEach(async () => {
-    await app.close();
-    clients.restore();
+    // The environment must go back even when the shutdown rejects: this suite
+    // enables per test, and a leaked `loopback` would follow every later suite
+    // in the same worker.
+    try {
+      await app.close();
+    } finally {
+      clients.restore();
+    }
   });
 
   it.each(['/auth/register', '/auth/login'])(

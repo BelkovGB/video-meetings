@@ -30,12 +30,15 @@ export class TrustedProxyClients {
    * while the application is configured, not per request.
    */
   enable(): void {
-    if (this.enabled) {
-      throw new Error('The trusted-proxy environment is already enabled');
+    // A caller whose teardown threw before reaching `restore()` re-enters here
+    // still enabled. Capturing again would save this harness's own `loopback`
+    // as the original and never give the value back, so the first capture is
+    // the one that is kept; re-enabling is otherwise harmless.
+    if (!this.enabled) {
+      this.originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
+      this.enabled = true;
     }
 
-    this.originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
-    this.enabled = true;
     process.env.TRUSTED_PROXY_IPS = 'loopback';
   }
 
@@ -45,6 +48,10 @@ export class TrustedProxyClients {
     }
 
     this.enabled = false;
+    // Rate-limit buckets belong to the application, so the next `enable()`
+    // faces empty ones and may draw the block from the start again. The budget
+    // below is per application, not per file.
+    this.issuedAddressCount = 0;
 
     if (this.originalTrustedProxyIps === undefined) {
       delete process.env.TRUSTED_PROXY_IPS;
