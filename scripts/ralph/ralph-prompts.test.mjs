@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig } from './ralph-config.mjs';
+import { formatReviewComment } from './ralph-issue-contract.mjs';
 import { milestonePassReviewIsClean } from './ralph-milestone-review.mjs';
 import {
   buildIndependentReviewPrompt,
@@ -624,8 +625,17 @@ test('порог важности убирает право останавлив
     ['P1'],
   );
   assert.equal(blocking.verdict, 'fail');
-  // Отброшенные не исчезают бесследно: сводка называет их число.
+  // Отброшенные не исчезают бесследно: сводка называет их число, а сами они
+  // уходят в отдельное поле и печатаются в комментарии целиком.
   assert.match(blocking.summary, /2 finding\(s\) below the P1 severity floor/);
+  assert.deepEqual(
+    blocking.belowFloorFindings.map((finding) => finding.title),
+    ['Missing coverage', 'Hardcoded number'],
+  );
+  const comment = formatReviewComment(blocking);
+  assert.match(comment, /Below the severity floor \(not blocking\)/);
+  assert.match(comment, /Missing coverage/);
+  assert.match(comment, /Hardcoded number/);
 
   // Ничего выше порога — работать не над чем, и отклонять нечего. Именно этот
   // случай крутил цикл всю ночь: замечания были, но ни одного важнее P3.

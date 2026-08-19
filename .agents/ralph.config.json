@@ -6,9 +6,14 @@
   "stopAfterFirstIssue": false,
   "phases": [
     {
-      "milestone": "Phase 8: Password Change Screen",
-      "branch": "features/profile-phase-8",
+      "milestone": "Phase 5: User Identity in Shared Activity API",
+      "branch": "features/profile-phase-5",
       "baseBranch": "master"
+    },
+    {
+      "milestone": "Phase 6: User Identity in Shared Activity UI",
+      "branch": "features/profile-phase-6",
+      "baseBranch": "features/profile-phase-5"
     }
   ],
   "maxIterations": 36,
@@ -28,7 +33,8 @@
   "developmentEffort": "medium",
   "autoApproveConfiguredIssues": true,
   "trustedIssueAuthors": [
-    "codex-ai-Goo", "cloude-ai-Goo"
+    "codex-ai-Goo",
+    "cloude-ai-Goo"
   ],
   "rulesFile": ".agents/ralph-rules.md",
   "prompt": "Возьми issue #{issue_number} «{issue_title}» из milestone «{milestone}» и реализуй её. Твой полный контракт — правила Ralph Loop, переданные ниже в этом же prompt, и AGENTS.md. Не читай .agents/RALPH.md: это операторская документация, она не нужна для реализации.",

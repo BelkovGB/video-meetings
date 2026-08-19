@@ -363,16 +363,41 @@ function readClaudeEvent(line) {
   }
 
   const error = new Error(`Claude завершил сессию с ошибкой: ${resultText || event.subtype}`);
-  if (isAuthenticationFailure(event, resultText)) {
-    error.code = 'RALPH_AGENT_AUTH';
+  const code = sessionFailureCode(event, resultText);
+  if (code) {
+    error.code = code;
   }
   return { error, telemetry };
 }
 
-const authenticationStatuses = new Set([401, 403]);
+const authenticationStatuses = new Set([401]);
 
 const authenticationTexts =
   /not logged in|authentication_failed|failed to authenticate|invalid api key|(?:api key|access token) is invalid/i;
+
+/**
+ * 403 «Request not allowed» — не отказ авторизации, хотя приходит под тем же
+ * текстом «Failed to authenticate».
+ *
+ * Отличается он поведением: тот же токен работает минутой раньше и минутой
+ * позже. За сутки этот код пришёл трижды — один раз положил девять
+ * одновременных агентов разом, дважды пришёл в одиночную сессию, — и каждый раз
+ * останавливал цикл на самом дорогом шаге. В справочнике ошибок Anthropic он не
+ * описан вовсе; в трекере claude-code он тянется больше года как
+ * перемежающийся сбой сервиса на активной подписке.
+ *
+ * Поэтому он получает свой код и повторяется, а фатальным остаётся 401 —
+ * задокументированный отказ учётных данных, где повтор вернул бы то же самое.
+ */
+const transientRejectionTexts = /request not allowed/i;
+
+export function sessionFailureCode(event, resultText) {
+  const text = resultText || '';
+  if (event.api_error_status === 403 || transientRejectionTexts.test(text)) {
+    return 'RALPH_AGENT_REJECTED';
+  }
+  return isAuthenticationFailure(event, text) ? 'RALPH_AGENT_AUTH' : null;
+}
 
 /**
  * Отказ авторизации распознаётся по HTTP-статусу события, а не только по тексту.

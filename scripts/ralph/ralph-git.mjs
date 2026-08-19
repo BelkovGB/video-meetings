@@ -93,24 +93,39 @@ export function issueChangedPaths(issue, commit, execute = run) {
 }
 
 /**
- * Пути из `git status --porcelain`: формат `XY <путь>`, а для переименования —
- * `R  старый -> новый`, где нужен последний.
+ * Разбор `git status --porcelain` в записи `{index, worktree, path}`.
+ *
+ * Формат — `XY <путь>`, где X описывает индекс, Y рабочее дерево, а
+ * переименование записано как `старый -> новый`, и нужен последний.
+ *
+ * Колонки разбираются, а не отбрасываются: от них зависит, надо ли путь вообще
+ * стадировать. Файл, удалённый через `git rm`, стоит как `D ` — его нет ни в
+ * дереве, ни в индексе, и `git add` по такому пути отвечает `did not match any
+ * files` с кодом 128. На issue #91 это уронило прогон после пятнадцати минут,
+ * когда работа была уже сделана.
+ *
+ * Отрезать ровно три символа нельзя: `run` обрезает пробелы по краям вывода, и
+ * первая строка приходит без ведущего пробела статуса. Раньше срез съедал
+ * первый символ её пути — `apps/web/...` превращался в `pps/web/...`.
  */
+export function workingTreeEntries(status) {
+  const entries = new Map();
+  for (const line of String(status ?? '').split(/\r?\n/)) {
+    if (line.trim() === '') continue;
+    // После двух колонок статуса porcelain всегда ставит ровно один пробел.
+    // Если на третьей позиции его нет, значит обрезка съела ведущий пробел
+    // первой строки и колонка индекса пуста.
+    const restored = line[2] === ' ' ? line : ` ${line}`;
+    const filePath = restored.slice(2).trim().split(' -> ').at(-1);
+    if (filePath) {
+      entries.set(filePath, { index: restored[0], worktree: restored[1], path: filePath });
+    }
+  }
+  return [...entries.values()];
+}
+
 export function workingTreePaths(status) {
-  return [
-    ...new Set(
-      String(status ?? '')
-        .split(/\r?\n/)
-        .filter(Boolean)
-        // Отрезать ровно три символа нельзя: `run` обрезает пробелы по краям
-        // вывода, и первая строка приходит без ведущего пробела статуса. Срез
-        // съедал первый символ её пути, `apps/web/...` превращался в
-        // `pps/web/...`, и путь переставал совпадать с чем бы то ни было.
-        .map((line) => line.trim().replace(/^\S{1,2}\s+/, ''))
-        .map((line) => line.split(' -> ').at(-1))
-        .filter(Boolean),
-    ),
-  ];
+  return workingTreeEntries(status).map((entry) => entry.path);
 }
 
 /**

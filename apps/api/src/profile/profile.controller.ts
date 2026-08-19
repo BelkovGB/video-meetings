@@ -28,11 +28,15 @@ import { avatarConfig } from './avatar.config';
 import { AvatarUploadExceptionFilter } from './avatar-upload-exception.filter';
 import { PasswordChangeRateLimitGuard } from './password-change-rate-limit.guard';
 import { ProfileService } from './profile.service';
+import { UserAvatarService } from './user-avatar.service';
 
 @Controller('users/me')
 @UseGuards(JwtAuthGuard)
 export class ProfileController {
-  constructor(private readonly profileService: ProfileService) {}
+  constructor(
+    private readonly profileService: ProfileService,
+    private readonly userAvatars: UserAvatarService,
+  ) {}
 
   @Post('avatar')
   @UseFilters(AvatarUploadExceptionFilter)
@@ -62,7 +66,7 @@ export class ProfileController {
     @Req() request: AuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
   ): Promise<StreamableFile> {
-    const avatar = await this.profileService.openCurrentAvatar(request.user.sub);
+    const avatar = await this.userAvatars.open(request.user.sub);
     response.status(HttpStatus.OK).set({
       'Cache-Control': 'private, no-store',
       'Content-Length': String(avatar.sizeBytes),

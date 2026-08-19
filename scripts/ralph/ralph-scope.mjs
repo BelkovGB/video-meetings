@@ -237,6 +237,9 @@ export function applySeverityFloor(review, floor, label = 'Review') {
   console.log(
     `${label}: ${belowFloor} замечаний ниже порога ${floor} не блокируют работу и остаются в отчёте.`,
   );
+  // Замечания уходят в отдельное поле, а не в никуда. Первая версия просто
+  // вырезала их из `findings`, и отчёт выходил с пустым списком под фразой
+  // «четыре замечания ниже порога» — то есть ровно с тем, чего обещал не делать.
   return {
     ...review,
     verdict: blocking.length > 0 ? 'fail' : 'pass',
@@ -244,6 +247,7 @@ export function applySeverityFloor(review, floor, label = 'Review') {
       `${review.summary} ${belowFloor} finding(s) below the ${floor} severity floor are reported ` +
       'but do not block the work.',
     findings: blocking,
+    belowFloorFindings: review.findings.filter((finding) => !findingBlocks(finding, floor)),
   };
 }
 

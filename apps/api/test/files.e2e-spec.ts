@@ -1,22 +1,41 @@
 import { INestApplication } from '@nestjs/common';
+import { MeetingFileStatus } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { access, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { configureHttpApplication } from '../src/http-application';
 import { MeetingFileDeletionReconciliationService } from '../src/files/services/meeting-file-deletion-reconciliation.service';
+import { MeetingUploaderAvatarService } from '../src/files/services/meeting-uploader-avatar.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { teardownStorageSuite } from './support/storage-cleanup';
+import { avatarUploadRoot, uploadRoot } from './support/storage-roots';
+import { TrustedProxyClients } from './support/trusted-proxy';
 
 type Meeting = { id: string };
 type UserSession = { accessToken: string };
-type UploadedFile = { id: string };
+type UploadedFile = {
+  id: string;
+  uploadedBy: {
+    handle: string;
+    displayName: string | null;
+    avatar: { updatedAt: string } | null;
+  } | null;
+};
 
 const validPassword = 'secure-password-123';
 const validDate = '2026-08-03T10:00:00.000Z';
-const uploadRoot = join(tmpdir(), 'video-meetings-api-e2e-uploads');
+const validPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4z8AAAAMBAQCc479ZAAAAAElFTkSuQmCC',
+  'base64',
+);
+const replacementPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEklEQVQImWM4IRd1Qi6KAUIBACTGBQFoaYMtAAAAAElFTkSuQmCC',
+  'base64',
+);
 
 function createUniqueValue(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -33,27 +52,46 @@ function createTicketHash() {
 describe('Meeting files (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
+  // Each registration comes from its own client address: the suite creates more
+  // accounts per minute than one client may, and sharing an address would fail
+  // it on the authentication rate limit instead of on a meeting-file defect.
+  const clients = new TrustedProxyClients();
 
   beforeAll(async () => {
+    // The uploader-avatar tests write to the avatar root as well, so both roots
+    // are cleared here and after the suite: leftovers survive the e2e database,
+    // and every later application start pays a reconciliation transaction per
+    // stale directory.
     await rm(uploadRoot, { recursive: true, force: true });
+    await rm(avatarUploadRoot, { recursive: true, force: true });
+    clients.enable();
 
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
 
     app = moduleRef.createNestApplication();
+    configureHttpApplication(app);
     await app.init();
     prisma = app.get(PrismaService);
   });
 
   afterAll(async () => {
-    await app.close();
-    await rm(uploadRoot, { recursive: true, force: true });
+    // A failing close must not keep the roots — the leftovers would make every
+    // later application start in this run pay a reconciliation transaction per
+    // stale directory — and a failing removal must not keep the trusted-proxy
+    // environment, which the rest of the in-band run depends on.
+    await teardownStorageSuite({
+      close: () => app.close(),
+      storageRoots: [uploadRoot, avatarUploadRoot],
+      restoreEnvironment: () => clients.restore(),
+    });
   });
 
   async function registerUser(): Promise<UserSession> {
     const response = await request(app.getHttpServer())
       .post('/auth/register')
+      .set('X-Forwarded-For', clients.nextAddress())
       .send({ email: createEmail('file-user'), password: validPassword })
       .expect(201);
 
@@ -84,6 +122,22 @@ describe('Meeting files (e2e)', () => {
     });
   }
 
+  async function setDisplayName(user: UserSession, displayName: string): Promise<void> {
+    await request(app.getHttpServer())
+      .patch('/users/me')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ displayName })
+      .expect(200);
+  }
+
+  async function uploadAvatar(user: UserSession, image: Buffer = validPng): Promise<void> {
+    await request(app.getHttpServer())
+      .post('/users/me/avatar')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .attach('avatar', image, { filename: 'portrait.png', contentType: 'image/png' })
+      .expect(201);
+  }
+
   async function uploadPdf(meetingId: string, owner: UserSession): Promise<UploadedFile> {
     const response = await request(app.getHttpServer())
       .post(`/meetings/${meetingId}/files`)
@@ -95,6 +149,18 @@ describe('Meeting files (e2e)', () => {
       .expect(201);
 
     return response.body as UploadedFile;
+  }
+
+  function getUploadedBy(file: UploadedFile): NonNullable<UploadedFile['uploadedBy']> {
+    if (!file.uploadedBy) {
+      throw new Error('The uploaded file carries no uploader identity');
+    }
+
+    return file.uploadedBy;
+  }
+
+  function getUploaderHandle(file: UploadedFile): string {
+    return getUploadedBy(file).handle;
   }
 
   it('stores an allowed file and returns its metadata in the meeting list', async () => {
@@ -392,5 +458,553 @@ describe('Meeting files (e2e)', () => {
     await expect(
       prisma.meetingFile.findUnique({ where: { id: uploaded.id } }),
     ).resolves.not.toBeNull();
+  });
+
+  it('returns the uploader current display name and avatar state to owners and participants', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await setDisplayName(participant, 'Ada Lovelace');
+    await uploadAvatar(participant);
+
+    const uploaded = await uploadPdf(meeting.id, participant);
+
+    expect(uploaded.uploadedBy).toEqual({
+      handle: expect.any(String),
+      displayName: 'Ada Lovelace',
+      avatar: { updatedAt: expect.any(String) },
+    });
+
+    for (const viewer of [owner, participant]) {
+      const listed = await request(app.getHttpServer())
+        .get(`/meetings/${meeting.id}/files`)
+        .set('Authorization', `Bearer ${viewer.accessToken}`)
+        .expect(200);
+
+      expect(listed.body).toEqual([
+        expect.objectContaining({
+          id: uploaded.id,
+          uploadedBy: {
+            handle: getUploaderHandle(uploaded),
+            displayName: 'Ada Lovelace',
+            avatar: { updatedAt: expect.any(String) },
+          },
+        }),
+      ]);
+    }
+  });
+
+  it('never exposes the uploader email, identifier, or avatar storage details', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Grace Hopper');
+    await uploadAvatar(owner);
+    await uploadPdf(meeting.id, owner);
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const serialized = JSON.stringify(listed.body);
+    expect(serialized).not.toContain('@example.com');
+    expect(serialized).not.toContain(getUserId(owner.accessToken));
+    expect(Object.keys(listed.body[0].uploadedBy)).toEqual(['handle', 'displayName', 'avatar']);
+    expect(Object.keys(listed.body[0].uploadedBy.avatar)).toEqual(['updatedAt']);
+  });
+
+  it('reports the display name the uploader has now, not the one stored at upload time', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Original Name');
+    const uploaded = await uploadPdf(meeting.id, owner);
+    await setDisplayName(owner, 'Renamed Owner');
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(listed.body).toEqual([
+      expect.objectContaining({
+        id: uploaded.id,
+        uploadedBy: {
+          handle: getUploaderHandle(uploaded),
+          displayName: 'Renamed Owner',
+          avatar: null,
+        },
+      }),
+    ]);
+  });
+
+  it('reports an absent avatar and an unset display name as null', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    await request(app.getHttpServer())
+      .delete('/users/me/avatar')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(listed.body).toEqual([
+      expect.objectContaining({
+        id: uploaded.id,
+        uploadedBy: {
+          handle: getUploaderHandle(uploaded),
+          displayName: null,
+          avatar: null,
+        },
+      }),
+    ]);
+  });
+
+  it('keeps listing a file whose uploader account is gone, without an uploader identity', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await setDisplayName(participant, 'Departing Participant');
+    const uploaded = await uploadPdf(meeting.id, participant);
+
+    await prisma.user.delete({ where: { id: getUserId(participant.accessToken) } });
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(listed.body).toEqual([expect.objectContaining({ id: uploaded.id, uploadedBy: null })]);
+  });
+
+  it('does not reveal the uploader identity to a user outside the meeting', async () => {
+    const owner = await registerUser();
+    const outsider = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Hidden Owner');
+    await uploadPdf(meeting.id, owner);
+
+    const denied = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`)
+      .expect(404);
+
+    expect(JSON.stringify(denied.body)).not.toContain('Hidden Owner');
+  });
+  it('gives every file of one uploader the same meeting-scoped handle', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const otherMeeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+
+    const first = await uploadPdf(meeting.id, owner);
+    const second = await uploadPdf(meeting.id, owner);
+    const byParticipant = await uploadPdf(meeting.id, participant);
+    const elsewhere = await uploadPdf(otherMeeting.id, owner);
+
+    expect(getUploaderHandle(second)).toBe(getUploaderHandle(first));
+    expect(getUploaderHandle(byParticipant)).not.toBe(getUploaderHandle(first));
+    expect(getUploaderHandle(elsewhere)).not.toBe(getUploaderHandle(first));
+    expect(getUploaderHandle(first)).not.toContain(getUserId(owner.accessToken));
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const handles = (listed.body as UploadedFile[]).map(getUploaderHandle);
+    expect(new Set(handles).size).toBe(2);
+  });
+
+  it('scopes only the handle per meeting and keeps the sibling uploader fields identical', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const otherMeeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Ada Lovelace');
+    await uploadAvatar(owner);
+
+    const here = getUploadedBy(await uploadPdf(meeting.id, owner));
+    const elsewhere = getUploadedBy(await uploadPdf(otherMeeting.id, owner));
+
+    expect(elsewhere.handle).not.toBe(here.handle);
+    expect(here.displayName).toBe('Ada Lovelace');
+    expect(elsewhere.displayName).toBe(here.displayName);
+    expect(here.avatar).not.toBeNull();
+    expect(elsewhere.avatar).toEqual(here.avatar);
+
+    const [avatar, otherAvatar] = await Promise.all([
+      request(app.getHttpServer())
+        .get(`/meetings/${meeting.id}/uploaders/${here.handle}/avatar`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200),
+      request(app.getHttpServer())
+        .get(`/meetings/${otherMeeting.id}/uploaders/${elsewhere.handle}/avatar`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200),
+    ]);
+
+    expect(avatar.headers.etag).toMatch(/^"[^"]+"$/);
+    expect(otherAvatar.headers.etag).toBe(avatar.headers.etag);
+  });
+
+  it('streams the uploader current avatar to the meeting owner and to participants', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await uploadAvatar(participant);
+    const uploaded = await uploadPdf(meeting.id, participant);
+
+    for (const viewer of [owner, participant]) {
+      const response = await request(app.getHttpServer())
+        .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
+        .set('Authorization', `Bearer ${viewer.accessToken}`)
+        .expect('Content-Type', /image\/png/)
+        .expect('Cache-Control', 'private, max-age=0, must-revalidate')
+        // The route appends its own field to the `Vary: Origin` that the CORS
+        // layer contributes, instead of replacing it: on a URL this route makes
+        // cache-eligible, dropping a field a shared middleware added would let a
+        // cache key the entry on too little.
+        .expect('Vary', 'Origin, Authorization')
+        .expect('X-Content-Type-Options', 'nosniff')
+        .expect(200);
+
+      expect(response.headers.etag).toEqual(expect.any(String));
+      expect(Buffer.from(response.body as Buffer)).toEqual(validPng);
+    }
+  });
+
+  it('answers a revalidation with 304 until the avatar is replaced', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+    const first = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const etag = first.headers.etag as string;
+    expect(etag).toMatch(/^"[^"]+"$/);
+
+    const revalidated = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .set('If-None-Match', etag)
+      .expect(304);
+
+    expect(revalidated.headers['content-length']).toBeUndefined();
+    expect(revalidated.body).toEqual({});
+    // A 304 that drops the validator or the directives leaves the stored copy
+    // unrevalidatable, so the header block is asserted on this path too.
+    expect(revalidated.headers.etag).toBe(etag);
+    expect(revalidated.headers['cache-control']).toBe('private, max-age=0, must-revalidate');
+    expect(revalidated.headers.vary).toBe('Origin, Authorization');
+
+    await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .set('If-None-Match', `W/${etag}, "other"`)
+      .expect(304);
+
+    await uploadAvatar(owner, replacementPng);
+
+    const refreshed = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .set('If-None-Match', etag)
+      .expect(200);
+
+    expect(refreshed.headers.etag).not.toBe(etag);
+    expect(Buffer.from(refreshed.body as Buffer)).toEqual(replacementPng);
+  });
+
+  it('denies the uploader avatar outside the meeting and to an unauthenticated caller', async () => {
+    const owner = await registerUser();
+    const outsider = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Hidden Uploader');
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+    const served = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const denied = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${outsider.accessToken}`)
+      .expect(404);
+
+    expect(denied.body).toMatchObject({ message: 'Meeting not found' });
+    expect(JSON.stringify(denied.body)).not.toContain('Hidden Uploader');
+    // A 404 is heuristically cacheable, and this URL is otherwise made
+    // cache-eligible, so a shared cache must not keep the outsider denial and
+    // replay it to a participant. It must also never carry the avatar's own
+    // validator, or a client would revalidate the error body successfully and
+    // go on serving it in place of the image.
+    expect(denied.headers['cache-control']).toBe('private, no-store');
+    expect(denied.headers.vary).toBe('Origin, Authorization');
+    expect(denied.headers.etag).not.toBe(served.headers.etag);
+
+    await request(app.getHttpServer()).get(url).expect(401);
+  });
+
+  it('refuses a handle minted for another meeting and an unknown handle', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const otherMeeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const handle = getUploaderHandle(uploaded);
+
+    const foreignHandle = await request(app.getHttpServer())
+      .get(`/meetings/${otherMeeting.id}/uploaders/${handle}/avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    const unknownHandle = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/uploaders/${getUserId(owner.accessToken)}/avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    // The caller owns both meetings, so these two must come from the handle
+    // lookup and not from the meeting guard: a bare status assertion would keep
+    // passing if the route started refusing the caller the meeting itself.
+    expect(foreignHandle.body).toMatchObject({ message: 'Avatar not found' });
+    expect(unknownHandle.body).toMatchObject({ message: 'Avatar not found' });
+  });
+
+  // The handle names an uploader with a ready file in the meeting, so a file
+  // that left that state must no longer answer for them. Deletion removes the
+  // row; these states leave one behind, and only the query's status filter
+  // keeps it from minting a handle.
+  it.each([MeetingFileStatus.DELETING, MeetingFileStatus.MISSING])(
+    'stops serving the avatar once the uploader last file turns %s',
+    async (status) => {
+      const owner = await registerUser();
+      const participant = await registerUser();
+      const meeting = await createMeeting(owner.accessToken);
+      await addParticipant(meeting.id, participant);
+      await uploadAvatar(participant);
+      const uploaded = await uploadPdf(meeting.id, participant);
+      const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+      await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200);
+
+      await prisma.meetingFile.update({ where: { id: uploaded.id }, data: { status } });
+
+      const revoked = await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(404);
+
+      expect(revoked.body).toMatchObject({ message: 'Avatar not found' });
+    },
+  );
+
+  it('does not label a 404 body with the avatar validator when the object is gone', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+    const served = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    // The metadata naming a version survives; the object behind it does not, so
+    // the version resolves but the open fails.
+    await prisma.user.update({
+      where: { id: getUserId(owner.accessToken) },
+      data: { avatarStorageKey: null },
+    });
+
+    const missing = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    expect(missing.body).toMatchObject({ message: 'Avatar not found' });
+    // Shipping the avatar's tag here would let a client revalidate the error
+    // body and keep serving it in place of the image for as long as the
+    // recorded version is unchanged.
+    expect(missing.headers.etag).not.toBe(served.headers.etag);
+    expect(missing.headers['cache-control']).toBe('private, no-store');
+  });
+
+  it('labels a body streamed after a mid-request replacement with the version it carries', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+    const served = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    // The uploader replaces the avatar in the window between resolving the
+    // version and opening the object, which the route cannot narrow away.
+    const avatars = app.get(MeetingUploaderAvatarService);
+    const describe = avatars.describe.bind(avatars);
+    const raceOnce = jest
+      .spyOn(avatars, 'describe')
+      .mockImplementationOnce(async (meetingId, uploaderHandle, userId) => {
+        const version = await describe(meetingId, uploaderHandle, userId);
+        await uploadAvatar(owner, replacementPng);
+
+        return version;
+      });
+
+    try {
+      const raced = await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200);
+
+      expect(raceOnce).toHaveBeenCalledTimes(1);
+      expect(Buffer.from(raced.body as Buffer)).toEqual(replacementPng);
+      // The published validator must describe the bytes that were streamed, not
+      // the version read before them: a client storing this entry revalidates
+      // it successfully and would otherwise keep serving the replaced image.
+      expect(raced.headers.etag).not.toBe(served.headers.etag);
+
+      const settled = await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200);
+
+      expect(settled.headers.etag).toBe(raced.headers.etag);
+
+      await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .set('If-None-Match', raced.headers.etag as string)
+        .expect(304);
+    } finally {
+      raceOnce.mockRestore();
+    }
+  });
+
+  it('revokes the avatar handle once the uploader has no ready file left in the meeting', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await uploadAvatar(owner);
+    const first = await uploadPdf(meeting.id, owner);
+    const second = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(first)}/avatar`;
+
+    await request(app.getHttpServer())
+      .delete(`/meetings/${meeting.id}/files/${first.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(204);
+
+    // The handle names the uploader, not the file it was read from, so any
+    // other ready file of theirs keeps the same URL alive.
+    await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .delete(`/meetings/${meeting.id}/files/${second.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(204);
+
+    const revoked = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .expect(404);
+
+    expect(revoked.body).toMatchObject({ message: 'Avatar not found' });
+  });
+
+  it('serves the replacement avatar for a file uploaded before the replacement', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    await uploadAvatar(owner, replacementPng);
+
+    const response = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(Buffer.from(response.body as Buffer)).toEqual(replacementPng);
+  });
+
+  it('stops serving the avatar once the uploader removes it', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await uploadAvatar(participant);
+    const uploaded = await uploadPdf(meeting.id, participant);
+
+    await request(app.getHttpServer())
+      .delete('/users/me/avatar')
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .expect(200);
+
+    const removed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    // The caller owns the meeting, so only the avatar lookup may refuse: a bare
+    // status assertion would keep passing if the meeting guard started
+    // answering `Meeting not found` here instead.
+    expect(removed.body).toMatchObject({ message: 'Avatar not found' });
+  });
+
+  it('reports an avatar the uploader never had and a deleted uploader account as absent', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    const withoutAvatar = await uploadPdf(meeting.id, participant);
+
+    const neverSet = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(withoutAvatar)}/avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    await uploadAvatar(participant);
+    const uploaded = await uploadPdf(meeting.id, participant);
+    const handle = getUploaderHandle(uploaded);
+    await prisma.user.delete({ where: { id: getUserId(participant.accessToken) } });
+
+    const deletedAccount = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/uploaders/${handle}/avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    // As above: the caller owns the meeting, so both refusals must name the
+    // avatar rather than the meeting.
+    expect(neverSet.body).toMatchObject({ message: 'Avatar not found' });
+    expect(deletedAccount.body).toMatchObject({ message: 'Avatar not found' });
   });
 });

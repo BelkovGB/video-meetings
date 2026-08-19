@@ -782,3 +782,32 @@ test('отложенная issue уходит из очереди прогона
   assert.equal(attempts.length, 3);
   assert.ok(stateStore.iterationsUsed < 20, 'бюджет не должен быть исчерпан');
 });
+
+test('milestone не закрывается, пока есть отложенная issue', async () => {
+  // Отложенная issue выпадает из очереди по построению, поэтому цикл доходил до
+  // закрытия milestone и падал там: closeMilestone перечитывает issues без
+  // этого фильтра. Так оборвалась фаза 5 на задаче #97.
+  const attempts = [];
+  let closed = false;
+  const stateStore = persistentState();
+
+  const result = await runContinuousLoop(
+    context({ stateStore, config: { maxIterations: 20, maxReviewFixAttempts: 3 } }),
+    actions({
+      openIssues: () => [{ number: 97, title: 'Отклоняется всегда' }],
+      runAgentOnIssue: async () => {
+        attempts.push(1);
+        return attempts.length >= 3 ? { completed: false, parked: true } : { completed: false };
+      },
+      runMilestoneReview: async () => ({ verdict: 'pass', summary: 'clean', findings: [] }),
+      closeMilestone: () => {
+        closed = true;
+      },
+    }),
+  );
+
+  assert.equal(attempts.length, 3);
+  assert.equal(closed, false, 'milestone не должен закрываться с незавершённой задачей');
+  assert.equal(result.verdict, 'parked');
+  assert.deepEqual(result.parkedIssues, [97]);
+});
