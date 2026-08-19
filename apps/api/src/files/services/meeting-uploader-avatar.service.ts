@@ -36,22 +36,29 @@ export class MeetingUploaderAvatarService {
   ): Promise<UploaderAvatarVersion> {
     await this.meetingAccess.requireAccess(meetingId, userId);
 
-    const uploaders = await this.prisma.meetingFile.findMany({
+    // A keyed hash cannot be inverted into an `uploadedById` predicate, so the
+    // handle is matched against the meeting's uploaders instead. `groupBy` keeps
+    // that to one row per uploader, and the `(meetingId, status, uploadedById)`
+    // index covers every column the query touches, so the scan stays inside the
+    // index rather than reading each ready file row.
+    const uploaders = await this.prisma.meetingFile.groupBy({
+      by: ['uploadedById'],
       where: { meetingId, status: MeetingFileStatus.READY, uploadedById: { not: null } },
-      distinct: ['uploadedById'],
-      select: {
-        uploadedById: true,
-        uploadedBy: {
-          select: { id: true, avatarMimeType: true, avatarSizeBytes: true, avatarUpdatedAt: true },
-        },
-      },
     });
 
-    const uploader = uploaders
-      .map((file) => file.uploadedBy)
+    const uploaderId = uploaders
+      .map((group) => group.uploadedById)
       .find(
-        (candidate) => candidate && deriveUserHandle(meetingId, candidate.id) === uploaderHandle,
+        (candidate) =>
+          candidate !== null && deriveUserHandle(meetingId, candidate) === uploaderHandle,
       );
+
+    const uploader = uploaderId
+      ? await this.prisma.user.findUnique({
+          where: { id: uploaderId },
+          select: { id: true, avatarMimeType: true, avatarSizeBytes: true, avatarUpdatedAt: true },
+        })
+      : null;
 
     // An unknown handle and an uploader without an avatar answer alike: the
     // caller may already list every uploader of the meeting, and neither

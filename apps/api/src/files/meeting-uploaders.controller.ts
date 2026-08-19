@@ -31,31 +31,40 @@ export class MeetingUploadersController {
     @Req() request: AuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
   ): Promise<StreamableFile | undefined> {
+    // Set before anything below can throw. Every failure path of this route is
+    // `404`, which is heuristically cacheable, and the route deliberately makes
+    // this URL cache-eligible otherwise; without these a shared cache could
+    // store the outsider's denial and replay it to an actual participant.
+    // The response body depends on the meeting, not on the caller, but the
+    // permission to read it does; `Vary` keeps any cache that ignores `private`
+    // from handing it to a caller outside the meeting.
+    response.set({
+      'Cache-Control': 'private, no-store',
+      'Referrer-Policy': 'no-referrer',
+      Vary: 'Authorization',
+      'X-Content-Type-Options': 'nosniff',
+    });
+
     const version = await this.uploaderAvatars.describe(
       meetingId,
       uploaderHandle,
       request.user.sub,
     );
 
-    response.set({
-      // The response body depends on the meeting, not on the caller, but the
-      // permission to read it does; `Vary` keeps any cache that ignores
-      // `private` from handing it to a caller outside the meeting.
-      'Cache-Control': 'private, must-revalidate',
-      ETag: version.etag,
-      'Referrer-Policy': 'no-referrer',
-      Vary: 'Authorization',
-      'X-Content-Type-Options': 'nosniff',
-    });
-
     if (matchesEntityTag(request.headers['if-none-match'], version.etag)) {
+      allowRevalidatedReuse(response, version.etag);
       response.status(HttpStatus.NOT_MODIFIED);
 
       return undefined;
     }
 
+    // Opened before the validator is published: `open` still answers `404` when
+    // the avatar row or its stored object disappears between the two calls, and
+    // an error body must never ship labelled with the image's `ETag` — a client
+    // would revalidate it successfully and keep serving the error as the image.
     const avatar = await this.uploaderAvatars.open(version.uploaderId);
 
+    allowRevalidatedReuse(response, version.etag);
     response.set({
       'Content-Length': String(avatar.sizeBytes),
       'Content-Type': avatar.mimeType,
@@ -63,6 +72,18 @@ export class MeetingUploadersController {
 
     return new StreamableFile(avatar.stream);
   }
+}
+
+/**
+ * Replaces the route's `no-store` default once there is a real avatar version to
+ * revalidate against. `max-age=0` is explicit because `must-revalidate` alone
+ * constrains reuse only after an entry is already stale, and a response with no
+ * stated lifetime may be assigned a heuristic one (RFC 9111 4.2.2) — a replaced
+ * or removed avatar could then keep rendering unchecked. Revalidation is cheap
+ * here: the 304 path opens no file.
+ */
+function allowRevalidatedReuse(response: Response, etag: string): void {
+  response.set({ 'Cache-Control': 'private, max-age=0, must-revalidate', ETag: etag });
 }
 
 function matchesEntityTag(header: string | undefined, etag: string): boolean {

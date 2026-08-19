@@ -626,7 +626,7 @@ describe('Meeting files (e2e)', () => {
         .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
         .set('Authorization', `Bearer ${viewer.accessToken}`)
         .expect('Content-Type', /image\/png/)
-        .expect('Cache-Control', 'private, must-revalidate')
+        .expect('Cache-Control', 'private, max-age=0, must-revalidate')
         .expect('Vary', 'Authorization')
         .expect('X-Content-Type-Options', 'nosniff')
         .expect(200);
@@ -659,6 +659,11 @@ describe('Meeting files (e2e)', () => {
 
     expect(revalidated.headers['content-length']).toBeUndefined();
     expect(revalidated.body).toEqual({});
+    // A 304 that drops the validator or the directives leaves the stored copy
+    // unrevalidatable, so the header block is asserted on this path too.
+    expect(revalidated.headers.etag).toBe(etag);
+    expect(revalidated.headers['cache-control']).toBe('private, max-age=0, must-revalidate');
+    expect(revalidated.headers.vary).toBe('Authorization');
 
     await request(app.getHttpServer())
       .get(url)
@@ -687,6 +692,11 @@ describe('Meeting files (e2e)', () => {
     const uploaded = await uploadPdf(meeting.id, owner);
     const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
 
+    const served = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
     const denied = await request(app.getHttpServer())
       .get(url)
       .set('Authorization', `Bearer ${outsider.accessToken}`)
@@ -694,6 +704,14 @@ describe('Meeting files (e2e)', () => {
 
     expect(denied.body).toMatchObject({ message: 'Meeting not found' });
     expect(JSON.stringify(denied.body)).not.toContain('Hidden Uploader');
+    // A 404 is heuristically cacheable, and this URL is otherwise made
+    // cache-eligible, so a shared cache must not keep the outsider denial and
+    // replay it to a participant. It must also never carry the avatar's own
+    // validator, or a client would revalidate the error body successfully and
+    // go on serving it in place of the image.
+    expect(denied.headers['cache-control']).toBe('private, no-store');
+    expect(denied.headers.vary).toBe('Authorization');
+    expect(denied.headers.etag).not.toBe(served.headers.etag);
 
     await request(app.getHttpServer()).get(url).expect(401);
   });
@@ -715,6 +733,73 @@ describe('Meeting files (e2e)', () => {
       .get(`/meetings/${meeting.id}/uploaders/${getUserId(owner.accessToken)}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
+  });
+
+  it('does not label a 404 body with the avatar validator when the object is gone', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+    const served = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    // The metadata naming a version survives; the object behind it does not, so
+    // the version resolves but the open fails.
+    await prisma.user.update({
+      where: { id: getUserId(owner.accessToken) },
+      data: { avatarStorageKey: null },
+    });
+
+    const missing = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    expect(missing.body).toMatchObject({ message: 'Avatar not found' });
+    // Shipping the avatar's tag here would let a client revalidate the error
+    // body and keep serving it in place of the image for as long as the
+    // recorded version is unchanged.
+    expect(missing.headers.etag).not.toBe(served.headers.etag);
+    expect(missing.headers['cache-control']).toBe('private, no-store');
+  });
+
+  it('revokes the avatar handle once the uploader has no ready file left in the meeting', async () => {
+    const owner = await registerUser();
+    const participant = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await addParticipant(meeting.id, participant);
+    await uploadAvatar(owner);
+    const first = await uploadPdf(meeting.id, owner);
+    const second = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(first)}/avatar`;
+
+    await request(app.getHttpServer())
+      .delete(`/meetings/${meeting.id}/files/${first.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(204);
+
+    // The handle names the uploader, not the file it was read from, so any
+    // other ready file of theirs keeps the same URL alive.
+    await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .delete(`/meetings/${meeting.id}/files/${second.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(204);
+
+    const revoked = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .expect(404);
+
+    expect(revoked.body).toMatchObject({ message: 'Avatar not found' });
   });
 
   it('serves the replacement avatar for a file uploaded before the replacement', async () => {
