@@ -25,6 +25,7 @@ import {
   isAncestorCommit,
   issueChangeInventory,
   linkedCommitForIssue,
+  workingTreeEntries,
   workingTreePaths,
 } from './ralph-git.mjs';
 import {
@@ -998,4 +999,34 @@ test('повторное создание задачи не заводит ду�
     queued.map((issue) => issue.number),
     [85],
   );
+});
+
+test('уже застадированное удаление не попадает в git add', () => {
+  // `git rm` убирает файл и из дерева, и из индекса. Путь остаётся в porcelain
+  // как `D `, но `git add` по нему отвечает `did not match any files` и роняет
+  // прогон кодом 128 — так оборвалась issue #91 после пятнадцати минут работы.
+  const status = [
+    ' M apps/api/src/files/files.controller.ts',
+    'D  apps/api/src/files/services/meeting-file-uploader-avatar.service.ts',
+    '?? apps/api/src/files/services/meeting-uploader-avatar.service.ts',
+  ].join('\n');
+
+  const entries = workingTreeEntries(status.trim());
+  assert.deepEqual(
+    entries.map((entry) => `${entry.index}${entry.worktree}`),
+    [' M', 'D ', '??'],
+  );
+
+  // Стадировать нужно только изменённое в дереве; удаление уже в индексе и в
+  // коммит попадёт само.
+  assert.deepEqual(
+    entries.filter((entry) => entry.worktree !== ' ').map((entry) => entry.path),
+    [
+      'apps/api/src/files/files.controller.ts',
+      'apps/api/src/files/services/meeting-uploader-avatar.service.ts',
+    ],
+  );
+
+  // Список путей задачи при этом полный: удалённый файл — тоже её изменение.
+  assert.equal(workingTreePaths(status.trim()).length, 3);
 });

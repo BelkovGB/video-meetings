@@ -75,6 +75,7 @@ import {
   verifyBaseHistory,
   verifyPushedHead,
   verifyRepository,
+  workingTreeEntries,
   workingTreePaths,
 } from './ralph-git.mjs';
 
@@ -525,7 +526,8 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   // агента черновик удалил вместе с рабочей копией. Ревьюер, увидев в диффе
   // задачи чужой конфиг, справедливо отклонял работу заход за заходом.
   const foreignPaths = new Set(activeStateStore()?.issue?.foreignPaths ?? []);
-  const agentPaths = workingTreePaths(changes).filter((file) => !foreignPaths.has(file));
+  const agentEntries = workingTreeEntries(changes).filter((entry) => !foreignPaths.has(entry.path));
+  const agentPaths = agentEntries.map((entry) => entry.path);
   const untouchedForeign = workingTreePaths(changes).filter((file) => foreignPaths.has(file));
   if (untouchedForeign.length > 0) {
     console.log(
@@ -590,7 +592,17 @@ async function commitAndCompleteIssue(config, repository, issue, startingCommit,
   activeStateStore()?.updateIssue({ phase: 'staging' });
   // Именно пути агента, а не `--all`: остальное в дереве принадлежит оператору
   // и обязано остаться незакоммиченным.
-  run('git', ['add', '--all', '--', ...agentPaths]);
+  //
+  // Стадируется только то, что изменено в рабочем дереве. Путь, уже полностью
+  // лежащий в индексе, `git add` не примет: после `git rm` файла нет ни в
+  // дереве, ни в индексе, и pathspec не совпадает ни с чем — код 128 и обрыв
+  // прогона. В коммит такой путь и так попадёт, он уже застадирован.
+  const pathsToStage = agentEntries
+    .filter((entry) => entry.worktree !== ' ')
+    .map((entry) => entry.path);
+  if (pathsToStage.length > 0) {
+    run('git', ['add', '--all', '--', ...pathsToStage]);
+  }
 
   const stagedDiff = run('git', ['diff', '--cached', '--quiet'], {
     allowFailure: true,
@@ -685,7 +697,15 @@ function branchMovedWithoutDisturbingIssue(storedIssue, currentHead) {
 
   const status = workingTreeStatus();
   if (storedIssue.phase === 'review-failed') return status === '';
-  if (!uncommittedWorkPhases.has(storedIssue.phase) || status === '') return false;
+  // `staging` исключён из uncommittedWorkPhases из-за expectedTree, собранного
+  // против прежнего HEAD. Пока его нет, исключать нечего: сбой случился до
+  // того, как индекс был зафиксирован, и в дереве лежит обычная
+  // незакоммиченная работа. Issue #91 упала ровно так — на `git add`.
+  const phase =
+    storedIssue.phase === 'staging' && !storedIssue.expectedTree
+      ? 'working-tree'
+      : storedIssue.phase;
+  if (!uncommittedWorkPhases.has(phase) || status === '') return false;
 
   const dirtyFiles = new Set(workingTreePaths(status));
   const moved = filesChangedBetween(storedStart, currentHead);
