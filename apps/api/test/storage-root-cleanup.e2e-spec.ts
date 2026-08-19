@@ -435,6 +435,13 @@ describe('global setup', () => {
       expect(message).toContain(uploadRoot);
       expect(message).toContain(avatarUploadRoot);
       expect(message).toContain('EBUSY');
+      // The guard clears what survived and then always throws, so the suite
+      // that observes stale content fails on paths it never wrote. A message
+      // promising only that "the run continues" points the developer away from
+      // the cause of the failure this path produces.
+      expect(message).toContain('test/setup-after-env.ts');
+      expect(message).toContain('that suite fails reporting paths it never wrote');
+      expect(message).not.toMatch(/[Tt]he run continues/);
     } finally {
       warn.mockRestore();
       removal.mockRestore();

@@ -19,9 +19,13 @@ import { avatarUploadRoot, uploadRoot } from './support/storage-roots';
  * an antivirus scan or a crashed earlier run is enough to reject — and a
  * rejection out of `globalSetup` ends the run before a single suite is
  * scheduled, with an error naming neither storage cleanup nor a way forward.
- * The cost of tolerating it is bounded and self-healing: the roots that were
- * removed stay removed, and the first suite to observe what survived clears it
- * through the per-suite guard.
+ * The cost of tolerating it is bounded: the roots that were removed stay
+ * removed, and the first suite to observe what survived clears it through the
+ * per-suite guard. That guard always throws once it finds content, though, so
+ * tolerating the failure relocates it rather than erasing it — the suite that
+ * observes the survivors fails even though it never wrote them. The warning
+ * has to say so, or a developer who reads it will look for the cause inside
+ * whichever suite jest happened to schedule first.
  */
 export default async function globalSetup(): Promise<void> {
   const roots = [uploadRoot, avatarUploadRoot];
@@ -30,9 +34,12 @@ export default async function globalSetup(): Promise<void> {
     console.warn(
       `Could not clear the e2e storage roots before the run:\n${roots.join('\n')}\n` +
         `Reason: ${reason instanceof Error ? reason.message : String(reason)}\n` +
-        'The run continues: whatever survived is cleared by the per-suite guard ' +
+        'Whatever survived is cleared by the per-suite guard ' +
         '(test/setup-after-env.ts) after the first suite that observes it, at the ' +
-        'cost of one reconciliation transaction per stale directory until then.',
+        'cost of one reconciliation transaction per stale directory until then. ' +
+        'If a root survived with content, that suite fails reporting paths it never ' +
+        'wrote, and the rest of the run then proceeds normally; a root that survived ' +
+        'empty costs nothing further.',
     );
   });
 }
