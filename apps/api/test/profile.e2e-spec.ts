@@ -14,6 +14,7 @@ import { AvatarValidationService } from '../src/profile/avatar-validation.servic
 import { ProfileService } from '../src/profile/profile.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { UsersService } from '../src/users/services/users.service';
+import { TrustedProxyClients } from './support/trusted-proxy';
 
 type UserSession = {
   accessToken: string;
@@ -69,12 +70,11 @@ function getUserId(accessToken: string): string {
 
 describe('Current user profile (e2e)', () => {
   let app: INestApplication;
-  let authenticationRequestCount = 0;
-  const originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
+  const clients = new TrustedProxyClients();
 
   beforeAll(async () => {
     await rm(avatarUploadRoot, { recursive: true, force: true });
-    process.env.TRUSTED_PROXY_IPS = 'loopback';
+    clients.enable();
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -87,20 +87,11 @@ describe('Current user profile (e2e)', () => {
   afterAll(async () => {
     await app.close();
     await rm(avatarUploadRoot, { recursive: true, force: true });
-
-    if (originalTrustedProxyIps === undefined) {
-      delete process.env.TRUSTED_PROXY_IPS;
-    } else {
-      process.env.TRUSTED_PROXY_IPS = originalTrustedProxyIps;
-    }
+    clients.restore();
   });
 
   function authenticationRequest(path: '/auth/register' | '/auth/login') {
-    authenticationRequestCount += 1;
-
-    return request(app.getHttpServer())
-      .post(path)
-      .set('X-Forwarded-For', `198.51.100.${authenticationRequestCount}`);
+    return request(app.getHttpServer()).post(path).set('X-Forwarded-For', clients.nextAddress());
   }
 
   async function registerUser(prefix: string, password = validPassword): Promise<UserSession> {

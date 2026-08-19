@@ -1,4 +1,5 @@
 import { INestApplication } from '@nestjs/common';
+import { MeetingFileStatus } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { access, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -10,6 +11,7 @@ import { AppModule } from '../src/app.module';
 import { configureHttpApplication } from '../src/http-application';
 import { MeetingFileDeletionReconciliationService } from '../src/files/services/meeting-file-deletion-reconciliation.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { TrustedProxyClients } from './support/trusted-proxy';
 
 type Meeting = { id: string };
 type UserSession = { accessToken: string };
@@ -52,12 +54,11 @@ describe('Meeting files (e2e)', () => {
   // Each registration comes from its own client address: the suite creates more
   // accounts per minute than one client may, and sharing an address would fail
   // it on the authentication rate limit instead of on a meeting-file defect.
-  let registrationCount = 0;
-  const originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
+  const clients = new TrustedProxyClients();
 
   beforeAll(async () => {
     await rm(uploadRoot, { recursive: true, force: true });
-    process.env.TRUSTED_PROXY_IPS = 'loopback';
+    clients.enable();
 
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -72,19 +73,13 @@ describe('Meeting files (e2e)', () => {
   afterAll(async () => {
     await app.close();
     await rm(uploadRoot, { recursive: true, force: true });
-
-    if (originalTrustedProxyIps === undefined) {
-      delete process.env.TRUSTED_PROXY_IPS;
-    } else {
-      process.env.TRUSTED_PROXY_IPS = originalTrustedProxyIps;
-    }
+    clients.restore();
   });
 
   async function registerUser(): Promise<UserSession> {
-    registrationCount += 1;
     const response = await request(app.getHttpServer())
       .post('/auth/register')
-      .set('X-Forwarded-For', `198.51.100.${registrationCount}`)
+      .set('X-Forwarded-For', clients.nextAddress())
       .send({ email: createEmail('file-user'), password: validPassword })
       .expect(201);
 
@@ -728,16 +723,53 @@ describe('Meeting files (e2e)', () => {
     const uploaded = await uploadPdf(meeting.id, owner);
     const handle = getUploaderHandle(uploaded);
 
-    await request(app.getHttpServer())
+    const foreignHandle = await request(app.getHttpServer())
       .get(`/meetings/${otherMeeting.id}/uploaders/${handle}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
 
-    await request(app.getHttpServer())
+    const unknownHandle = await request(app.getHttpServer())
       .get(`/meetings/${meeting.id}/uploaders/${getUserId(owner.accessToken)}/avatar`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .expect(404);
+
+    // The caller owns both meetings, so these two must come from the handle
+    // lookup and not from the meeting guard: a bare status assertion would keep
+    // passing if the route started refusing the caller the meeting itself.
+    expect(foreignHandle.body).toMatchObject({ message: 'Avatar not found' });
+    expect(unknownHandle.body).toMatchObject({ message: 'Avatar not found' });
   });
+
+  // The handle names an uploader with a ready file in the meeting, so a file
+  // that left that state must no longer answer for them. Deletion removes the
+  // row; these states leave one behind, and only the query's status filter
+  // keeps it from minting a handle.
+  it.each([MeetingFileStatus.DELETING, MeetingFileStatus.MISSING])(
+    'stops serving the avatar once the uploader last file turns %s',
+    async (status) => {
+      const owner = await registerUser();
+      const participant = await registerUser();
+      const meeting = await createMeeting(owner.accessToken);
+      await addParticipant(meeting.id, participant);
+      await uploadAvatar(participant);
+      const uploaded = await uploadPdf(meeting.id, participant);
+      const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+      await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200);
+
+      await prisma.meetingFile.update({ where: { id: uploaded.id }, data: { status } });
+
+      const revoked = await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(404);
+
+      expect(revoked.body).toMatchObject({ message: 'Avatar not found' });
+    },
+  );
 
   it('does not label a 404 body with the avatar validator when the object is gone', async () => {
     const owner = await registerUser();

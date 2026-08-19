@@ -7,6 +7,7 @@ import { AppModule } from '../src/app.module';
 import { configureHttpApplication } from '../src/http-application';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { AuthSessionService } from '../src/auth/services/auth-session.service';
+import { TrustedProxyClients } from './support/trusted-proxy';
 
 type AuthCredentials = {
   email?: string;
@@ -199,10 +200,10 @@ describe('Authentication (e2e)', () => {
 
 describe('Authentication rate limiting (e2e)', () => {
   let app: INestApplication;
-  const originalTrustedProxyIps = process.env.TRUSTED_PROXY_IPS;
+  const clients = new TrustedProxyClients();
 
   beforeEach(async () => {
-    process.env.TRUSTED_PROXY_IPS = 'loopback';
+    clients.enable();
 
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -215,12 +216,7 @@ describe('Authentication rate limiting (e2e)', () => {
 
   afterEach(async () => {
     await app.close();
-
-    if (originalTrustedProxyIps === undefined) {
-      delete process.env.TRUSTED_PROXY_IPS;
-    } else {
-      process.env.TRUSTED_PROXY_IPS = originalTrustedProxyIps;
-    }
+    clients.restore();
   });
 
   it.each(['/auth/register', '/auth/login'])(
