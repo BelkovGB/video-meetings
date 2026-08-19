@@ -1,19 +1,28 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import globalSetup from './global-setup';
 import globalTeardown from './global-teardown';
+import * as cleanup from './support/storage-cleanup';
 import { removeStorageRoots, teardownStorageSuite } from './support/storage-cleanup';
 import {
   assertStorageDirectoriesAreEmpty,
   findStorageLeftovers,
 } from './support/storage-leftovers';
-import { avatarDirectory, storageDirectories } from './support/storage-roots';
+import {
+  avatarDirectory,
+  avatarUploadRoot,
+  storageDirectories,
+  uploadDirectory,
+} from './support/storage-roots';
 
-// Missing storage cleanup is guarded after every suite (test/setup-after-env.ts)
-// and once more after the run (test/global-teardown.ts). These tests pin the
-// detector both call, the assertion that acts on its findings, and the
-// suite-teardown helper the writing suites use.
+// Missing storage cleanup is cleared before the run (test/global-setup.ts),
+// guarded after every suite (test/setup-after-env.ts) and once more after the
+// run (test/global-teardown.ts). These tests pin the detector all of them call,
+// the assertion that acts on its findings, the suite-teardown helper the
+// writing suites use, and the jest wiring that makes each of those files run at
+// all — none of which any product spec would notice the absence of.
 describe('findStorageLeftovers', () => {
   let root: string;
 
@@ -132,6 +141,29 @@ describe('assertStorageDirectoriesAreEmpty', () => {
 
     await expect(findStorageLeftovers([directory])).resolves.toEqual([]);
     await expect(assertStorageDirectoriesAreEmpty([directory], 'a suite')).resolves.toBeUndefined();
+  });
+
+  // The swallow is right — the leftovers matter more than the removal — but a
+  // message claiming a clearing that did not happen reads as an already handled
+  // interrupted run while the identical failure repeats on every invocation.
+  it('still fails, and says the content was not cleared, when the removal fails', async () => {
+    const directory = join(root, 'files');
+    await mkdir(directory);
+    await writeFile(join(directory, 'stored'), 'stored');
+    const removal = jest
+      .spyOn(cleanup, 'removeStorageRoots')
+      .mockRejectedValue(Object.assign(new Error('EBUSY'), { code: 'EBUSY' }));
+
+    try {
+      const failure = assertStorageDirectoriesAreEmpty([directory], 'a suite');
+
+      await expect(failure).rejects.toThrow(/could NOT be cleared/);
+      await expect(failure).rejects.not.toThrow(/has been cleared/);
+    } finally {
+      removal.mockRestore();
+    }
+
+    await expect(findStorageLeftovers([directory])).resolves.toEqual([`${directory}: stored`]);
   });
 
   it('names stale content from an earlier interrupted run as a possibility', async () => {
@@ -265,5 +297,116 @@ describe('teardownStorageSuite', () => {
     ).rejects.toThrow();
 
     expect(restoreEnvironment).toHaveBeenCalledTimes(1);
+  });
+
+  // The removal fails *because* the close did: handles are still open under the
+  // root. Reporting only the `rm` failure shows the symptom and hides the cause.
+  it('reports the close failure alongside the removal failure when both fail', async () => {
+    const restoreEnvironment = jest.fn();
+
+    const failure = teardownStorageSuite({
+      close: () => Promise.reject(new Error('close failed')),
+      storageRoots: [unremovableRoot],
+      restoreEnvironment,
+    });
+
+    await expect(failure).rejects.toBeInstanceOf(AggregateError);
+    await expect(failure).rejects.toMatchObject({
+      errors: [expect.objectContaining({ message: 'close failed' }), expect.anything()],
+    });
+    expect(restoreEnvironment).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The guard only runs because jest is told to run it, and only stays safe
+// because jest is told to serialize. Both live in a config file no spec would
+// otherwise touch: deleting a line there silently disables the fix.
+describe('e2e jest configuration', () => {
+  async function readConfiguration(): Promise<Record<string, unknown>> {
+    return JSON.parse(await readFile(join(__dirname, 'jest-e2e.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it('registers the per-suite guard, the run-start clearing and the run-wide backstop', async () => {
+    const configuration = await readConfiguration();
+
+    expect(configuration.setupFilesAfterEnv).toEqual(['<rootDir>/test/setup-after-env.ts']);
+    expect(configuration.globalSetup).toBe('<rootDir>/test/global-setup.ts');
+    expect(configuration.globalTeardown).toBe('<rootDir>/test/global-teardown.ts');
+  });
+
+  // Without this the per-suite hook is destructive under jest's default worker
+  // pool: a filtered run such as `jest --config ./test/jest-e2e.json profile`
+  // matches two files, and one worker's afterAll would delete the avatar root
+  // out from under the other worker's uploads. `--runInBand` in the npm script
+  // does not reach an ad hoc invocation, so the config has to carry it.
+  it('serializes suites, which the shared storage directories require', async () => {
+    expect((await readConfiguration()).maxWorkers).toBe(1);
+  });
+});
+
+describe('setup-after-env', () => {
+  // Loaded in isolation with `afterAll` captured: nothing else in the run would
+  // notice this hook being deleted or inverted, because a passing run is
+  // exactly what a disabled guard produces.
+  function loadRegisteredHooks(): Array<() => Promise<void>> {
+    const hooks: Array<() => Promise<void>> = [];
+    const register = jest
+      .spyOn(global, 'afterAll')
+      .mockImplementation((hook) => hooks.push(hook as () => Promise<void>) as unknown as void);
+
+    try {
+      jest.isolateModules(() => {
+        require('./setup-after-env');
+      });
+    } finally {
+      register.mockRestore();
+    }
+
+    return hooks;
+  }
+
+  it('registers exactly one root-level hook', () => {
+    expect(loadRegisteredHooks()).toHaveLength(1);
+  });
+
+  it('rejects, naming the suite, on content left in a configured directory', async () => {
+    const [hook] = loadRegisteredHooks();
+    await mkdir(uploadDirectory, { recursive: true });
+    await writeFile(join(uploadDirectory, 'setup-after-env-leftover'), 'stored');
+
+    await expect(hook()).rejects.toThrow(
+      /setup-after-env-leftover[\s\S]*storage-root-cleanup\.e2e-spec\.ts|storage-root-cleanup\.e2e-spec\.ts[\s\S]*setup-after-env-leftover/,
+    );
+  });
+
+  it('resolves once the storage directories are empty again', async () => {
+    const [hook] = loadRegisteredHooks();
+
+    await expect(hook()).resolves.toBeUndefined();
+  });
+});
+
+// Clearing only at the end of a suite leaves whatever an interrupted run left
+// behind in place for every suite scheduled before the ones that own a root,
+// and each of those starts pays a locked reconciliation transaction per stale
+// directory. This runs once, before any suite boots.
+describe('global setup', () => {
+  it('clears content left in the storage roots by an earlier run', async () => {
+    await mkdir(avatarDirectory, { recursive: true });
+    await mkdir(uploadDirectory, { recursive: true });
+    await writeFile(join(avatarDirectory, 'global-setup-leftover'), 'avatar');
+    await writeFile(join(uploadDirectory, 'global-setup-leftover'), 'stored');
+
+    await expect(globalSetup()).resolves.toBeUndefined();
+
+    await expect(findStorageLeftovers(storageDirectories)).resolves.toEqual([]);
+    await expect(readdir(avatarUploadRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('resolves when there is nothing to clear', async () => {
+    await expect(globalSetup()).resolves.toBeUndefined();
   });
 });

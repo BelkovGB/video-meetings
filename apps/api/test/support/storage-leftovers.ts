@@ -52,14 +52,24 @@ export async function assertStorageDirectoriesAreEmpty(
     return;
   }
 
-  // A removal failure must not hide the leftovers it was reacting to.
-  await removeStorageRoots(directories).catch(() => undefined);
+  // A removal failure must not hide the leftovers it was reacting to, but the
+  // message may not claim a clearing that did not happen: the same EBUSY/EPERM
+  // the sibling helper tolerates would otherwise be reported as an already
+  // handled interrupted run, and repeat identically on every later invocation.
+  const cleared = await removeStorageRoots(directories).then(
+    () => true,
+    () => false,
+  );
 
   throw new Error(
     `E2E storage directories still held content after ${source}:\n${leftovers.join('\n')}\n` +
       'Remove the storage roots the suite writes to in its beforeAll and afterAll. ' +
-      'The listed content has been cleared; if the suite named above never writes ' +
-      'these paths, it is stale content from an earlier interrupted run and this ' +
-      'failure will not repeat.',
+      (cleared
+        ? 'The listed content has been cleared; if the suite named above never writes ' +
+          'these paths, it is stale content from an earlier interrupted run and this ' +
+          'failure will not repeat.'
+        : 'The listed content could NOT be cleared, so this failure will repeat until the ' +
+          'paths are removed by hand; if the suite named above never writes these paths, ' +
+          'it is stale content from an earlier interrupted run.'),
   );
 }
