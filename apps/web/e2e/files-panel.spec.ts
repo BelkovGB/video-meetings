@@ -1033,6 +1033,133 @@ test('stops at one avatar request when the failure is the same for every row', a
   await page.unroute('**/uploader-avatar');
 });
 
+test('reads one replacement for every row when the picture cannot be decoded', async ({
+  page,
+  request,
+}) => {
+  const avatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const owner = await register(request, 'phase-6-avatar-decode');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(request, owner, avatar);
+  for (const name of ['phase-6-decode-1.pdf', 'phase-6-decode-2.pdf', 'phase-6-decode-3.pdf']) {
+    await uploadPdf(request, owner, meeting, { name });
+  }
+  await authenticate(page, owner);
+
+  const avatarRequests: string[] = [];
+  page.on('request', (sent) => {
+    if (sent.method() === 'GET' && sent.url().includes('/uploader-avatar')) {
+      avatarRequests.push(sent.url());
+    }
+  });
+
+  const avatars = page.getByTestId('meeting-file-uploader-avatar');
+  const decodedWidths = () =>
+    avatars.evaluateAll((elements) =>
+      elements.map((element) => (element as HTMLImageElement).naturalWidth),
+    );
+
+  // A body that arrives truncated or corrupted decodes as a failure the API
+  // could not have caught: it verifies the picture at upload, so the bytes on
+  // disk are readable and a fresh download can still succeed.
+  let servedBodies = 0;
+  await page.route('**/uploader-avatar', (route) => {
+    servedBodies += 1;
+    return route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: servedBodies === 1 ? Buffer.from('not-a-decodable-image') : avatar,
+    });
+  });
+  await page.goto(`/meetings/${meeting.id}`);
+
+  // The picture belongs to the uploader, so the row that reported the refusal
+  // does not carry it alone: every row of that uploader follows the key to its
+  // replacement, and the three of them read one replacement between them.
+  await expect(avatars).toHaveCount(3);
+  for (const index of [0, 1, 2]) {
+    await expect(avatars.nth(index)).toHaveAttribute('src', /^blob:/);
+  }
+  await expect.poll(decodedWidths).toEqual([2, 2, 2]);
+  await expect
+    .poll(() =>
+      avatars.evaluateAll(
+        (elements) => new Set(elements.map((e) => (e as HTMLImageElement).src)).size,
+      ),
+    )
+    .toBe(1);
+  expect(avatarRequests).toHaveLength(2);
+  await page.unroute('**/uploader-avatar');
+
+  // Every attempt refused is the other half of the story: the key gives up for
+  // all of its rows at once, and stays given up for the rows mounted after it,
+  // even once the bytes on the wire are readable again.
+  avatarRequests.length = 0;
+  let servesReadableBytes = false;
+  await page.route('**/uploader-avatar', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: servesReadableBytes ? avatar : Buffer.from('not-a-decodable-image'),
+    }),
+  );
+  await page.reload();
+
+  await expect(avatars).toHaveCount(3);
+  for (const index of [0, 1, 2]) {
+    await expect(avatars.nth(index)).toHaveText('А');
+    await expect(avatars.nth(index)).not.toHaveAttribute('src');
+  }
+
+  // A row mounted after the key gave up shows the same fallback as its
+  // neighbours: an in-page upload inserts one at the top of the list, and one
+  // uploader half avatar and half initial in one list would be the bug. The
+  // route serves the readable picture from here on, so a row that asked for it
+  // again would show it.
+  servesReadableBytes = true;
+  await page.route(`${apiUrl}/meetings/${meeting.id}/files`, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+
+    const response = await route.fetch();
+    if (response.ok()) {
+      const uploaded = (await response.json()) as UploadedFile;
+      createdFiles.set(uploaded.id, {
+        meetingId: meeting.id,
+        ownerAccessToken: owner.accessToken,
+      });
+    }
+
+    await route.fulfill({ response });
+  });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'phase-6-decode-4.pdf',
+    mimeType: 'application/pdf',
+    buffer: Buffer.from('%PDF-1.7\nphase-6'),
+  });
+
+  await expect(
+    page.getByRole('listitem').filter({ hasText: 'phase-6-decode-4.pdf' }),
+  ).toBeVisible();
+  await expect(avatars).toHaveCount(4);
+  // The mocked route answers at once, so a request that a fourth row was going
+  // to send has been sent long inside this window.
+  await page.waitForTimeout(1_000);
+  for (const index of [0, 1, 2, 3]) {
+    await expect(avatars.nth(index)).toHaveText('А');
+    await expect(avatars.nth(index)).not.toHaveAttribute('src');
+  }
+
+  expect(avatarRequests).toHaveLength(2);
+  await page.unroute('**/uploader-avatar');
+});
+
 test('participant can download but never sees the delete action', async ({ page, request }) => {
   const owner = await register(request, 'phase-3-shared-owner');
   const participant = await register(request, 'phase-3-participant');

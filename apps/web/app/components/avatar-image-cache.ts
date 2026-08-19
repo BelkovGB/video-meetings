@@ -36,6 +36,15 @@ export class AvatarSourceGoneError extends Error {
  */
 const maxSourceReads = 2;
 
+/**
+ * How many pictures one key may put in front of the viewer before it gives up.
+ * A body that arrived truncated fails to decode for reasons a fresh download
+ * can fix, so one replacement is worth reading; a picture that fails again is
+ * given up on for the whole key, so every row of that uploader ends on the same
+ * fallback instead of the row that happened to report the failure.
+ */
+const maxDecodeAttempts = 2;
+
 type AvatarImageEntry = {
   leases: number;
   controller: AbortController;
@@ -58,6 +67,56 @@ type AvatarImageEntry = {
  */
 const entries = new Map<string, AvatarImageEntry>();
 
+/**
+ * What a key learned from the images it already handed out. It outlives the
+ * entry on purpose: a discarded image would otherwise be downloaded again by
+ * the next row to mount — an in-page upload inserts one at the top of the list
+ * — and that row would show a picture its neighbours had already dropped.
+ */
+type AvatarDecodeState = {
+  /** Images handed out for this key, including the one that failed. */
+  attempt: number;
+  listeners: Set<() => void>;
+};
+
+const decodes = new Map<string, AvatarDecodeState>();
+
+/**
+ * Which image of this key its holders are on. Folded into a holder's effect so
+ * a discard re-runs it: the holders that did not report the failure re-acquire
+ * together with the one that did, instead of keeping a fallback the key has
+ * already moved past.
+ */
+export function readAvatarImageAttempt(key: string): number {
+  return decodes.get(key)?.attempt ?? 0;
+}
+
+/** Calls `listener` whenever {@link readAvatarImageAttempt} changes for `key`. */
+export function subscribeToAvatarImageAttempt(key: string, listener: () => void): () => void {
+  const state = decodeStateOf(key);
+  state.listeners.add(listener);
+
+  return () => {
+    state.listeners.delete(listener);
+    if (state.listeners.size === 0 && state.attempt === 0 && decodes.get(key) === state) {
+      // Nothing left to remember about a key that never failed.
+      decodes.delete(key);
+    }
+  };
+}
+
+function decodeStateOf(key: string): AvatarDecodeState {
+  const known = decodes.get(key);
+  if (known) {
+    return known;
+  }
+
+  const state: AvatarDecodeState = { attempt: 0, listeners: new Set() };
+  decodes.set(key, state);
+
+  return state;
+}
+
 export type AvatarImageLease = {
   url: Promise<string>;
   /** Frees the image once its last holder is gone; safe to call twice. */
@@ -65,6 +124,16 @@ export type AvatarImageLease = {
 };
 
 export function acquireAvatarImage(key: string, source: AvatarImageSource): AvatarImageLease {
+  if (readAvatarImageAttempt(key) >= maxDecodeAttempts) {
+    // This key already spent its attempts on images the browser refused, so a
+    // row mounted afterwards gets the same refusal its neighbours are showing
+    // rather than a download of its own.
+    const url = Promise.reject(new Error('Avatar image cannot be decoded'));
+    url.catch(() => undefined);
+
+    return { url, release: () => undefined };
+  }
+
   const joined = entries.get(key);
   const entry = joined ?? createEntry(key, source);
   if (joined) {
@@ -113,15 +182,18 @@ export function acquireAvatarImage(key: string, source: AvatarImageSource): Avat
 }
 
 /**
- * Drops an image the browser could not decode, so its bytes are freed at once
- * and the next component asking for this key downloads it again instead of
- * inheriting the broken one. Every holder of the key falls back on its own,
- * since a picture that failed to decode fails for all of them.
+ * Drops an image the browser could not decode, so its bytes are freed at once,
+ * and moves the key to its next attempt. A picture that failed to decode fails
+ * for every holder of the key, so all of them are told: they re-acquire
+ * together, and read one replacement between them rather than one per row.
+ * Once {@link maxDecodeAttempts} images have been refused the key stops
+ * offering any, including to rows mounted later, so one uploader is never half
+ * avatar and half initial in the same list.
  *
  * @param objectUrl the image that failed. A component can report a failure long
  *   after its entry was dropped and a healthy one took the key, so the URL says
  *   which entry this is about and keeps the replacement from being revoked out
- *   from under the rows now showing it.
+ *   from under the rows now showing it, or counted as a further attempt.
  */
 export function discardAvatarImage(key: string, objectUrl: string) {
   const entry = entries.get(key);
@@ -133,6 +205,13 @@ export function discardAvatarImage(key: string, objectUrl: string) {
   if (entry.objectUrl) {
     URL.revokeObjectURL(entry.objectUrl);
     entry.objectUrl = null;
+  }
+
+  const state = decodeStateOf(key);
+  state.attempt += 1;
+  // A listener may unsubscribe while being told, so the set is read as it is now.
+  for (const listener of [...state.listeners]) {
+    listener();
   }
 }
 

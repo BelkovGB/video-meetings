@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
 import { readApiErrorBody } from '../../lib/api/errors';
@@ -9,6 +9,8 @@ import {
   AvatarSourceGoneError,
   acquireAvatarImage,
   discardAvatarImage,
+  readAvatarImageAttempt,
+  subscribeToAvatarImageAttempt,
 } from './avatar-image-cache';
 
 type IdentityAvatarImage = {
@@ -90,9 +92,23 @@ export function IdentityAvatar({
   testId,
   className = '',
 }: IdentityAvatarProps) {
-  const [loaded, setLoaded] = useState<{ url: string; key: string } | null>(null);
+  const [loaded, setLoaded] = useState<{ url: string; key: string; attempt: number } | null>(null);
   const imageKey = image ? `${image.sharedKey ?? image.path}|${image.updatedAt}` : null;
-  const imageUrl = loaded && loaded.key === imageKey ? loaded.url : null;
+  // Which image of this key the cache is on. Any component reporting one the
+  // browser could not decode moves it, and every other component showing the
+  // same key re-runs the effect below: the picture belongs to all of them, so
+  // they follow it to its replacement, or to the fallback, together.
+  const attempt = useSyncExternalStore(
+    useCallback(
+      (onChange: () => void) =>
+        imageKey ? subscribeToAvatarImageAttempt(imageKey, onChange) : () => undefined,
+      [imageKey],
+    ),
+    () => (imageKey ? readAvatarImageAttempt(imageKey) : 0),
+    () => 0,
+  );
+  const imageUrl =
+    loaded && loaded.key === imageKey && loaded.attempt === attempt ? loaded.url : null;
 
   useEffect(() => {
     if (!image || !imageKey) {
@@ -129,7 +145,7 @@ export function IdentityAvatar({
     void lease.url.then(
       (url) => {
         if (isActive) {
-          setLoaded({ url, key: imageKey });
+          setLoaded({ url, key: imageKey, attempt });
         }
       },
       () => {
@@ -144,7 +160,7 @@ export function IdentityAvatar({
       // The image outlives this component only while another one still holds it.
       lease.release();
     };
-  }, [imageKey]);
+  }, [imageKey, attempt]);
 
   if (imageUrl) {
     return (
@@ -156,7 +172,8 @@ export function IdentityAvatar({
         className={`shrink-0 rounded-full object-cover ${className}`}
         onError={() => {
           // The image belongs to every component sharing this key, so it is the
-          // cache that frees it and lets the next one try again.
+          // cache that frees it, reads one replacement for all of them, and
+          // decides when the key has no attempt left.
           if (imageKey) {
             discardAvatarImage(imageKey, imageUrl);
           }
