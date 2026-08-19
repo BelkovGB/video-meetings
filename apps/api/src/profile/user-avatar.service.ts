@@ -1,13 +1,14 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { ReadStream } from 'node:fs';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { AvatarBytes, AvatarContent } from './avatar-content';
+import { AvatarListVariantService } from './avatar-list-variant.service';
 import { LocalAvatarStorageService } from './local-avatar-storage.service';
 
-export type AvatarContent = {
+type StoredAvatar = {
+  storageKey: string;
   mimeType: string;
   sizeBytes: number;
-  stream: ReadStream;
   updatedAt: Date;
 };
 
@@ -25,9 +26,33 @@ export class UserAvatarService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly avatars: LocalAvatarStorageService,
+    private readonly listVariants: AvatarListVariantService,
   ) {}
 
   async open(userId: string): Promise<AvatarContent> {
+    const stored = await this.requireStoredAvatar(userId);
+
+    return this.readOrReportMissing(stored, async () => ({
+      mimeType: stored.mimeType,
+      sizeBytes: stored.sizeBytes,
+      stream: await this.avatars.open(stored.storageKey),
+    }));
+  }
+
+  /**
+   * Opens the small variant a list of rows needs. The original stays untouched
+   * on disk: only what the wire carries is reduced. The version is the stored
+   * avatar's own, because that is what the variant was derived from — a client
+   * revalidating it is asking about the picture, not about the size it was
+   * served in.
+   */
+  async openListVariant(userId: string): Promise<AvatarContent> {
+    const stored = await this.requireStoredAvatar(userId);
+
+    return this.readOrReportMissing(stored, async () => this.listVariants.open(stored));
+  }
+
+  private async requireStoredAvatar(userId: string): Promise<StoredAvatar> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -46,13 +71,20 @@ export class UserAvatarService {
       throw new NotFoundException('Avatar not found');
     }
 
+    return {
+      storageKey: user.avatarStorageKey,
+      mimeType: user.avatarMimeType,
+      sizeBytes: user.avatarSizeBytes,
+      updatedAt: user.avatarUpdatedAt,
+    };
+  }
+
+  private async readOrReportMissing(
+    stored: StoredAvatar,
+    read: () => Promise<AvatarBytes>,
+  ): Promise<AvatarContent> {
     try {
-      return {
-        mimeType: user.avatarMimeType,
-        sizeBytes: user.avatarSizeBytes,
-        stream: await this.avatars.open(user.avatarStorageKey),
-        updatedAt: user.avatarUpdatedAt,
-      };
+      return { ...(await read()), updatedAt: stored.updatedAt };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new NotFoundException('Avatar not found');

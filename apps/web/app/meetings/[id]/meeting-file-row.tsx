@@ -6,10 +6,13 @@ import { useRef } from 'react';
 import type { MeetingFile } from '../../../lib/api/contracts';
 import { formatUploadDate } from '../../../lib/format/dates';
 import { formatFileSize } from '../../../lib/format/file-size';
+import { formatUploaderName } from '../../../lib/format/user-identity';
 import { DeleteFileConfirmation } from './delete-file-confirmation';
 import { DownloadIcon, FileIcon, TrashIcon } from './meeting-file-list-icons';
+import { MeetingFileUploaderAvatar } from './meeting-file-uploader-avatar';
 
 type MeetingFileRowProps = {
+  meetingId: string;
   file: MeetingFile;
   canDelete: boolean;
   isDownloading: boolean;
@@ -36,6 +39,7 @@ function getCategoryLabel(file: MeetingFile): string {
 }
 
 export function MeetingFileRow({
+  meetingId,
   file,
   canDelete,
   isDownloading,
@@ -71,6 +75,15 @@ export function MeetingFileRow({
               •
             </span>
             <span>{formatUploadDate(file.uploadedAt)}</span>
+            <span aria-hidden="true" className="text-slate-300">
+              •
+            </span>
+            <span className="inline-flex min-w-0 items-center gap-2">
+              <MeetingFileUploaderAvatar meetingId={meetingId} file={file} />
+              <span className="break-words">
+                Загрузил(а): {formatUploaderName(file.uploadedBy)}
+              </span>
+            </span>
           </div>
         </div>
         <div className="flex flex-wrap gap-2 sm:justify-end">

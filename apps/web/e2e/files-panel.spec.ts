@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { PrismaClient } from '@prisma/client';
 
 type Session = {
@@ -73,12 +73,13 @@ async function uploadPdf(
   request: APIRequestContext,
   owner: Session,
   meeting: Meeting,
+  options: { name?: string } = {},
 ): Promise<UploadedFile> {
   const response = await request.post(`${apiUrl}/meetings/${meeting.id}/files`, {
     headers: { Authorization: `Bearer ${owner.accessToken}` },
     multipart: {
       file: {
-        name: 'phase-3-notes.pdf',
+        name: options.name ?? 'phase-3-notes.pdf',
         mimeType: 'application/pdf',
         buffer: Buffer.from('%PDF-1.7\nphase-3'),
       },
@@ -93,6 +94,66 @@ async function uploadPdf(
   });
 
   return uploaded;
+}
+
+async function createUserRecord(prefix: string): Promise<{ userId: string; email: string }> {
+  const user = await prisma.user.create({
+    data: { email: uniqueEmail(prefix), passwordHash: 'not-a-usable-hash' },
+  });
+  createdUserIds.add(user.id);
+
+  return { userId: user.id, email: user.email };
+}
+
+async function createForeignMeeting(prefix: string): Promise<Meeting> {
+  const outsider = await createUserRecord(prefix);
+  const meeting = await prisma.meeting.create({
+    data: {
+      title: `Чужая встреча ${Date.now()}`,
+      date: new Date('2026-08-15T10:30:00.000Z'),
+      ownerId: outsider.userId,
+    },
+  });
+  createdMeetingIds.add(meeting.id);
+
+  return { id: meeting.id, title: meeting.title };
+}
+
+async function setDisplayName(
+  request: APIRequestContext,
+  session: Session,
+  displayName: string,
+): Promise<void> {
+  const response = await request.patch(`${apiUrl}/users/me`, {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+    data: { displayName },
+  });
+  expect(response.ok()).toBeTruthy();
+}
+
+async function setAvatar(
+  request: APIRequestContext,
+  session: Session,
+  buffer: Buffer,
+): Promise<void> {
+  const response = await request.post(`${apiUrl}/users/me/avatar`, {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+    multipart: { avatar: { name: 'avatar.png', mimeType: 'image/png', buffer } },
+  });
+  expect(response.ok()).toBeTruthy();
+}
+
+async function removeAvatar(request: APIRequestContext, session: Session): Promise<void> {
+  const response = await request.delete(`${apiUrl}/users/me/avatar`, {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+  });
+  expect(response.ok()).toBeTruthy();
+}
+
+async function addParticipant(meeting: Meeting, participant: Session): Promise<void> {
+  await prisma.meetingParticipant.create({
+    data: { meetingId: meeting.id, userId: participant.userId },
+  });
 }
 
 async function authenticate(page: Page, session: Session): Promise<void> {
@@ -246,12 +307,13 @@ test('meeting form shows validation errors in one shared summary', async ({ page
   await expect(page.getByText('title must not be empty')).toHaveCount(0);
 });
 
-test('uploads files by selection and drag-and-drop with progress and processing feedback', async ({
+test('uploads files by selection and drag-and-drop with progress, processing feedback and uploader identity', async ({
   page,
   request,
 }) => {
   const owner = await register(request, 'phase-4-upload');
   const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Грейс Хоппер');
   await authenticate(page, owner);
   await page.goto(`/meetings/${meeting.id}`);
 
@@ -288,9 +350,12 @@ test('uploads files by selection and drag-and-drop with progress and processing 
   await expect(page.getByText('Файл передан. Проверяем и сохраняем…')).toBeVisible();
   await expect(progressbar).toHaveAttribute('aria-valuenow', '100');
   await expect(page.getByRole('status')).toContainText('Файл «phase-4-selection.pdf» загружен.');
-  await expect(
-    page.getByRole('listitem').filter({ hasText: 'phase-4-selection.pdf' }),
-  ).toBeVisible();
+  const selectionRow = page.getByRole('listitem').filter({ hasText: 'phase-4-selection.pdf' });
+  await expect(selectionRow).toBeVisible();
+  // The row comes from the POST response alone: the list is never refetched
+  // after an upload, so this is the only check that the response carries the
+  // uploader on the path that inserts it.
+  await expect(selectionRow).toContainText('Загрузил(а): Грейс Хоппер');
 
   await dropFile(page, {
     name: 'phase-4-drop.pdf',
@@ -301,7 +366,9 @@ test('uploads files by selection and drag-and-drop with progress and processing 
   await expect(page.getByRole('progressbar', { name: 'Загрузка phase-4-drop.pdf' })).toBeVisible();
   await expect(page.getByText('Файл передан. Проверяем и сохраняем…')).toBeVisible();
   await expect(page.getByRole('status')).toContainText('Файл «phase-4-drop.pdf» загружен.');
-  await expect(page.getByRole('listitem').filter({ hasText: 'phase-4-drop.pdf' })).toBeVisible();
+  const dropRow = page.getByRole('listitem').filter({ hasText: 'phase-4-drop.pdf' });
+  await expect(dropRow).toBeVisible();
+  await expect(dropRow).toContainText('Загрузил(а): Грейс Хоппер');
 });
 
 test('rejects unsupported and oversized files before upload in one error area', async ({
@@ -507,14 +574,531 @@ test('owner navigates to files, downloads metadata, and deletes with feedback', 
   await expect(page.getByText('У встречи пока нет файлов')).toBeVisible();
 });
 
+test('names the uploader of every file and shows none of it outside the meeting', async ({
+  page,
+  request,
+}) => {
+  const owner = await register(request, 'phase-6-uploader');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  const namedFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-named.pdf' });
+  const unnamedFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-unnamed.pdf' });
+
+  // The second uploader is created directly: every extra registration here
+  // spends the shared per-IP auth rate limit that the whole suite runs against.
+  const unnamedUploader = await createUserRecord('phase-6-uploader-unnamed');
+  await prisma.meetingFile.update({
+    where: { id: unnamedFile.id },
+    data: { uploadedById: unnamedUploader.userId, createdAt: new Date('2026-08-14T10:00:00.000Z') },
+  });
+  // The row below is photographed, and its upload date is part of the picture.
+  await prisma.meetingFile.update({
+    where: { id: namedFile.id },
+    data: { createdAt: new Date('2026-08-15T10:00:00.000Z') },
+  });
+  await authenticate(page, owner);
+
+  await page.goto(`/meetings/${meeting.id}`);
+
+  const namedRow = page.getByRole('listitem').filter({ hasText: 'phase-6-named.pdf' });
+  const unnamedRow = page.getByRole('listitem').filter({ hasText: 'phase-6-unnamed.pdf' });
+  await expect(namedRow).toContainText('Загрузил(а): Ада Лавлейс');
+  await expect(unnamedRow).toContainText('Загрузил(а): участник без имени');
+
+  // Naming the uploader is all this list does with the identity: no email, and
+  // no way from here into a private profile.
+  await expect(page.getByText(owner.email)).toHaveCount(0);
+  await expect(page.getByText(unnamedUploader.email)).toHaveCount(0);
+  await expect(namedRow.getByRole('link')).toHaveCount(0);
+
+  await expect(namedRow).toHaveScreenshot('meeting-file-uploader-identity.png');
+
+  // A deleted account leaves the file listed and downloadable, under an
+  // identity that no longer names anyone.
+  await prisma.user.delete({ where: { id: unnamedUploader.userId } });
+  await page.reload();
+
+  await expect(unnamedRow).toContainText('Загрузил(а): участник недоступен');
+  await expect(
+    unnamedRow.getByRole('button', { name: 'Скачать phase-6-unnamed.pdf' }),
+  ).toBeVisible();
+
+  const foreignMeeting = await createForeignMeeting('phase-6-uploader-outsider');
+  await page.goto(`/meetings/${foreignMeeting.id}`);
+
+  await expect(
+    page.getByText('Встреча не найдена или у вас больше нет к ней доступа.'),
+  ).toBeVisible();
+  await expect(page.getByText('Ада Лавлейс')).toHaveCount(0);
+});
+
+/**
+ * How many times assistive technology says one name while reading a row: the
+ * text it speaks, plus every label and alternative text an element adds on top
+ * of that text.
+ */
+async function countAnnouncements(row: Locator, name: string): Promise<number> {
+  return row.evaluate((element, spoken) => {
+    const labels = Array.from(element.querySelectorAll('[aria-label], img, [title]')).flatMap(
+      (node) => [
+        node.getAttribute('aria-label') ?? '',
+        node.getAttribute('alt') ?? '',
+        node.getAttribute('title') ?? '',
+      ],
+    );
+
+    return [element.textContent ?? '', ...labels].reduce(
+      (total, value) => total + value.split(spoken).length - 1,
+      0,
+    );
+  }, name);
+}
+
+test('shows the uploader avatar through the meeting, and falls back neutrally', async ({
+  page,
+  request,
+}) => {
+  // Two sizes tell the images apart: a replaced avatar keeps the same route and
+  // the same blob: URL shape, and only the decoded picture changes.
+  const firstAvatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const replacementAvatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAMAAAADCAIAAADZSiLoAAAAEElEQVR4nGPgmLgJghiwsACosQukZ7GQBAAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const owner = await register(request, 'phase-6-avatar');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(request, owner, firstAvatar);
+  const namedFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-avatar.pdf' });
+  const plainFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-no-avatar.pdf' });
+
+  const uploaderWithoutAvatar = await createUserRecord('phase-6-avatar-none');
+  await prisma.meetingFile.update({
+    where: { id: plainFile.id },
+    data: {
+      uploadedById: uploaderWithoutAvatar.userId,
+      createdAt: new Date('2026-08-14T10:00:00.000Z'),
+    },
+  });
+  // The row below is photographed, and its upload date is part of the picture.
+  await prisma.meetingFile.update({
+    where: { id: namedFile.id },
+    data: { createdAt: new Date('2026-08-15T10:00:00.000Z') },
+  });
+  await authenticate(page, owner);
+
+  await page.goto(`/meetings/${meeting.id}`);
+
+  const namedRow = page.getByRole('listitem').filter({ hasText: 'phase-6-avatar.pdf' });
+  const plainRow = page.getByRole('listitem').filter({ hasText: 'phase-6-no-avatar.pdf' });
+  const namedAvatar = namedRow.getByTestId('meeting-file-uploader-avatar');
+  const plainAvatar = plainRow.getByTestId('meeting-file-uploader-avatar');
+  const decodedWidth = () =>
+    namedAvatar.evaluate((element) => (element as HTMLImageElement).naturalWidth);
+
+  await expect(namedAvatar).toHaveAttribute('src', /^blob:/);
+  await expect.poll(decodedWidth).toBe(2);
+
+  // The text beside the avatar already names the uploader, so the picture is
+  // decorative: the row says that name once, not once for the image and once
+  // for the text.
+  await expect(namedAvatar).toHaveAttribute('alt', '');
+  await expect(namedRow.getByRole('img')).toHaveCount(0);
+  expect(await countAnnouncements(namedRow, 'Ада Лавлейс')).toBe(1);
+
+  // An uploader who never set an avatar gets the neutral fallback, and the
+  // avatar adds no email and no way into a private profile.
+  await expect(plainAvatar).toHaveAttribute('aria-hidden', 'true');
+  await expect(plainRow.getByRole('img')).toHaveCount(0);
+  expect(await countAnnouncements(plainRow, 'участник без имени')).toBe(1);
+  await expect(plainAvatar).toHaveText('?');
+  await expect(plainAvatar).not.toHaveAttribute('src');
+  await expect(namedRow.getByRole('link')).toHaveCount(0);
+  await expect(page.getByText(owner.email)).toHaveCount(0);
+
+  await expect(namedRow).toHaveScreenshot('meeting-file-uploader-avatar.png');
+
+  // A replacement reaches the historical file: the route is read again, not a
+  // copy captured when the file was uploaded.
+  await setAvatar(request, owner, replacementAvatar);
+  await page.reload();
+
+  await expect(namedAvatar).toHaveAttribute('src', /^blob:/);
+  await expect.poll(decodedWidth).toBe(3);
+
+  // A removal falls back to the initial without losing the uploader's name.
+  await removeAvatar(request, owner);
+  await page.reload();
+
+  await expect(namedAvatar).toHaveText('А');
+  await expect(namedAvatar).not.toHaveAttribute('src');
+  expect(await countAnnouncements(namedRow, 'Ада Лавлейс')).toBe(1);
+
+  // A deleted uploading account leaves the file listed under an identity that
+  // names nobody.
+  await prisma.user.delete({ where: { id: uploaderWithoutAvatar.userId } });
+  await page.reload();
+
+  await expect(plainAvatar).toHaveText('?');
+  expect(await countAnnouncements(plainRow, 'участник недоступен')).toBe(1);
+
+  // An image the browser cannot load falls back instead of showing a broken one.
+  await setAvatar(request, owner, firstAvatar);
+  await page.route('**/uploaders/*/avatar', (route) => route.fulfill({ status: 500 }));
+  await page.reload();
+
+  await expect(namedAvatar).toHaveText('А');
+  await expect(namedAvatar).not.toHaveAttribute('src');
+  await page.unroute('**/uploaders/*/avatar');
+
+  // The failure is not remembered: coming back in the same session — through
+  // links, so no reload clears the shared cache — reads the picture again
+  // instead of inheriting the refusal.
+  await page.getByRole('link', { name: 'Все встречи' }).click();
+  await expect(page).toHaveURL('/');
+  await page.getByRole('link', { name: `Открыть встречу ${meeting.title}` }).click();
+
+  await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
+  await expect(namedAvatar).toHaveAttribute('src', /^blob:/);
+  await expect.poll(decodedWidth).toBe(2);
+
+  // Outside the meeting there is no authorized context, so there is no avatar.
+  const foreignMeeting = await createForeignMeeting('phase-6-avatar-outsider');
+  await page.goto(`/meetings/${foreignMeeting.id}`);
+
+  await expect(
+    page.getByText('Встреча не найдена или у вас больше нет к ней доступа.'),
+  ).toBeVisible();
+  await expect(page.getByTestId('meeting-file-uploader-avatar')).toHaveCount(0);
+});
+
+test('reads one uploader avatar per uploader, and drops it on leaving', async ({
+  page,
+  request,
+}) => {
+  // Two sizes tell the two uploaders' pictures apart once they are decoded.
+  const ownerAvatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const otherAvatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAMAAAADCAIAAADZSiLoAAAAEElEQVR4nGPgmLgJghiwsACosQukZ7GQBAAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const owner = await register(request, 'phase-6-avatar-shared');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(request, owner, ownerAvatar);
+  for (const name of ['phase-6-shared-1.pdf', 'phase-6-shared-2.pdf', 'phase-6-shared-3.pdf']) {
+    await uploadPdf(request, owner, meeting, { name });
+  }
+
+  // A second uploader with an avatar of their own. Sharing has to stop at the
+  // person: rows that collapse onto one image across uploaders would show one
+  // participant's face under another participant's name.
+  const other = await register(request, 'phase-6-avatar-shared-other');
+  await setDisplayName(request, other, 'Грейс Хоппер');
+  await setAvatar(request, other, otherAvatar);
+  for (const name of ['phase-6-other-1.pdf', 'phase-6-other-2.pdf']) {
+    const file = await uploadPdf(request, owner, meeting, { name });
+    await prisma.meetingFile.update({
+      where: { id: file.id },
+      data: { uploadedById: other.userId },
+    });
+  }
+  await authenticate(page, owner);
+
+  const avatarRequests: string[] = [];
+  page.on('request', (sent) => {
+    if (sent.method() === 'GET' && sent.url().includes('/uploaders/')) {
+      avatarRequests.push(sent.url());
+    }
+  });
+
+  await page.goto(`/meetings/${meeting.id}`);
+
+  const avatarOf = (name: string) =>
+    page
+      .getByRole('listitem')
+      .filter({ hasText: name })
+      .getByTestId('meeting-file-uploader-avatar');
+  const sourceOf = (name: string) =>
+    avatarOf(name).evaluate((element) => (element as HTMLImageElement).src);
+  const widthOf = (name: string) =>
+    avatarOf(name).evaluate((element) => (element as HTMLImageElement).naturalWidth);
+
+  const avatars = page.getByTestId('meeting-file-uploader-avatar');
+  await expect(avatars).toHaveCount(5);
+  for (const index of [0, 1, 2, 3, 4]) {
+    await expect(avatars.nth(index)).toHaveAttribute('src', /^blob:/);
+  }
+
+  // The rows of one uploader differ only by file: the picture behind them is
+  // one download and one decoded image, not one per row.
+  const ownerSource = await sourceOf('phase-6-shared-1.pdf');
+  expect(await sourceOf('phase-6-shared-2.pdf')).toBe(ownerSource);
+  expect(await sourceOf('phase-6-shared-3.pdf')).toBe(ownerSource);
+
+  const otherSource = await sourceOf('phase-6-other-1.pdf');
+  expect(await sourceOf('phase-6-other-2.pdf')).toBe(otherSource);
+
+  // The two uploaders keep their own image, and it is the right one: the
+  // decoded sizes say the pictures were not swapped, only the URLs shared.
+  expect(otherSource).not.toBe(ownerSource);
+  await expect.poll(() => widthOf('phase-6-shared-1.pdf')).toBe(2);
+  await expect.poll(() => widthOf('phase-6-other-1.pdf')).toBe(3);
+
+  // One download per uploader: not one per row, and not one for both of them.
+  expect(avatarRequests).toHaveLength(2);
+
+  // Leaving the list while the image is still arriving stops the download,
+  // instead of letting a page nobody is looking at finish it.
+  await page.route('**/uploaders/*/avatar', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    await route
+      .fulfill({ status: 200, contentType: 'image/png', body: ownerAvatar })
+      .catch(() => {});
+  });
+  const abandoned = page.waitForEvent('requestfailed', (failed) =>
+    failed.url().includes('/uploaders/'),
+  );
+  await page.reload();
+  await expect(avatars.first()).toBeVisible();
+  await page.getByRole('link', { name: 'Все встречи' }).click();
+
+  await expect(page).toHaveURL('/');
+  expect((await abandoned).failure()?.errorText).toBeTruthy();
+  await page.unroute('**/uploaders/*/avatar');
+
+  // The abandoned download leaves nothing behind: coming back in the same
+  // session — no reload, so the cache is the one the abort tore down — loads
+  // the avatar again instead of inheriting a dead entry.
+  await page.getByRole('link', { name: `Открыть встречу ${meeting.title}` }).click();
+
+  await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
+  await expect(avatarOf('phase-6-shared-1.pdf')).toHaveAttribute('src', /^blob:/);
+  await expect.poll(() => widthOf('phase-6-shared-1.pdf')).toBe(2);
+});
+
+test('stops at one avatar request when the failure is the same for every row', async ({
+  page,
+  request,
+}) => {
+  const avatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const owner = await register(request, 'phase-6-avatar-shared-failure');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(request, owner, avatar);
+  for (const name of ['phase-6-fail-1.pdf', 'phase-6-fail-2.pdf', 'phase-6-fail-3.pdf']) {
+    await uploadPdf(request, owner, meeting, { name });
+  }
+  await authenticate(page, owner);
+
+  const avatarRequests: string[] = [];
+  page.on('request', (sent) => {
+    if (sent.method() === 'GET' && sent.url().includes('/uploaders/')) {
+      avatarRequests.push(sent.url());
+    }
+  });
+
+  const avatars = page.getByTestId('meeting-file-uploader-avatar');
+  // Every row shows the fallback before its picture arrives, so the initials
+  // alone do not say the reads are over. The count is only meaningful once no
+  // further request can still be on its way: the mocked route answers at once,
+  // so a second one would have been sent long inside this window.
+  const settledAvatarRequests = async () => {
+    await expect(avatars).toHaveCount(3);
+    for (const index of [0, 1, 2]) {
+      await expect(avatars.nth(index)).toHaveText('А');
+    }
+
+    await page.waitForTimeout(1_000);
+    return avatarRequests.length;
+  };
+
+  // The uploader removed their avatar after the list was built: the route
+  // answers the same for every one of their files, so reading a second row
+  // would only repeat the refusal — once per row, which is the duplication the
+  // shared cache exists to remove.
+  await page.route('**/uploaders/*/avatar', (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Avatar not found' }),
+    }),
+  );
+  await page.goto(`/meetings/${meeting.id}`);
+
+  expect(await settledAvatarRequests()).toBe(1);
+  await page.unroute('**/uploaders/*/avatar');
+
+  // An expired token or a failing API is the same story: the count stays at
+  // one however many rows the uploader has.
+  avatarRequests.length = 0;
+  await page.route('**/uploaders/*/avatar', (route) => route.fulfill({ status: 500 }));
+  await page.reload();
+
+  expect(await settledAvatarRequests()).toBe(1);
+  await page.unroute('**/uploaders/*/avatar');
+});
+
+test('reads one replacement for every row when the picture cannot be decoded', async ({
+  page,
+  request,
+}) => {
+  const avatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const owner = await register(request, 'phase-6-avatar-decode');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(request, owner, avatar);
+  for (const name of ['phase-6-decode-1.pdf', 'phase-6-decode-2.pdf', 'phase-6-decode-3.pdf']) {
+    await uploadPdf(request, owner, meeting, { name });
+  }
+  await authenticate(page, owner);
+
+  const avatarRequests: string[] = [];
+  page.on('request', (sent) => {
+    if (sent.method() === 'GET' && sent.url().includes('/uploaders/')) {
+      avatarRequests.push(sent.url());
+    }
+  });
+
+  const avatars = page.getByTestId('meeting-file-uploader-avatar');
+  const decodedWidths = () =>
+    avatars.evaluateAll((elements) =>
+      elements.map((element) => (element as HTMLImageElement).naturalWidth),
+    );
+
+  // A body that arrives truncated or corrupted decodes as a failure the API
+  // could not have caught: it verifies the picture at upload, so the bytes on
+  // disk are readable and a fresh download can still succeed.
+  let servedBodies = 0;
+  await page.route('**/uploaders/*/avatar', (route) => {
+    servedBodies += 1;
+    return route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: servedBodies === 1 ? Buffer.from('not-a-decodable-image') : avatar,
+    });
+  });
+  await page.goto(`/meetings/${meeting.id}`);
+
+  // The picture belongs to the uploader, so the row that reported the refusal
+  // does not carry it alone: every row of that uploader follows the key to its
+  // replacement, and the three of them read one replacement between them.
+  await expect(avatars).toHaveCount(3);
+  for (const index of [0, 1, 2]) {
+    await expect(avatars.nth(index)).toHaveAttribute('src', /^blob:/);
+  }
+  await expect.poll(decodedWidths).toEqual([2, 2, 2]);
+  await expect
+    .poll(() =>
+      avatars.evaluateAll(
+        (elements) => new Set(elements.map((e) => (e as HTMLImageElement).src)).size,
+      ),
+    )
+    .toBe(1);
+  expect(avatarRequests).toHaveLength(2);
+  await page.unroute('**/uploaders/*/avatar');
+
+  // Every attempt refused is the other half of the story: the key gives up for
+  // all of its rows at once, and stays given up for the rows mounted after it,
+  // even once the bytes on the wire are readable again.
+  avatarRequests.length = 0;
+  let servesReadableBytes = false;
+  await page.route('**/uploaders/*/avatar', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: servesReadableBytes ? avatar : Buffer.from('not-a-decodable-image'),
+    }),
+  );
+  await page.reload();
+
+  // Every row shows the fallback before its picture arrives, so the initials
+  // alone do not say the key gave up: the two refusals it takes have to be
+  // observed on the wire first. The mocked route answers at once, so a third
+  // request would have been sent long inside this window — and its absence is
+  // what makes the initials below mean an exhausted key rather than a pending
+  // one.
+  await expect(avatars).toHaveCount(3);
+  await expect.poll(() => avatarRequests.length).toBe(2);
+  await page.waitForTimeout(1_000);
+  expect(avatarRequests).toHaveLength(2);
+  for (const index of [0, 1, 2]) {
+    await expect(avatars.nth(index)).toHaveText('А');
+    await expect(avatars.nth(index)).not.toHaveAttribute('src');
+  }
+
+  // A row mounted after the key gave up shows the same fallback as its
+  // neighbours: an in-page upload inserts one at the top of the list, and one
+  // uploader half avatar and half initial in one list would be the bug. The
+  // route serves the readable picture from here on, so a row that asked for it
+  // again would show it.
+  servesReadableBytes = true;
+  await page.route(`${apiUrl}/meetings/${meeting.id}/files`, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+
+    const response = await route.fetch();
+    if (response.ok()) {
+      const uploaded = (await response.json()) as UploadedFile;
+      createdFiles.set(uploaded.id, {
+        meetingId: meeting.id,
+        ownerAccessToken: owner.accessToken,
+      });
+    }
+
+    await route.fulfill({ response });
+  });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'phase-6-decode-4.pdf',
+    mimeType: 'application/pdf',
+    buffer: Buffer.from('%PDF-1.7\nphase-6'),
+  });
+
+  await expect(
+    page.getByRole('listitem').filter({ hasText: 'phase-6-decode-4.pdf' }),
+  ).toBeVisible();
+  await expect(avatars).toHaveCount(4);
+  // The mocked route answers at once, so a request that a fourth row was going
+  // to send has been sent long inside this window.
+  await page.waitForTimeout(1_000);
+  for (const index of [0, 1, 2, 3]) {
+    await expect(avatars.nth(index)).toHaveText('А');
+    await expect(avatars.nth(index)).not.toHaveAttribute('src');
+  }
+
+  expect(avatarRequests).toHaveLength(2);
+  await page.unroute('**/uploaders/*/avatar');
+});
+
 test('participant can download but never sees the delete action', async ({ page, request }) => {
   const owner = await register(request, 'phase-3-shared-owner');
   const participant = await register(request, 'phase-3-participant');
   const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(
+    request,
+    owner,
+    Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+      'base64',
+    ),
+  );
   await uploadPdf(request, owner, meeting);
-  await prisma.meetingParticipant.create({
-    data: { meetingId: meeting.id, userId: participant.userId },
-  });
+  await addParticipant(meeting, participant);
   await authenticate(page, participant);
 
   await page.goto('/');
@@ -524,6 +1108,15 @@ test('participant can download but never sees the delete action', async ({ page,
   await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
   await expect(page.getByText('Участник', { exact: true })).toBeVisible();
   await expect(page.getByText('phase-3-notes.pdf')).toBeVisible();
+  const sharedRow = page.getByRole('listitem').filter({ hasText: 'phase-3-notes.pdf' });
+  await expect(sharedRow).toContainText('Загрузил(а): Ада Лавлейс');
+  // A participant is not the uploader, and still reads the avatar: the meeting
+  // file is what authorizes it.
+  await expect(sharedRow.getByTestId('meeting-file-uploader-avatar')).toHaveAttribute(
+    'src',
+    /^blob:/,
+  );
+  await expect(page.getByText(owner.email)).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Скачать phase-3-notes.pdf' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Удалить phase-3-notes.pdf' })).toHaveCount(0);
 

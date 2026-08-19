@@ -448,7 +448,10 @@ Successful requests return `201 Created`:
   "uploadedBy": {
     "handle": "T5cfLgm1Vb2VhV8Xz3rRDQ",
     "displayName": "Ada Lovelace",
-    "avatar": { "updatedAt": "2026-08-11T09:00:00.000Z" }
+    "avatar": {
+      "key": "8f14e45fce5fa3b1c0c9d6ef2a7b41d3",
+      "updatedAt": "2026-08-11T09:00:00.000Z"
+    }
   }
 }
 ```
@@ -496,6 +499,36 @@ content type, `Content-Length`, and `X-Content-Type-Options: nosniff`. This is
 the only way another user reads that avatar: the meeting is the subject, so the
 caller needs no uploader ID, gets no other profile field, and cannot reach the
 avatar of a user they share no meeting with.
+
+What this route streams is normally a list variant of the avatar, not the
+stored original: at most 96 px on each side and re-encoded in the stored format,
+so the row's 24 px picture never costs the `AVATAR_MAX_BYTES` (5 MiB by default)
+an upload may occupy. Fitting that box is not by itself enough to be served
+untouched, because an upload is only decoded to verify it: an avatar that is
+small on screen but larger than a list picture is worth on the wire — an
+animated WebP or APNG on a tiny canvas, a PNG or JPEG carrying large text, ICC
+or EXIF payloads — is re-encoded as well, which strips what no viewer sees. Only
+an avatar that is both within the box and already small is served byte for byte,
+as is one that no decoder accepts or that re-encodes no smaller; in those cases
+the response is the stored original at its full size. The derived picture keeps
+the source colour profile when the profile is small, and drops it when it is
+not, because a colour profile of hundreds of kilobytes or more costs far more
+than the 96 px picture it describes; animation is dropped either way, so an
+animated avatar is a still first frame in a row while the profile page keeps its
+frames.
+
+The variant is derived when the avatar is uploaded, from the bytes the upload
+was verified against, and on the first request for an avatar stored before that,
+then kept beside the original under the same storage key, so a replacement or a
+removal drops it with the avatar it was derived from and the route never serves
+a stale picture. A decision not to derive is recorded and never revisited, while
+a derivation that failed is not: the next request tries again rather than
+leaving the avatar at full size for the life of the picture.
+`GET /users/me/avatar` is not a list context and still serves the original.
+
+The variant and the revalidated caching below bound different costs and are both
+needed: the `ETag` keeps a repeat view to a `304` when the picture has not
+changed, while the variant bounds what a view that does download actually pays.
 
 Access is the containing meeting's own. An outsider receives the same
 `404 Meeting not found` as the meeting-file routes, an unauthenticated request

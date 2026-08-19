@@ -10,7 +10,12 @@ import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
-import { AvatarMetadata, AvatarValidationService } from './avatar-validation.service';
+import { AvatarListVariantService } from './avatar-list-variant.service';
+import {
+  AvatarMetadata,
+  AvatarValidationService,
+  ValidatedAvatar,
+} from './avatar-validation.service';
 import { LocalAvatarStorageService } from './local-avatar-storage.service';
 
 const profileSelect = {
@@ -35,6 +40,7 @@ export class ProfileService {
     private readonly prisma: PrismaService,
     private readonly avatars: LocalAvatarStorageService,
     private readonly avatarValidation: AvatarValidationService,
+    private readonly listVariants: AvatarListVariantService,
   ) {}
 
   async getCurrentProfile(userId: string): Promise<Profile> {
@@ -128,9 +134,9 @@ export class ProfileService {
 
   async uploadAvatar(userId: string, file: Express.Multer.File | undefined) {
     try {
-      const avatar = await this.avatarValidation.validate(file);
+      const validated = await this.avatarValidation.validate(file);
 
-      return await this.retainAvatar(userId, file, avatar);
+      return await this.retainAvatar(userId, file, validated);
     } finally {
       if (file) {
         await this.avatars.discardTemp(file.path);
@@ -171,8 +177,9 @@ export class ProfileService {
   private async retainAvatar(
     userId: string,
     file: Express.Multer.File | undefined,
-    avatar: AvatarMetadata,
+    validated: ValidatedAvatar,
   ) {
+    const { content, ...avatar } = validated;
     const storageKey = randomUUID();
     const updatedAt = new Date();
     let switched = false;
@@ -209,6 +216,11 @@ export class ProfileService {
         return existing.avatarStorageKey;
       });
       switched = true;
+      // The list variant is derived here, from the bytes validation already
+      // read, so that reading it stays a plain file open instead of a
+      // buffer-and-decode inside every first request, and the upload pays one
+      // read of the picture rather than two.
+      await this.listVariants.prepare(storageKey, avatar.mimeType, content);
       await this.discardSafely(existingStorageKey);
     } catch (error) {
       if (!switched) {

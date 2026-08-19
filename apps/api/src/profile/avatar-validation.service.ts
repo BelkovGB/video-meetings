@@ -21,6 +21,12 @@ const avatarTypes = {
 } as const;
 
 export type AvatarMetadata = { mimeType: string; sizeBytes: number };
+/**
+ * What validation read to verify the picture, handed back so the caller can
+ * derive from it instead of reading up to `AVATAR_MAX_BYTES` off disk again.
+ * The buffer is never part of a profile response.
+ */
+export type ValidatedAvatar = AvatarMetadata & { content: Buffer };
 
 function unsupportedAvatarType(): UnsupportedMediaTypeException {
   return new UnsupportedMediaTypeException({
@@ -31,7 +37,7 @@ function unsupportedAvatarType(): UnsupportedMediaTypeException {
 
 @Injectable()
 export class AvatarValidationService {
-  async validate(file: Express.Multer.File | undefined): Promise<AvatarMetadata> {
+  async validate(file: Express.Multer.File | undefined): Promise<ValidatedAvatar> {
     if (!file) {
       throw new BadRequestException({ message: 'Avatar is required', code: 'MISSING_AVATAR' });
     }
@@ -56,7 +62,7 @@ export class AvatarValidationService {
       throw unsupportedAvatarType();
     }
 
-    return { mimeType: allowedType.mimeType, sizeBytes: file.size };
+    return { mimeType: allowedType.mimeType, sizeBytes: file.size, content };
   }
 
   private async hasExpectedContent(

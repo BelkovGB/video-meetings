@@ -121,6 +121,35 @@ const validationAreas = [
 // проверка не выбрана, preflight не выполняется вовсе.
 const databaseBackedScripts = new Set(['test:e2e:api', 'test:e2e:web']);
 
+/**
+ * Проверки, применимые к изменению, не тронувшему ни одного токена кода:
+ * комментарии в исходниках и Markdown.
+ *
+ * Набор не пуст не из осторожности, а потому что «только комментарий» не
+ * значит «ничего не проверять»: незакрытый `/*` ловит парсер eslint,
+ * `@ts-expect-error` меняет исход type-check, переформатированный комментарий —
+ * исход prettier. Не входят только тесты: поведение программы токенами не
+ * изменилось, и e2e с поднятой базой проверяли бы то же самое дерево.
+ */
+const commentOnlyScripts = new Set(['format:check', 'lint', 'build']);
+
+export function validationScriptsForCommentOnlyChange(configuredScripts) {
+  const scripts = [...(configuredScripts ?? [])];
+  const selected = scripts.filter((script) => commentOnlyScripts.has(script));
+  // Пустой набор означал бы «валидация не выполнялась» — вместо него полный,
+  // по тому же принципу, что и в validationScriptsForChangedFiles.
+  if (selected.length === 0) {
+    return { scripts, skipped: [], narrowed: false, requiresDatabase: true };
+  }
+
+  return {
+    scripts: selected,
+    skipped: scripts.filter((script) => !commentOnlyScripts.has(script)),
+    narrowed: selected.length < scripts.length,
+    requiresDatabase: selected.some((script) => databaseBackedScripts.has(script)),
+  };
+}
+
 function normalizedPath(file) {
   return String(file ?? '')
     .trim()

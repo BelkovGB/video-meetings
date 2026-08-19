@@ -334,6 +334,11 @@ function applyValidationAndReviewDefaults(config) {
   // не соответствует карте областей в ralph-scope.mjs и оператору нужен
   // гарантированно полный прогон на каждой issue.
   config.scopedValidation ??= true;
+  // Дешёвая дорожка для правок, не тронувших ни одного токена кода: комментарии
+  // и Markdown проходят format:check, lint и build без тестов и без базы.
+  // Замечание уровня «переформулируй комментарий» перестаёт стоить полного
+  // e2e-прогона; поведение программы такой правкой не меняется по построению.
+  config.commentOnlyValidation ??= true;
   config.review ??= {
     enabled: true,
     model: 'gpt-5.6-terra',
@@ -350,6 +355,11 @@ function applyValidationAndReviewDefaults(config) {
   };
   config.milestoneReview.maxTurns ??= config.maxTurns;
   config.milestoneReview.maxFindings ??= 10;
+  // Инкрементальное milestone-ревью: со второго круга проверяются только
+  // коммиты после уже отревьюенного head плюс закрытие прежних findings, а не
+  // весь накопленный diff заново. Выключается для гарантированно полного
+  // повторного аудита каждого круга.
+  config.milestoneReview.incremental ??= true;
 }
 
 function validateLoopFields(config) {
@@ -464,6 +474,9 @@ function validateScriptNames(config) {
   if (typeof config.scopedValidation !== 'boolean') {
     fail('Поле "scopedValidation" должно быть true или false.');
   }
+  if (typeof config.commentOnlyValidation !== 'boolean') {
+    fail('Поле "commentOnlyValidation" должно быть true или false.');
+  }
 }
 
 function validateRuntimeSettings(config) {
@@ -553,6 +566,9 @@ function validateAgentRoles(config) {
   }
   if (!Number.isInteger(config.milestoneReview.maxTurns) || config.milestoneReview.maxTurns < 1) {
     fail('Поле "milestoneReview.maxTurns" должно быть целым числом больше 0.');
+  }
+  if (typeof config.milestoneReview.incremental !== 'boolean') {
+    fail('Поле "milestoneReview.incremental" должно быть true или false.');
   }
   if (
     !Number.isInteger(config.milestoneReview.maxFindings) ||

@@ -43,6 +43,25 @@ export type CurrentUserProfile = {
   avatar: Avatar | null;
 };
 
+/**
+ * The only user fields the API shares with another user, mirroring
+ * `uploadedBy` of a meeting file. Email and every other private profile value
+ * stay on the server, so nothing here may be widened without the API widening
+ * `userIdentitySelect` first.
+ */
+export type UserIdentity = {
+  /**
+   * Names the person within one meeting without naming them anywhere else: it
+   * is equal for every file they uploaded to this meeting, unrelated in any
+   * other, and it addresses their avatar route. It is not the user ID and
+   * cannot be turned back into one.
+   */
+  handle: string;
+  displayName: string | null;
+  /** `null` when the person has no avatar; `updatedAt` re-fetches a replaced one. */
+  avatar: { updatedAt: string } | null;
+};
+
 export type Meeting = {
   id: string;
   title: string;
@@ -59,4 +78,6 @@ export type MeetingFile = {
   mimeType: string;
   sizeBytes: number;
   uploadedAt: string;
+  /** `null` once the uploading account no longer exists; the file stays listed. */
+  uploadedBy: UserIdentity | null;
 };

@@ -162,6 +162,7 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
               </div>
 
               <MeetingFileList
+                meetingId={meetingId}
                 files={files}
                 canDelete={meeting.accessRole === 'owner'}
                 downloadingId={downloadingId}

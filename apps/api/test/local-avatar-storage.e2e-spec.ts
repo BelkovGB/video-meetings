@@ -1,4 +1,6 @@
-import { readFile, utimes, writeFile } from 'node:fs/promises';
+import { Logger } from '@nestjs/common';
+import * as fsPromises from 'node:fs/promises';
+import { readdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { avatarConfig } from '../src/profile/avatar.config';
@@ -222,5 +224,108 @@ describe('LocalAvatarStorageService', () => {
       await storage.discard(retainedKey);
       await storage.discard(orphanedKey);
     }
+  });
+
+  describe('derived variants', () => {
+    const variant = 'list-96';
+    const derived = Buffer.from('derived list-sized avatar');
+
+    async function storeAvatar(suffix: string): Promise<string> {
+      const key = `${storageKey}-${suffix}`;
+      const path = join(avatarConfig.tempDirectory, `${key}.part`);
+      await writeFile(path, content);
+      await storage.finalize(path, key);
+      return key;
+    }
+
+    /** Other tests in this suite keep their own `.part` fixtures alive. */
+    async function tempParts(): Promise<string[]> {
+      const entries = await readdir(avatarConfig.tempDirectory);
+      return entries.filter((entry) => entry.endsWith('.part')).sort();
+    }
+
+    it('reports an underived variant as absent, publishes it whole, and drops it with the avatar', async () => {
+      const key = await storeAvatar('variant');
+      const partsBefore = await tempParts();
+
+      try {
+        await expect(storage.openVariant(key, variant)).resolves.toBeNull();
+
+        await storage.saveVariant(key, variant, derived);
+
+        const opened = await storage.openVariant(key, variant);
+        expect(opened?.sizeBytes).toBe(derived.length);
+        const received: Buffer[] = [];
+        for await (const chunk of opened!.stream) {
+          received.push(Buffer.from(chunk));
+        }
+        expect(Buffer.concat(received)).toEqual(derived);
+        // Published through a rename, so nothing is left behind in the
+        // temporary directory for reconciliation to sweep.
+        expect(await tempParts()).toEqual(partsBefore);
+
+        // The derived file lives under the avatar's own storage key, so removal
+        // takes it along and no request can read a variant of a replaced
+        // picture.
+        await storage.discard(key);
+        await expect(storage.openVariant(key, variant)).resolves.toBeNull();
+      } finally {
+        await storage.discard(key);
+      }
+    });
+
+    it('reports a variant it cannot open for a reason other than absence as unavailable', async () => {
+      const key = await storeAvatar('variant-unreadable');
+      const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      const open = jest.spyOn(fsPromises, 'open').mockRejectedValueOnce(denied as never);
+
+      try {
+        // Absence is the ordinary "not derived yet" answer; anything else is a
+        // broken store and must not be mistaken for it.
+        await expect(storage.openVariant(key, variant)).rejects.toMatchObject({
+          response: { code: 'AVATAR_STORAGE_UNAVAILABLE' },
+        });
+      } finally {
+        open.mockRestore();
+        await storage.discard(key);
+      }
+    });
+
+    it('leaves the avatar readable and logs when a variant cannot be stored', async () => {
+      const key = await storeAvatar('variant-unwritable');
+      const partsBefore = await tempParts();
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      try {
+        // A destination inside the store that does not exist: the same shape as
+        // a full disk or a read-only volume, which must degrade the route to a
+        // slower answer rather than fail it.
+        await expect(
+          storage.saveVariant(key, `missing/${variant}`, derived),
+        ).resolves.toBeUndefined();
+
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('avatar variant'));
+        expect(await tempParts()).toEqual(partsBefore);
+        const avatar = await storage.open(key);
+        avatar.destroy();
+      } finally {
+        warn.mockRestore();
+        await storage.discard(key);
+      }
+    });
+
+    it('refuses to store a variant outside the configured directory', async () => {
+      const key = await storeAvatar('variant-escape');
+
+      try {
+        // A path-policy failure is a misconfiguration, not a transient write
+        // failure, so it must surface instead of degrading the route silently.
+        await expect(storage.saveVariant(key, '../../escaped', derived)).rejects.toThrow(
+          'outside the configured directory',
+        );
+      } finally {
+        await storage.discard(key);
+      }
+    });
   });
 });

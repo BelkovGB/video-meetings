@@ -199,21 +199,61 @@ function branchChangeHeading(changes) {
   );
 }
 
+/**
+ * Блок предыдущего milestone-ревью: со второго круга полный аудит не
+ * повторяется. Прежнее ревью передаётся дословно — оно уже опубликовано в PR и
+ * является ровно тем результатом, закрытие которого требуется проверить.
+ *
+ * Формулировка «up to head» точна и для цепочки: первый круг был полным, каждый
+ * следующий целиком покрывал свой срез, поэтому к прежнему head весь код
+ * проверен ровно по одному разу. Цитата оборачивается в blockquote: голые
+ * `### Findings` и маркеры из прежнего текста, переехав в summary нового ревью,
+ * ломали бы распознавание чистого PASS.
+ */
+function milestonePreviousReviewSection(previousReview) {
+  if (!previousReview) return '';
+  const scopeSentences = previousReview.hasNewCommits
+    ? 'The change inventory above covers only the commits added since that head. Verify at the current head that every finding of the previous review below is resolved and report it again only if it is not. Audit the new changes in full within the milestone scope, and make one bounded pass over how they interact with the already-reviewed implementation. Do not re-audit unchanged code that earlier reviews already cleared.'
+    : 'No commits were added since that head, so there is no new change inventory. Verify at the current head that every finding of the previous review below is resolved, and report it again only if it is not; there are no new changes to audit.';
+  const quotedReview = previousReview.body
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
+
+  return `
+
+Earlier milestone reviews already audited this pull request up to head ${previousReview.head}. ${scopeSentences} Findings listed under "Below the severity floor" are handled outside this review — do not re-verify or re-report them.
+
+The previous milestone review, quoted:
+
+${quotedReview}`;
+}
+
 export function buildMilestoneReviewPrompt(config, milestone, pullRequest, context = {}) {
   const milestoneDescription = milestone.description?.trim() || '(Milestone description is empty.)';
+  const evidenceSentence = context.previousReview
+    ? context.changes
+      ? 'Use the change inventory above as evidence, not as the definition of scope.'
+      : 'There is no new change inventory; use the previous review quoted below and targeted file reads as evidence.'
+    : `Use the branch diff against ${config.baseBranch} as evidence, not as the definition of scope.`;
+  const reviewBreadth = context.previousReview
+    ? context.previousReview.hasNewCommits
+      ? 'review the changes since the previously reviewed head and the resolution of every prior finding'
+      : 'verify the resolution of every finding of the previous review'
+    : 'review the complete current implementation rather than only the latest commit';
 
   return `Perform a read-only architectural review of pull request #${pullRequest.number} (${pullRequest.url}) for milestone "${milestone.title}".
 
 Milestone description:
 ${milestoneDescription}${context.changes ? reviewChangeInventory(branchChangeHeading(context.changes), context.changes) : ''}
 
-The branch and pull request may be cumulative and contain work from other milestones. Scope the review exclusively to the requirements in the milestone title and description, plus integrations strictly required for those requirements. Use the branch diff against ${config.baseBranch} as evidence, not as the definition of scope. Do not report defects in unrelated features, infrastructure, or files merely because they are present or changed in the pull request.
+The branch and pull request may be cumulative and contain work from other milestones. Scope the review exclusively to the requirements in the milestone title and description, plus integrations strictly required for those requirements. ${evidenceSentence} Do not report defects in unrelated features, infrastructure, or files merely because they are present or changed in the pull request.${milestonePreviousReviewSection(context.previousReview)}
 
 Ralph's control plane is maintained manually outside the product loop. Do not open .agents/** or scripts/ralph/**, and never report findings for those paths, for AGENTS.md, or for nested **/AGENTS.md files: they must never become milestone issues and must never be modified by an AFK implementation session. Do read AGENTS.md and the nested ones — they carry the conventions the product code is judged against.
 
 ${reviewShellGuidance(config)}
 
-Within that milestone scope, review the complete current implementation rather than only the latest commit. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. ${reviewDocumentationDiscovery(config)} Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
+Within that milestone scope, ${reviewBreadth}. Read AGENTS.md, relevant PRD/plan documents, issue-related documentation, and tests. ${reviewDocumentationDiscovery(config)} Look for cross-issue integration problems, architectural inconsistencies, security vulnerabilities, performance or scalability risks, regressions, missing tests, and deviations from the milestone requirements.
 
 The Ralph orchestrator has already completed every configured preflight and validation script successfully for the exact reviewed head. Do not rerun npm, npx, builds, linters, type checks, tests, dev servers, or any command that writes caches or artifacts. Use read-only file and git inspection only.
 

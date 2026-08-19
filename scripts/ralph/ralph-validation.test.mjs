@@ -10,6 +10,7 @@ import { summarizeCommandFailure } from './ralph-failure-summary.mjs';
 import { run } from './ralph-process-runner.mjs';
 import {
   assertValidationDependenciesCommitted,
+  changeIsCommentOnly,
   createTrustedValidationDependencySnapshot,
   createValidationWorkspaceSnapshot,
   ensureValidationImage,
@@ -18,10 +19,14 @@ import {
   readValidationAttestations,
   recordValidationAttestation,
   runConfiguredScripts,
+  scriptTokensIgnoringComments,
   validationAttestationKey,
   validationImageForSnapshot,
 } from './ralph-validation-runner.mjs';
-import { validationScriptsForChangedFiles } from './ralph-scope.mjs';
+import {
+  validationScriptsForChangedFiles,
+  validationScriptsForCommentOnlyChange,
+} from './ralph-scope.mjs';
 import {
   ralphConfigPath,
   trustedAgentInstructionFiles,
@@ -729,4 +734,177 @@ test('снимок повторяет рабочее дерево, а не ин�
     writeFileSync(absolute, original);
     if (snapshot) rmSync(snapshot, { recursive: true, force: true });
   }
+});
+
+test('поток токенов не зависит от комментариев, но зависит от кода', () => {
+  const withComment = 'const value = 1; // старый комментарий\n';
+  const reworded = '/** новый комментарий */\nconst value = 1;\n';
+  const changedCode = 'const value = 2;\n';
+
+  assert.equal(
+    scriptTokensIgnoringComments(withComment, 'a.ts'),
+    scriptTokensIgnoringComments(reworded, 'a.ts'),
+  );
+  assert.notEqual(
+    scriptTokensIgnoringComments(withComment, 'a.ts'),
+    scriptTokensIgnoringComments(changedCode, 'a.ts'),
+  );
+});
+
+test('строка внутри template literal не считается комментарием', () => {
+  const before = 'const s = `// как комментарий`;\n';
+  const after = 'const s = `// другой текст`;\n';
+
+  assert.notEqual(
+    scriptTokensIgnoringComments(before, 'a.ts'),
+    scriptTokensIgnoringComments(after, 'a.ts'),
+  );
+});
+
+test('файл, который парсер не принял, не признаётся правкой комментариев', () => {
+  // «Не уверен» — это null: определитель обязан ответить «нет», а не гадать по
+  // токенам файла, который не является программой.
+  assert.equal(scriptTokensIgnoringComments('a bc', 'a.ts'), null);
+});
+
+test('хвост template literal после подстановки — данные, а не комментарий', () => {
+  // Сырой сканер лексировал хвост `${...}` как код, и `//` в нём «съедал»
+  // остаток строки: подмена host и пути была токен-невидимой.
+  const before = 'const url = `${scheme}://${host}/api/v1`;\n';
+  const after = 'const url = `${scheme}://${attacker}/api/v2`;\n';
+
+  assert.notEqual(
+    scriptTokensIgnoringComments(before, 'a.ts'),
+    scriptTokensIgnoringComments(after, 'a.ts'),
+  );
+  assert.notEqual(scriptTokensIgnoringComments(before, 'a.ts'), null);
+});
+
+test('содержимое regex-литерала со слэшами не открывает комментарий', () => {
+  const before = 'const r = /[//]/;\nconst x = flag ? doA() : doB();\n';
+  const after = 'const r = /[//]/;\nconst x = flag ? doB() : doA();\n';
+
+  assert.notEqual(
+    scriptTokensIgnoringComments(before, 'a.ts'),
+    scriptTokensIgnoringComments(after, 'a.ts'),
+  );
+  assert.notEqual(scriptTokensIgnoringComments(before, 'a.ts'), null);
+});
+
+test('текст JSX — данные: его правка не проходит как комментарий', () => {
+  const before = 'export const x = <span>See https://example.com/help</span>;\n';
+  const after = 'export const x = <span>See https://evil.example/pwn</span>;\n';
+
+  assert.notEqual(
+    scriptTokensIgnoringComments(before, 'a.tsx'),
+    scriptTokensIgnoringComments(after, 'a.tsx'),
+  );
+  assert.notEqual(scriptTokensIgnoringComments(before, 'a.tsx'), null);
+});
+
+test('смена shebang меняет поток токенов', () => {
+  const node = '#!/usr/bin/env node\nmain();\n';
+  const deno = '#!/usr/bin/env deno\nmain();\n';
+  const removed = 'main();\n';
+
+  assert.notEqual(
+    scriptTokensIgnoringComments(node, 'a.mjs'),
+    scriptTokensIgnoringComments(deno, 'a.mjs'),
+  );
+  assert.notEqual(
+    scriptTokensIgnoringComments(node, 'a.mjs'),
+    scriptTokensIgnoringComments(removed, 'a.mjs'),
+  );
+});
+
+test('правка только комментариев и документации распознаётся, любая другая — нет', () => {
+  const heads = {
+    'apps/api/src/service.ts': 'const value = 1; // старый\n',
+    'docs/api.md': '# Старый текст\n',
+    'apps/api/src/other.ts': 'export const flag = true;\n',
+  };
+  const fakeRun = (command, args) => {
+    const file = args?.[1]?.replace(/^HEAD:/, '');
+    if (command === 'git' && args?.[0] === 'show' && heads[file] !== undefined) {
+      return { status: 0, stdout: heads[file].trim() };
+    }
+    return { status: 1, stdout: '' };
+  };
+  const withWorkingTree = (tree) => ({
+    run: fakeRun,
+    readFile: (file) => {
+      if (tree[file] === undefined) throw new Error('ENOENT');
+      return tree[file];
+    },
+  });
+
+  // Комментарий в коде и текст документации — да.
+  assert.equal(
+    changeIsCommentOnly(
+      ['apps/api/src/service.ts', 'docs/api.md'],
+      withWorkingTree({
+        'apps/api/src/service.ts': 'const value = 1; // новый\n',
+        'docs/api.md': '# Новый текст\n',
+      }),
+    ),
+    true,
+  );
+  // Изменение кода — нет.
+  assert.equal(
+    changeIsCommentOnly(
+      ['apps/api/src/service.ts'],
+      withWorkingTree({ 'apps/api/src/service.ts': 'const value = 2; // старый\n' }),
+    ),
+    false,
+  );
+  // Новый файл, которого нет в HEAD, — нет.
+  assert.equal(
+    changeIsCommentOnly(
+      ['apps/api/src/created.ts'],
+      withWorkingTree({ 'apps/api/src/created.ts': '// только комментарий\n' }),
+    ),
+    false,
+  );
+  // Удалённый из дерева файл — нет.
+  assert.equal(changeIsCommentOnly(['apps/api/src/service.ts'], withWorkingTree({})), false);
+  // Незнакомое расширение — нет, даже если это правка комментария.
+  assert.equal(changeIsCommentOnly(['apps/api/prisma/schema.prisma'], withWorkingTree({})), false);
+  // Дерево совпадает с HEAD (recovery закоммиченной работы) — нет: сравнивать
+  // нечего, и сокращать набор не на чем.
+  assert.equal(
+    changeIsCommentOnly(
+      ['apps/api/src/service.ts'],
+      withWorkingTree({ 'apps/api/src/service.ts': heads['apps/api/src/service.ts'] }),
+    ),
+    false,
+  );
+});
+
+test('дешёвая дорожка оставляет проверки парсинга и сборки, но не тесты', () => {
+  const configured = [
+    'format:check',
+    'lint',
+    'build',
+    'test:ralph',
+    'test:e2e:api',
+    'test:e2e:web',
+  ];
+
+  const selection = validationScriptsForCommentOnlyChange(configured);
+  assert.deepEqual(selection.scripts, ['format:check', 'lint', 'build']);
+  assert.deepEqual(selection.skipped, ['test:ralph', 'test:e2e:api', 'test:e2e:web']);
+  assert.equal(selection.narrowed, true);
+  assert.equal(selection.requiresDatabase, false);
+
+  // Пустое пересечение не может означать «валидация не выполнялась».
+  const fallback = validationScriptsForCommentOnlyChange(['test:e2e:api']);
+  assert.deepEqual(fallback.scripts, ['test:e2e:api']);
+  assert.equal(fallback.narrowed, false);
+  assert.equal(fallback.requiresDatabase, true);
+});
+
+test('дешёвая дорожка включена по умолчанию и объявлена в конфиге', () => {
+  const config = loadConfig();
+  assert.equal(config.commentOnlyValidation, true);
+  assert.equal(config.milestoneReview.incremental, true);
 });

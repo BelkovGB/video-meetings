@@ -1,6 +1,7 @@
 import { AvatarValidationService } from '../src/profile/avatar-validation.service';
 import { LocalAvatarStorageService } from '../src/profile/local-avatar-storage.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { AvatarListVariantService } from '../src/profile/avatar-list-variant.service';
 import { ProfileService } from '../src/profile/profile.service';
 
 describe('ProfileService avatar replacement', () => {
@@ -8,6 +9,14 @@ describe('ProfileService avatar replacement', () => {
   const existingStorageKey = 'existing-avatar';
   const file = { path: 'temporary-avatar.part' } as Express.Multer.File;
   const avatar = { mimeType: 'image/png', sizeBytes: 123 };
+
+  /** Deriving the list variant is an optimisation of the read path: it must
+   * never decide the outcome of a replacement. */
+  function listVariants() {
+    return {
+      prepare: jest.fn().mockResolvedValue(undefined),
+    } as unknown as AvatarListVariantService;
+  }
 
   function createService(options?: {
     finalizeError?: Error;
@@ -62,6 +71,7 @@ describe('ProfileService avatar replacement', () => {
         prisma as unknown as PrismaService,
         avatars as unknown as LocalAvatarStorageService,
         validation as unknown as AvatarValidationService,
+        listVariants(),
       ),
       prisma,
       avatars,
@@ -189,11 +199,13 @@ describe('ProfileService avatar replacement', () => {
       prisma as unknown as PrismaService,
       avatars as unknown as LocalAvatarStorageService,
       { validate: jest.fn().mockResolvedValue(avatar) } as unknown as AvatarValidationService,
+      listVariants(),
     );
     const secondService = new ProfileService(
       prisma as unknown as PrismaService,
       avatars as unknown as LocalAvatarStorageService,
       { validate: jest.fn().mockResolvedValue(avatar) } as unknown as AvatarValidationService,
+      listVariants(),
     );
 
     const first = firstService.uploadAvatar(userId, { ...file, path: 'first.part' });

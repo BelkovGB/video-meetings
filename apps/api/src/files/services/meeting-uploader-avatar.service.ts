@@ -2,7 +2,8 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { MeetingFileStatus } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
-import { AvatarContent, UserAvatarService } from '../../profile/user-avatar.service';
+import { AvatarContent } from '../../profile/avatar-content';
+import { UserAvatarService } from '../../profile/user-avatar.service';
 import { deriveUserHandle } from '../../users/models/user-identity.response';
 import { MeetingAccessService } from './meeting-access.service';
 
@@ -97,7 +98,12 @@ export class MeetingUploaderAvatarService {
    * image as the current one.
    */
   async open(uploaderId: string): Promise<UploaderAvatarContent> {
-    const avatar = await this.userAvatars.open(uploaderId);
+    // The list-sized variant, not the stored original: this route paints a
+    // 24 px avatar beside a file name, and the original may be up to
+    // `AVATAR_MAX_BYTES`. The entity tag is still the avatar's own version, so
+    // a client that revalidates asks about the picture rather than the size it
+    // was served in.
+    const avatar = await this.userAvatars.openListVariant(uploaderId);
 
     return { ...avatar, etag: deriveAvatarEntityTag(avatar.updatedAt) };
   }

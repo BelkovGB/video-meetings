@@ -100,24 +100,61 @@ private `AVATAR_DIR/<storageKey>/content` object store and the profile service
 writes its metadata to the user row. Failed validation and failed persistence
 discard the candidate or final object. Startup removes only `.part` files older
 than the configured safety window, so a second API instance cannot remove an
-active upload on a shared storage volume. Retrieval has two routes, both
-streaming a verified object with private, non-sniffable headers.
-`GET /users/me/avatar` streams the requesting user's own object.
+active upload on a shared storage volume. `AvatarListVariantService`, also owned
+by `ProfileModule`, then derives a list-sized picture from the bytes validation
+already read and stores it beside the original as
+`AVATAR_DIR/<storageKey>/list-96`, publishing it through a `.part` file in
+`AVATAR_TEMP_DIR` like every other write; an empty `list-96` records the
+decision that the original is what a list should receive — it is within the box
+and the byte budget, or re-encoding it pays nothing — so it is never copied
+twice. That marker is written only for a decision: a derivation that threw
+leaves nothing behind, so a transient decode failure does not pin the avatar to
+full-size delivery. Deriving at upload keeps reads a plain file open, and
+keeping the derived file under the avatar's own storage key means replacement,
+removal and reconciliation drop it with the avatar it belongs to.
+
+Retrieval has two routes, both streaming a verified object with private,
+non-sniffable headers. `GET /users/me/avatar` streams the requesting user's own
+original: the profile screen is not a list context.
 `GET /meetings/:meetingId/uploaders/:handle/avatar`, owned by `FilesModule`,
 streams the avatar of an identity that uploaded a meeting file:
 `MeetingUploaderAvatarService` first requires the caller's access to the
 meeting, then matches the handle against the uploaders of its ready files and
 delegates to the exported `UserAvatarService`, which opens the object but
-decides nothing about who may read it. An avatar is therefore reachable only
-through a meeting the caller owns or takes part in, never through a user
-identifier, and the rest of that uploader's profile stays private. The service
-resolves the avatar's version before opening it, so the controller answers a
-revalidated request with `304` and no file access. Neither the profile response
-nor the HTTP API exposes storage keys.
+decides nothing about who may read it. That route asks for the list variant,
+because it paints a row rather than a profile picture. An avatar is therefore
+reachable only through a meeting the caller owns or takes part in, never through
+a user identifier, and the rest of that uploader's profile stays private. The
+service resolves the avatar's version before opening it, so the controller
+answers a revalidated request with `304` and no file access; the version is the
+stored avatar's own, so a client revalidating asks about the picture rather than
+the size it was served in. Neither the profile response nor the HTTP API exposes
+storage keys.
 Avatar removal clears the user-row metadata atomically before private-object
 cleanup. A transient cleanup failure leaves the user in the stable
 avatar-absent state and is reconciled by the storage service without exposing
 the object's internal path.
+
+Another user reads an avatar only through shared activity, never by user ID:
+`GET /meetings/:meetingId/files/:fileId/uploader-avatar` streams it under the
+containing meeting's own authorization. That route is a list context and so
+deliberately answers with the derived `list-96` picture rather than the bytes
+`GET /users/me/avatar` returns, falling back to the original only when it was
+never derived and cannot be. So that a client can tell that many rows
+name one picture and read it once, the identity in a shared response carries an
+opaque `avatar.key` where the user ID would otherwise be: a MAC of the uploader's
+ID, scoped to the meeting, keyed on material derived from the configured
+`JWT_SECRET` under a distinct label. Deriving it from configuration rather than a
+per-process random value keeps every instance behind a load balancer, and the
+same instance after a restart, agreeing on the key, so a response from one
+instance does not invalidate a cache filled by another. `userIdentitySelect`
+stays the allowlist of fields a shared response may expose; the user ID is read
+through the separate `userIdentityReadSelect` and is never emitted. Failures on
+that route are split for the same reason the key exists: a file that is gone
+answers `404 FILE_NOT_FOUND`, which is scoped to the one route and lets a client
+read the uploader's avatar through another of their files, while every other
+failure answers identically for all of them and must end the read at one
+request, not one per row.
 
 ## Ownership and authorization
 

@@ -1,10 +1,13 @@
 import { INestApplication } from '@nestjs/common';
 import { MeetingFileStatus } from '@prisma/client';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { access, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
+
+const sharp = createRequire(__filename)('sharp') as typeof import('sharp').default;
 
 import { AppModule } from '../src/app.module';
 import { configureHttpApplication } from '../src/http-application';
@@ -36,6 +39,28 @@ const replacementPng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEklEQVQImWM4IRd1Qi6KAUIBACTGBQFoaYMtAAAAAElFTkSuQmCC',
   'base64',
 );
+
+/**
+ * An avatar wider than a list variant. It stays a coarse pattern so its PNG
+ * fits the 1024-byte AVATAR_MAX_BYTES of this suite; production allows 5 MiB,
+ * where the same derivation saves far more.
+ */
+async function createWideAvatarPng(): Promise<Buffer> {
+  const size = 256;
+  const pixels = Buffer.alloc(size * size * 3);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const index = (y * size + x) * 3;
+      pixels[index] = 20;
+      pixels[index + 1] = ((x >> 7) + (y >> 7)) % 2 === 0 ? 40 : 200;
+      pixels[index + 2] = 60;
+    }
+  }
+
+  return sharp(pixels, { raw: { width: size, height: size, channels: 3 } })
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
 
 function createUniqueValue(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -680,6 +705,39 @@ describe('Meeting files (e2e)', () => {
       expect(response.headers.etag).toEqual(expect.any(String));
       expect(Buffer.from(response.body as Buffer)).toEqual(validPng);
     }
+  });
+
+  it('serves a list-sized variant of a large avatar, and the owner still gets the original', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const wideAvatar = await createWideAvatarPng();
+    await uploadAvatar(owner, wideAvatar);
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    const served = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect('Content-Type', /image\/png/)
+      .expect(200);
+
+    // A row paints a 24 px picture: the meeting's main screen must not pay for
+    // the stored original, which production allows up to AVATAR_MAX_BYTES.
+    const body = Buffer.from(served.body as Buffer);
+    expect(body.length).toBeLessThan(wideAvatar.length);
+    expect(Number(served.headers['content-length'])).toBe(body.length);
+
+    const metadata = await sharp(body).metadata();
+    expect(metadata.format).toBe('png');
+    expect(Math.max(metadata.width ?? 0, metadata.height ?? 0)).toBeLessThanOrEqual(96);
+
+    // The owner's own route is not a list context and still streams the stored
+    // original, so nothing about this reduction reaches the profile screen.
+    const original = await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(Buffer.from(original.body as Buffer)).toEqual(wideAvatar);
   });
 
   it('answers a revalidation with 304 until the avatar is replaced', async () => {

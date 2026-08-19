@@ -37,10 +37,15 @@ import {
 } from './ralph-issue-contract.mjs';
 import {
   createOrReopenReviewIssues,
+  deferredFindingFingerprint,
+  deferredFindingMarker,
   groupFindingsIntoBatches,
+  lastPublishedMilestoneReview,
   limitMilestoneReviewFindings,
+  milestonePartialCoverageMarker,
   milestonePassReviewIsClean,
   milestoneReviewMarker,
+  recordDeferredFindings,
   reviewFindingFingerprint,
   reviewFindingMarker,
 } from './ralph-milestone-review.mjs';
@@ -998,6 +1003,226 @@ test('повторное создание задачи не заводит ду�
   assert.deepEqual(
     queued.map((issue) => issue.number),
     [85],
+  );
+});
+
+test('отпечаток отложенного замечания не зависит от PR, строки и круга ревью', () => {
+  const finding = {
+    severity: 'P3',
+    title: 'Комментарий обещает больше, чем делает код',
+    file: 'apps/api/src/profile/avatar-list-variant.service.ts',
+    line: 101,
+  };
+
+  assert.equal(
+    deferredFindingFingerprint(finding),
+    deferredFindingFingerprint({ ...finding, line: 999 }),
+  );
+  assert.notEqual(
+    deferredFindingFingerprint(finding),
+    deferredFindingFingerprint({ ...finding, file: 'apps/api/src/other.ts' }),
+  );
+  assert.notEqual(
+    deferredFindingFingerprint(finding),
+    deferredFindingFingerprint({ ...finding, severity: 'P2' }),
+  );
+});
+
+test('замечания ниже порога записываются отложенными issues без дубликатов', () => {
+  const config = { reviewSeverityFloor: 'P1' };
+  const belowFloor = [
+    { severity: 'P2', title: 'Уже записано и открыто', body: 'x', file: 'one.ts', line: 1 },
+    {
+      severity: 'P3',
+      title: 'Уже записано и закрыто человеком',
+      body: 'y',
+      file: 'two.ts',
+      line: 2,
+    },
+    { severity: 'P3', title: 'Новое замечание', body: 'z', file: 'three.ts', line: 3 },
+  ];
+  const existing = [
+    { number: 11, state: 'OPEN', body: deferredFindingMarker(belowFloor[0]) },
+    { number: 12, state: 'CLOSED', body: deferredFindingMarker(belowFloor[1]) },
+  ];
+  const created = [];
+  let labelEnsured = 0;
+
+  const recorded = recordDeferredFindings(
+    config,
+    'owner/repository',
+    { verdict: 'pass', findings: [], belowFloorFindings: belowFloor },
+    'independent review of issue #99',
+    {
+      ensureDeferredFindingLabel: () => {
+        labelEnsured += 1;
+      },
+      listDeferredIssues: () => existing,
+      createDeferredFindingIssue: (_config, _repository, batch) => {
+        created.push(batch.map((finding) => finding.title));
+        return {
+          number: 13,
+          state: 'OPEN',
+          body: batch.map((finding) => deferredFindingMarker(finding)).join('\n'),
+          url: 'https://example.test/issues/13',
+        };
+      },
+    },
+  );
+
+  assert.equal(labelEnsured, 1);
+  // Открытая и закрытая существующие issues не трогаются: закрыл человек,
+  // и повторная находка того же текста не отменяет его решения.
+  assert.deepEqual(created, [['Новое замечание']]);
+  assert.deepEqual(
+    recorded.map((issue) => issue.number),
+    [13],
+  );
+});
+
+test('без замечаний ниже порога отложенные issues не создаются и GitHub не трогается', () => {
+  const untouched = () => assert.fail('GitHub не должен вызываться');
+
+  assert.deepEqual(
+    recordDeferredFindings(
+      { reviewSeverityFloor: 'P3' },
+      'owner/repository',
+      { verdict: 'fail', findings: [{ severity: 'P1' }] },
+      'review',
+      {
+        ensureDeferredFindingLabel: untouched,
+        listDeferredIssues: untouched,
+        createDeferredFindingIssue: untouched,
+      },
+    ),
+    [],
+  );
+});
+
+test('группа с уже записанным замечанием не топит остальные: создаётся issue из свежих', () => {
+  const config = { reviewSeverityFloor: 'P1' };
+  const sameFile = [
+    { severity: 'P3', title: 'Уже записано', body: 'a', file: 'shared.ts', line: 1 },
+    { severity: 'P3', title: 'Свежее из той же группы', body: 'b', file: 'shared.ts', line: 2 },
+  ];
+  const existing = [{ number: 21, state: 'OPEN', body: deferredFindingMarker(sameFile[0]) }];
+  const created = [];
+
+  recordDeferredFindings(
+    config,
+    'owner/repository',
+    { verdict: 'pass', findings: [], belowFloorFindings: sameFile },
+    'review',
+    {
+      ensureDeferredFindingLabel: () => {},
+      listDeferredIssues: () => existing,
+      createDeferredFindingIssue: (_config, _repository, batch) => {
+        created.push(batch.map((finding) => finding.title));
+        return { number: 22, state: 'OPEN', body: '', url: 'u' };
+      },
+    },
+  );
+
+  assert.deepEqual(created, [['Свежее из той же группы']]);
+});
+
+test('базой инкрементального milestone-ревью служит только совместимое новейшее ревью', () => {
+  const config = {
+    baseBranch: 'master',
+    milestoneReview: { model: 'model-one', effort: 'high' },
+  };
+  const milestone = { number: 7, title: 'Phase 6', description: 'Uploader identity.' };
+  const pullRequest = { number: 89 };
+  const oldHead = 'a'.repeat(40);
+  const newHead = 'b'.repeat(40);
+  const reviewFor = (head, extra = '') =>
+    `${milestoneReviewMarker(config, milestone, { headRefOid: head })}${extra}\nтекст ревью ${head.slice(0, 4)}`;
+  const listedReviews = (bodies) => ({
+    githubPagedArray: () => bodies.map((body) => ({ body })),
+  });
+
+  // Новейшее подходящее ревью побеждает более старое.
+  const newest = lastPublishedMilestoneReview(
+    config,
+    milestone,
+    'owner/repository',
+    pullRequest,
+    listedReviews([reviewFor(oldHead), reviewFor(newHead)]),
+  );
+  assert.equal(newest.head, newHead);
+
+  // Ревью с неполным покрытием (обрезано maxFindings) базой не становится:
+  // отрезанные findings живут только в обещании «deferred to the next full
+  // review», и сузить следующий круг значило бы потерять их навсегда.
+  assert.equal(
+    lastPublishedMilestoneReview(
+      config,
+      milestone,
+      'owner/repository',
+      pullRequest,
+      listedReviews([reviewFor(newHead, `\n${milestonePartialCoverageMarker}`)]),
+    ),
+    null,
+  );
+
+  // Смена модели или effort — документированный способ заказать свежий полный
+  // аудит: ревью прежней модели базой не признаётся.
+  assert.equal(
+    lastPublishedMilestoneReview(
+      { ...config, milestoneReview: { model: 'model-two', effort: 'high' } },
+      milestone,
+      'owner/repository',
+      pullRequest,
+      listedReviews([reviewFor(newHead)]),
+    ),
+    null,
+  );
+
+  // Ревью другого milestone на том же PR не учитывается.
+  assert.equal(
+    lastPublishedMilestoneReview(
+      config,
+      { ...milestone, number: 8, title: 'Phase 7' },
+      'owner/repository',
+      pullRequest,
+      listedReviews([reviewFor(newHead)]),
+    ),
+    null,
+  );
+});
+
+test('чистый PASS с секцией ниже порога распознаётся как уже опубликованный', () => {
+  const config = { baseBranch: 'master', milestoneReview: { model: 'm', effort: 'high' } };
+  const milestone = { number: 7, title: 'Phase 6', description: 'D' };
+  const pullRequest = { headRefOid: 'c'.repeat(40) };
+  const marker = milestoneReviewMarker(config, milestone, pullRequest);
+  const passBody = (belowFloor) => `${marker}
+## Ralph Loop: milestone review
+
+- **Verdict:** **PASS**
+
+Сводка.
+
+### Findings
+
+No actionable findings.
+${belowFloor}
+The pull request remains draft so a human can make the final merge decision.`;
+
+  assert.equal(milestonePassReviewIsClean(passBody(''), marker), true);
+  assert.equal(
+    milestonePassReviewIsClean(
+      passBody(
+        '\n### Below the severity floor (not blocking)\n\n- **P3 — мелочь** (a.ts:1)\n  текст\n',
+      ),
+      marker,
+    ),
+    true,
+  );
+  // FAIL с настоящими findings чистым PASS не считается.
+  assert.equal(
+    milestonePassReviewIsClean(passBody('\n- **P1 — дефект** (a.ts:1)\n  текст\n'), marker),
+    false,
   );
 });
 

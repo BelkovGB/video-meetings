@@ -10,12 +10,17 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { readJsonFile, writeJsonAtomic } from './ralph-runtime.mjs';
-import { fail, validationScriptsForChangedFiles } from './ralph-scope.mjs';
+import {
+  fail,
+  validationScriptsForChangedFiles,
+  validationScriptsForCommentOnlyChange,
+} from './ralph-scope.mjs';
 import { credentialFreeEnvironment, run } from './ralph-process-runner.mjs';
 import { agentInstructionFiles, trustedFileHash } from './ralph-config.mjs';
 import { stripAnsi } from './ralph-failure-summary.mjs';
@@ -432,6 +437,137 @@ export function runPreflight(config) {
   });
 }
 
+// -----------------------------------------------------------------------------
+// Дешёвая дорожка: изменение, не тронувшее ни одного токена кода
+// -----------------------------------------------------------------------------
+
+// TypeScript берётся из node_modules проекта и только по требованию: загрузка
+// стоит сотни миллисекунд, а нужна она лишь когда сокращённый набор всё равно
+// требует базу и есть шанс, что правка не тронула код.
+let cachedTypeScript;
+
+function loadTypeScript() {
+  if (cachedTypeScript === undefined) {
+    try {
+      cachedTypeScript = createRequire(path.join(projectRoot, 'package.json'))('typescript');
+    } catch {
+      cachedTypeScript = null;
+    }
+  }
+  return cachedTypeScript;
+}
+
+const commentOnlyScriptExtensions = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i;
+const commentOnlyDocumentationExtensions = /\.md$/i;
+
+/**
+ * Поток токенов файла без комментариев и пробелов.
+ *
+ * Парсер компилятора, а не сырой сканер и не регулярное выражение. Построчный
+ * разбор принял бы строку `` `// текст` `` внутри template literal за
+ * комментарий. Сырой сканер без контекста парсера ошибается тоньше: после
+ * подстановки `${...}` он лексирует хвост template literal как обычный код, и
+ * `//` в нём открывает «комментарий», съедающий остаток строки вместе с
+ * данными; то же с телом regex-литерала и текстом JSX. Обход дерева, собранного
+ * `createSourceFile`, отдаёт токены с настоящими границами: хвосты template,
+ * regex и JSX-текст — это содержимое токенов, и их изменение меняет поток.
+ * Файл, который парсер не принял, возвращает null — «не уверен, дорожка не
+ * применяется».
+ */
+export function scriptTokensIgnoringComments(source, fileName, typescript = loadTypeScript()) {
+  if (!typescript) return null;
+  const text = String(source);
+  const scriptKind = /\.(tsx|jsx)$/i.test(fileName)
+    ? typescript.ScriptKind.TSX
+    : typescript.ScriptKind.TS;
+  const sourceFile = typescript.createSourceFile(
+    fileName,
+    text,
+    typescript.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    scriptKind,
+  );
+  if ((sourceFile.parseDiagnostics ?? []).length > 0) return null;
+
+  const tokens = [];
+  // Shebang — не токен для сканера, но смена интерпретатора меняет поведение
+  // напрямую исполняемого файла; строка входит в поток синтетическим токеном.
+  const shebang = typescript.getShebang?.(text);
+  if (shebang) tokens.push(`shebang:${shebang.length}:${shebang}`);
+  const visit = (node) => {
+    // JSDoc парсер отдаёт узлами дерева, но `/** ... */` — такой же
+    // комментарий, как `//`: в поток токенов он не входит.
+    if (
+      node.kind >= typescript.SyntaxKind.FirstJSDocNode &&
+      node.kind <= typescript.SyntaxKind.LastJSDocNode
+    ) {
+      return;
+    }
+    if (node.getChildCount(sourceFile) === 0) {
+      const tokenText = node.getText(sourceFile);
+      // Длина в префиксе делает границы токенов однозначными: без неё пары
+      // токенов `a`+`bc` и `ab`+`c` склеились бы в одну строку.
+      tokens.push(`${node.kind}:${tokenText.length}:${tokenText}`);
+      return;
+    }
+    for (const child of node.getChildren(sourceFile)) visit(child);
+  };
+  visit(sourceFile);
+  return tokens.join(' ');
+}
+
+/**
+ * Не изменила ли правка ничего, кроме комментариев и документации.
+ *
+ * Сравнивается рабочее дерево с HEAD, поэтому функция отвечает только за ещё
+ * не закоммиченную работу; для валидации уже закоммиченного изменения ответ
+ * бессмыслен, и вызывающий обязан не задавать вопрос — сравнение дерева с HEAD
+ * там описывало бы посторонние правки оператора, а не проверяемый commit.
+ * Любая неуверенность — новый файл, удалённый файл, незнакомое расширение,
+ * недоступный TypeScript, не принятый парсером файл — тоже «нет»: цена ошибки
+ * в эту сторону — лишний прогон, в обратную — пропущенные тесты.
+ */
+export function changeIsCommentOnly(changedFiles, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const readFile =
+    dependencies.readFile ?? ((file) => readFileSync(path.join(projectRoot, file), 'utf8'));
+  const typescript = dependencies.typescript ?? loadTypeScript();
+  if (!typescript) return false;
+
+  let sawChange = false;
+  for (const file of changedFiles ?? []) {
+    const normalized = String(file ?? '')
+      .trim()
+      .replaceAll('\\', '/');
+    const isDocumentation = commentOnlyDocumentationExtensions.test(normalized);
+    if (!isDocumentation && !commentOnlyScriptExtensions.test(normalized)) return false;
+
+    const before = execute('git', ['show', `HEAD:${normalized}`], { allowFailure: true });
+    if (before.status !== 0) return false;
+    let after;
+    try {
+      after = readFile(normalized);
+    } catch {
+      return false;
+    }
+    // Сравнение после trim с обеих сторон: run() обрезает края вывода git show,
+    // и без него любой файл с завершающим переводом строки выглядел бы
+    // изменённым.
+    if (before.stdout.trim() === String(after).trim()) continue;
+
+    sawChange = true;
+    if (isDocumentation) continue;
+    try {
+      const beforeTokens = scriptTokensIgnoringComments(before.stdout, normalized, typescript);
+      const afterTokens = scriptTokensIgnoringComments(after, normalized, typescript);
+      if (beforeTokens === null || beforeTokens !== afterTokens) return false;
+    } catch {
+      return false;
+    }
+  }
+  return sawChange;
+}
+
 /**
  * `changedFiles` — пути, которые изменила эта issue. По ним набор сокращается
  * до применимых проверок; без них выполняется полный набор.
@@ -440,13 +576,39 @@ export function runPreflight(config) {
  * прогоны покрывают каждую issue по отдельности, а ветку целиком должен один
  * раз проверить полный набор.
  */
-export function runConfiguredValidation(config, changedFiles) {
+export function runConfiguredValidation(config, changedFiles, options = {}) {
   // Проверка стоит здесь, а не в runConfiguredScripts: дрейф вносит только
   // сессия агента, а preflight выполняется по заведомо чистому дереву.
   assertValidationDependenciesCommitted();
-  const selection = config.scopedValidation
+  let selection = config.scopedValidation
     ? validationScriptsForChangedFiles(config.validationScripts, changedFiles)
     : { scripts: config.validationScripts, skipped: [], narrowed: false, requiresDatabase: true };
+  // Дешёвая дорожка поверх карты областей. Требует явного разрешения от
+  // вызывающего: определитель сравнивает рабочее дерево с HEAD, поэтому он
+  // применим только к ещё не закоммиченной работе агента. На валидации уже
+  // закоммиченного изменения (already-fixed, committed recovery) сравнение
+  // описывало бы посторонние правки оператора в дереве, а не проверяемый
+  // commit, и кодовое изменение могло бы пройти без тестов. Пробуется только
+  // когда карта областей всё равно требует базу — на md-only изменении карта
+  // уже дешевле.
+  if (
+    options.allowCommentOnlyLane === true &&
+    config.scopedValidation &&
+    config.commentOnlyValidation &&
+    selection.requiresDatabase &&
+    Array.isArray(changedFiles) &&
+    changedFiles.length > 0 &&
+    changeIsCommentOnly(changedFiles)
+  ) {
+    const commentOnlySelection = validationScriptsForCommentOnlyChange(config.validationScripts);
+    if (commentOnlySelection.narrowed) {
+      selection = commentOnlySelection;
+      console.log(
+        'Validation сокращена: изменение не тронуло ни одного токена кода ' +
+          '(комментарии и документация).',
+      );
+    }
+  }
   if (selection.narrowed) {
     console.log(
       `Validation сокращена по области изменения: пропущены ${selection.skipped.join(', ')}.`,
