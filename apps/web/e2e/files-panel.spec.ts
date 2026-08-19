@@ -307,12 +307,13 @@ test('meeting form shows validation errors in one shared summary', async ({ page
   await expect(page.getByText('title must not be empty')).toHaveCount(0);
 });
 
-test('uploads files by selection and drag-and-drop with progress and processing feedback', async ({
+test('uploads files by selection and drag-and-drop with progress, processing feedback and uploader identity', async ({
   page,
   request,
 }) => {
   const owner = await register(request, 'phase-4-upload');
   const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Грейс Хоппер');
   await authenticate(page, owner);
   await page.goto(`/meetings/${meeting.id}`);
 
@@ -349,9 +350,12 @@ test('uploads files by selection and drag-and-drop with progress and processing 
   await expect(page.getByText('Файл передан. Проверяем и сохраняем…')).toBeVisible();
   await expect(progressbar).toHaveAttribute('aria-valuenow', '100');
   await expect(page.getByRole('status')).toContainText('Файл «phase-4-selection.pdf» загружен.');
-  await expect(
-    page.getByRole('listitem').filter({ hasText: 'phase-4-selection.pdf' }),
-  ).toBeVisible();
+  const selectionRow = page.getByRole('listitem').filter({ hasText: 'phase-4-selection.pdf' });
+  await expect(selectionRow).toBeVisible();
+  // The row comes from the POST response alone: the list is never refetched
+  // after an upload, so this is the only check that the response carries the
+  // uploader on the path that inserts it.
+  await expect(selectionRow).toContainText('Загрузил(а): Грейс Хоппер');
 
   await dropFile(page, {
     name: 'phase-4-drop.pdf',
@@ -362,7 +366,9 @@ test('uploads files by selection and drag-and-drop with progress and processing 
   await expect(page.getByRole('progressbar', { name: 'Загрузка phase-4-drop.pdf' })).toBeVisible();
   await expect(page.getByText('Файл передан. Проверяем и сохраняем…')).toBeVisible();
   await expect(page.getByRole('status')).toContainText('Файл «phase-4-drop.pdf» загружен.');
-  await expect(page.getByRole('listitem').filter({ hasText: 'phase-4-drop.pdf' })).toBeVisible();
+  const dropRow = page.getByRole('listitem').filter({ hasText: 'phase-4-drop.pdf' });
+  await expect(dropRow).toBeVisible();
+  await expect(dropRow).toContainText('Загрузил(а): Грейс Хоппер');
 });
 
 test('rejects unsupported and oversized files before upload in one error area', async ({
