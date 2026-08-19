@@ -1109,7 +1109,16 @@ test('reads one replacement for every row when the picture cannot be decoded', a
   );
   await page.reload();
 
+  // Every row shows the fallback before its picture arrives, so the initials
+  // alone do not say the key gave up: the two refusals it takes have to be
+  // observed on the wire first. The mocked route answers at once, so a third
+  // request would have been sent long inside this window — and its absence is
+  // what makes the initials below mean an exhausted key rather than a pending
+  // one.
   await expect(avatars).toHaveCount(3);
+  await expect.poll(() => avatarRequests.length).toBe(2);
+  await page.waitForTimeout(1_000);
+  expect(avatarRequests).toHaveLength(2);
   for (const index of [0, 1, 2]) {
     await expect(avatars.nth(index)).toHaveText('А');
     await expect(avatars.nth(index)).not.toHaveAttribute('src');
