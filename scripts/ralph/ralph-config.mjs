@@ -257,6 +257,11 @@ function applyLoopDefaults(config) {
   } = config.phases[0]);
   config.draftPullRequest ??= true;
   config.stopAfterFirstIssue ??= false;
+  // Разработка всегда идёт на актуальной базе: перед фазой её база вливается в
+  // рабочую ветку, и результат проверяется полным набором. Выключать имеет
+  // смысл только там, где базу двигают намеренно и знают, что ветка обязана
+  // остаться на прежней.
+  config.syncBaseBranch ??= true;
   config.agentCli ??= 'codex';
   config.maxIterations ??= 20;
   config.maxTurns ??= 50;
@@ -371,6 +376,9 @@ function validateLoopFields(config) {
   }
   if (typeof config.stopAfterFirstIssue !== 'boolean') {
     fail('Поле "stopAfterFirstIssue" должно быть true или false.');
+  }
+  if (typeof config.syncBaseBranch !== 'boolean') {
+    fail('Поле "syncBaseBranch" должно быть true или false.');
   }
   if (!agentClis.includes(config.agentCli)) {
     fail(`Поле "agentCli" должно быть одним из: ${agentClis.join(', ')}.`);
