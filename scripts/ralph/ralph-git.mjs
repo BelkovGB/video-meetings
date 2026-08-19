@@ -365,6 +365,67 @@ export function verifyRepository(config, requireClean) {
   return { currentBranch, clean: changes === '' };
 }
 
+/**
+ * Приводит ветку фазы к актуальной базе перед работой.
+ *
+ * Ветка фазы создаётся от базы один раз, и дальше база живёт своей жизнью:
+ * родительская фаза дорабатывается по замечаниям своего ревью, база принимает
+ * чужие merge. Пока ветка этого не видит, агент строит поверх устаревшего кода
+ * и не знает об этом. На фазе 6 это стоило второй реализации того, что фаза 5
+ * уже сделала: обе ветки независимо получили meeting-scoped идентификатор
+ * аватара загрузчика — одна как handle, другая как ключ картинки, — и свести
+ * их пришлось вручную. `verifyBaseHistory` такое не ловит: общий предок у
+ * разошедшихся веток остаётся, и проверка проходит молча.
+ *
+ * Возвращает true, только если слияние действительно принесло коммиты:
+ * вызывающий обязан заново проверить дерево, потому что база могла разойтись с
+ * работой фазы, и цена такой поломки — чужая ошибка в руках у агента, который
+ * её не вносил.
+ */
+export function syncPhaseBranchWithBase(config, dependencies = {}) {
+  const execute = dependencies.run ?? run;
+  const executeNetwork = dependencies.runNetwork ?? runNetwork;
+  const contains = dependencies.isAncestorCommit ?? isAncestorCommit;
+
+  executeNetwork('git', ['fetch', 'origin', config.baseBranch], { echoOutput: true });
+  const baseRef = `origin/${config.baseBranch}`;
+  execute('git', ['show-ref', '--verify', '--quiet', `refs/remotes/${baseRef}`]);
+
+  if (contains(baseRef, 'HEAD', execute)) {
+    return false;
+  }
+
+  // Незавершённая работа в дереве — это восстановление после сбоя: слияние
+  // поверх неё смешало бы чужие изменения с diff, который агент ещё не
+  // закончил. База подождёт до следующей фазы этой же issue.
+  if (execute('git', ['status', '--porcelain']).stdout !== '') {
+    console.log(
+      `База ${baseRef} ушла вперёд, но в дереве есть незавершённая работа: ` +
+        'слияние отложено до чистого дерева.',
+    );
+    return false;
+  }
+
+  console.log(`\n=== Слияние базы ${baseRef} в ветку ${config.branch} ===\n`);
+  const merge = execute('git', ['merge', '--no-edit', baseRef], {
+    allowFailure: true,
+    echoOutput: true,
+  });
+  if (merge.status !== 0) {
+    // Конфликт разрешает человек. Автоматическое разрешение выбирало бы между
+    // двумя реализациями вслепую, а именно этот выбор и есть содержание
+    // конфликта.
+    execute('git', ['merge', '--abort'], { allowFailure: true });
+    fail(
+      `Ветка ${config.branch} конфликтует с базой ${baseRef}. ` +
+        'Слияние отменено, дерево не тронуто. Разрешите конфликт вручную и запустите Ralph заново.',
+    );
+  }
+
+  console.log(`База ${baseRef} влита в ${config.branch}.`);
+  return true;
+}
+
 export function verifyBaseHistory(config) {
   runNetwork('git', ['fetch', 'origin', config.baseBranch], { echoOutput: true });
   const baseRef = `origin/${config.baseBranch}`;

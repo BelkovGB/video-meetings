@@ -71,6 +71,7 @@ import {
   linkedCommitForIssue,
   pushBranchAndVerify,
   reconcileStateAfterCrash,
+  syncPhaseBranchWithBase,
   verifiedIssueCommit,
   verifyBaseHistory,
   verifyPushedHead,
@@ -194,6 +195,37 @@ function measuredValidation(runValidation) {
     endStage({ failed: true });
     throw error;
   }
+}
+
+/**
+ * Полная проверка ветки сразу после того, как в неё влита база.
+ *
+ * Слияние без конфликта не значит рабочее дерево: база могла изменить контракт,
+ * который работа фазы использует, и Git об этом ничего не знает — ровно так
+ * поменялся маршрут аватара загрузчика, пока фаза 6 строила клиента к прежнему.
+ * Без этой проверки поломка всплыла бы на первой же issue, и чинил бы её агент,
+ * который её не вносил: он получил бы чужую ошибку под видом своей.
+ *
+ * Набор полный, а не сокращённый по области: изменения базы могут быть любыми.
+ */
+function verifyMergedBase(config) {
+  console.log('\n=== Проверка ветки после слияния базы ===\n');
+  const endStage = startStage('validation');
+  try {
+    runConfiguredValidation(config);
+    endStage();
+  } catch (error) {
+    endStage({ failed: true });
+    fail(
+      `Ветка ${config.branch} не проходит проверки после слияния базы ${config.baseBranch}: ` +
+        `${error.message}. Слияние уже в истории ветки; разберитесь с ним вручную, ` +
+        'прежде чем отдавать работу агенту.',
+    );
+  }
+  assertValidationLeftTree(
+    '',
+    `Проверки после слияния базы изменили рабочее дерево ветки ${config.branch}.`,
+  );
 }
 
 function verifyTools(config) {
@@ -1470,6 +1502,11 @@ async function main() {
       // доходит очередь.
       if (mode !== '--check') advanceStartingCommitIfBranchMovedOn();
       const repositoryState = verifyRepository(phaseConfig, mode !== '--check');
+      // Слияние базы идёт до слепка control plane и после переключения ветки:
+      // база может принести правки `.agents/**` или `scripts/ralph/**`, и
+      // слепок, снятый до неё, объявил бы их подделкой доверенных файлов.
+      const mergedBase =
+        mode !== '--check' && phaseConfig.syncBaseBranch && syncPhaseBranchWithBase(phaseConfig);
       // Слепок пересчитывается сразу после переключения ветки и до сессии
       // агента. `verifyRepository` — единственное место, где рабочее дерево
       // меняет сам цикл, а `.claude/**` и `AGENTS.md` есть не на каждой ветке:
@@ -1479,6 +1516,13 @@ async function main() {
       const snapshot = controlPlaneSnapshot(phaseConfig);
       Object.assign(config, snapshot);
       Object.assign(phaseConfig, snapshot);
+      if (mergedBase) {
+        // HEAD сдвинулся слиянием, а не работой агента: сохранённая база issue
+        // обязана переехать вместе с ним, иначе продолжение потребует HEAD,
+        // который остался позади.
+        advanceStartingCommitIfBranchMovedOn();
+        verifyMergedBase(phaseConfig);
+      }
       if (mode !== '--check') {
         reconcileStateAfterCrash(phaseConfig, activeStateStore());
       }

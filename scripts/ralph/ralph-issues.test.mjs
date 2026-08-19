@@ -25,6 +25,7 @@ import {
   isAncestorCommit,
   issueChangeInventory,
   linkedCommitForIssue,
+  syncPhaseBranchWithBase,
   workingTreeEntries,
   workingTreePaths,
 } from './ralph-git.mjs';
@@ -1254,4 +1255,104 @@ test('уже застадированное удаление не попадае
 
   // Список путей задачи при этом полный: удалённый файл — тоже её изменение.
   assert.equal(workingTreePaths(status.trim()).length, 3);
+});
+
+/**
+ * Дублёр Git для слияния базы: отвечает на команды, которые читает
+ * `syncPhaseBranchWithBase`, и записывает то, что она выполнила.
+ */
+function gitStubForBaseSync({ status = '', mergeStatus = 0 } = {}) {
+  const calls = [];
+
+  return {
+    calls,
+    run: (command, args, options) => {
+      calls.push(args.join(' '));
+      if (args[0] === 'status') return { status: 0, stdout: status };
+      if (args[0] === 'merge' && args[1] !== '--abort') {
+        return { status: mergeStatus, stdout: '', stderr: 'CONFLICT (content)' };
+      }
+      if (options?.allowFailure) return { status: 0, stdout: '' };
+      return { status: 0, stdout: '' };
+    },
+    runNetwork: (command, args) => {
+      calls.push(args.join(' '));
+      return { status: 0, stdout: '' };
+    },
+  };
+}
+
+const baseSyncConfig = { branch: 'features/phase-6', baseBranch: 'features/phase-5' };
+
+test('база, уже вошедшая в ветку, не вызывает слияния', () => {
+  const git = gitStubForBaseSync();
+
+  const merged = syncPhaseBranchWithBase(baseSyncConfig, {
+    run: git.run,
+    runNetwork: git.runNetwork,
+    isAncestorCommit: () => true,
+  });
+
+  assert.equal(merged, false);
+  assert.equal(
+    git.calls.some((call) => call.startsWith('merge')),
+    false,
+  );
+});
+
+test('незавершённая работа в дереве откладывает слияние базы, а не смешивается с ним', () => {
+  // Восстановление после сбоя: diff агента ещё не закончен, и чужие изменения
+  // поверх него смешали бы две работы в одном коммите.
+  const git = gitStubForBaseSync({ status: ' M apps/api/src/files/files.controller.ts' });
+
+  const merged = syncPhaseBranchWithBase(baseSyncConfig, {
+    run: git.run,
+    runNetwork: git.runNetwork,
+    isAncestorCommit: () => false,
+  });
+
+  assert.equal(merged, false);
+  assert.equal(
+    git.calls.some((call) => call.startsWith('merge')),
+    false,
+  );
+});
+
+test('разошедшаяся база вливается в чистую ветку фазы', () => {
+  const git = gitStubForBaseSync();
+
+  const merged = syncPhaseBranchWithBase(baseSyncConfig, {
+    run: git.run,
+    runNetwork: git.runNetwork,
+    isAncestorCommit: () => false,
+  });
+
+  assert.equal(merged, true);
+  assert.ok(git.calls.includes('fetch origin features/phase-5'));
+  assert.ok(git.calls.includes('merge --no-edit origin/features/phase-5'));
+  assert.equal(
+    git.calls.some((call) => call === 'merge --abort'),
+    false,
+  );
+});
+
+test('конфликт с базой отменяет слияние и останавливает прогон', () => {
+  // Выбор между двумя реализациями — это и есть содержание конфликта, поэтому
+  // разрешать его автоматически нельзя: цикл обязан позвать человека.
+  const git = gitStubForBaseSync({ mergeStatus: 1 });
+
+  assert.throws(
+    () =>
+      syncPhaseBranchWithBase(baseSyncConfig, {
+        run: git.run,
+        runNetwork: git.runNetwork,
+        isAncestorCommit: () => false,
+      }),
+    /конфликтует с базой origin\/features\/phase-5/,
+  );
+  assert.ok(git.calls.includes('merge --abort'));
+});
+
+test('слияние базы включено по умолчанию и объявлено в конфиге', () => {
+  assert.equal(loadConfig().syncBaseBranch, true);
 });
