@@ -151,12 +151,16 @@ describe('Meeting files (e2e)', () => {
     return response.body as UploadedFile;
   }
 
-  function getUploaderHandle(file: UploadedFile): string {
+  function getUploadedBy(file: UploadedFile): NonNullable<UploadedFile['uploadedBy']> {
     if (!file.uploadedBy) {
       throw new Error('The uploaded file carries no uploader identity');
     }
 
-    return file.uploadedBy.handle;
+    return file.uploadedBy;
+  }
+
+  function getUploaderHandle(file: UploadedFile): string {
+    return getUploadedBy(file).handle;
   }
 
   it('stores an allowed file and returns its metadata in the meeting list', async () => {
@@ -618,6 +622,37 @@ describe('Meeting files (e2e)', () => {
 
     const handles = (listed.body as UploadedFile[]).map(getUploaderHandle);
     expect(new Set(handles).size).toBe(2);
+  });
+
+  it('scopes only the handle per meeting and keeps the sibling uploader fields identical', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const otherMeeting = await createMeeting(owner.accessToken);
+    await setDisplayName(owner, 'Ada Lovelace');
+    await uploadAvatar(owner);
+
+    const here = getUploadedBy(await uploadPdf(meeting.id, owner));
+    const elsewhere = getUploadedBy(await uploadPdf(otherMeeting.id, owner));
+
+    expect(elsewhere.handle).not.toBe(here.handle);
+    expect(here.displayName).toBe('Ada Lovelace');
+    expect(elsewhere.displayName).toBe(here.displayName);
+    expect(here.avatar).not.toBeNull();
+    expect(elsewhere.avatar).toEqual(here.avatar);
+
+    const [avatar, otherAvatar] = await Promise.all([
+      request(app.getHttpServer())
+        .get(`/meetings/${meeting.id}/uploaders/${here.handle}/avatar`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200),
+      request(app.getHttpServer())
+        .get(`/meetings/${otherMeeting.id}/uploaders/${elsewhere.handle}/avatar`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200),
+    ]);
+
+    expect(avatar.headers.etag).toMatch(/^"[^"]+"$/);
+    expect(otherAvatar.headers.etag).toBe(avatar.headers.etag);
   });
 
   it('streams the uploader current avatar to the meeting owner and to participants', async () => {

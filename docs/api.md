@@ -466,7 +466,7 @@ person uploaded to the meeting carries the same value, so a client can group
 them and fetch one avatar for all of them; the same person in another meeting
 gets an unrelated value that this meeting's routes reject, and the user ID
 cannot be derived from either. That is an authorization boundary, not
-anonymity: `displayName` and `avatar.updatedAt` — the latter also being the
+anonymity: `displayName` and `avatar.updatedAt` — the latter also driving the
 avatar route's `ETag` — are the same values in every meeting, so a caller who
 shares two meetings with the uploader can still match the two handles to one
 person.
