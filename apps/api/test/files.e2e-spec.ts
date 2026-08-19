@@ -1,10 +1,13 @@
 import { INestApplication } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { access, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
+
+const sharp = createRequire(__filename)('sharp') as typeof import('sharp').default;
 
 import { AppModule } from '../src/app.module';
 import { configureHttpApplication } from '../src/http-application';
@@ -32,6 +35,28 @@ const replacementPng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEklEQVQImWM4IRd1Qi6KAUIBACTGBQFoaYMtAAAAAElFTkSuQmCC',
   'base64',
 );
+
+/**
+ * An avatar wider than a list variant. It stays a coarse pattern so its PNG
+ * fits the 1024-byte AVATAR_MAX_BYTES of this suite; production allows 5 MiB,
+ * where the same derivation saves far more.
+ */
+async function createWideAvatarPng(red = 20): Promise<Buffer> {
+  const size = 256;
+  const pixels = Buffer.alloc(size * size * 3);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const index = (y * size + x) * 3;
+      pixels[index] = red;
+      pixels[index + 1] = ((x >> 7) + (y >> 7)) % 2 === 0 ? 40 : 200;
+      pixels[index + 2] = 60;
+    }
+  }
+
+  return sharp(pixels, { raw: { width: size, height: size, channels: 3 } })
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
 
 function createUniqueValue(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -612,6 +637,71 @@ describe('Meeting files (e2e)', () => {
 
       expect(Buffer.from(response.body as Buffer)).toEqual(validPng);
     }
+  });
+
+  it('serves a list-sized variant of a large uploader avatar, byte-identical on a repeat view', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    const wideAvatar = await createWideAvatarPng();
+    await uploadAvatar(owner, wideAvatar);
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    const first = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect('Content-Type', /image\/png/)
+      .expect(200);
+
+    // The row paints a 24 px picture: the meeting's main screen must not pay
+    // for the stored original on every view of the file list.
+    const served = Buffer.from(first.body as Buffer);
+    expect(served.length).toBeLessThan(wideAvatar.length);
+    expect(Number(first.headers['content-length'])).toBe(served.length);
+
+    const metadata = await sharp(served).metadata();
+    expect(metadata.format).toBe('png');
+    expect(Math.max(metadata.width ?? 0, metadata.height ?? 0)).toBeLessThanOrEqual(96);
+
+    // The variant is derived once and kept beside the avatar, so a second view
+    // reads the same bytes instead of resizing the original again.
+    const second = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(Buffer.from(second.body as Buffer)).toEqual(served);
+
+    // The owner's own route is not a list context and still serves the stored
+    // original.
+    const original = await request(app.getHttpServer())
+      .get('/users/me/avatar')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(Buffer.from(original.body as Buffer)).toEqual(wideAvatar);
+  });
+
+  it('serves a list-sized variant of the replacement, not of the replaced avatar', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner, await createWideAvatarPng(0));
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    const before = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    await uploadAvatar(owner, await createWideAvatarPng(255));
+
+    const after = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(Buffer.from(after.body as Buffer)).not.toEqual(Buffer.from(before.body as Buffer));
+    const { channels } = await sharp(Buffer.from(after.body as Buffer)).stats();
+    expect(channels[0].mean).toBeGreaterThan(200);
   });
 
   it('denies the uploader avatar outside the meeting and to an unauthenticated caller', async () => {

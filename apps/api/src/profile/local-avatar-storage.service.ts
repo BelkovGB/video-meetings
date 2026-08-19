@@ -5,8 +5,9 @@ import {
   OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { ReadStream } from 'node:fs';
-import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Prisma } from '@prisma/client';
 
@@ -127,6 +128,67 @@ export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy 
     }
   }
 
+  async readContent(storageKey: string): Promise<Buffer> {
+    try {
+      return await readFile(resolve(this.resolveDirectory(storageKey), 'content'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw error;
+      }
+      throw new ServiceUnavailableException({
+        message: 'Avatar storage is unavailable',
+        code: 'AVATAR_STORAGE_UNAVAILABLE',
+      });
+    }
+  }
+
+  /**
+   * Opens a picture derived from the stored avatar, or reports `null` when it
+   * has not been derived yet. Derived files live under the avatar's own storage
+   * key, so `discard` and reconciliation remove them with the avatar itself.
+   */
+  async openVariant(
+    storageKey: string,
+    variant: string,
+  ): Promise<{ stream: ReadStream; sizeBytes: number } | null> {
+    let handle;
+    try {
+      handle = await open(this.resolveVariant(storageKey, variant), 'r');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null;
+      }
+      throw new ServiceUnavailableException({
+        message: 'Avatar storage is unavailable',
+        code: 'AVATAR_STORAGE_UNAVAILABLE',
+      });
+    }
+
+    try {
+      const { size } = await handle.stat();
+      return { stream: handle.createReadStream(), sizeBytes: size };
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  }
+
+  /**
+   * Publishes a derived picture through a rename, so a concurrent reader sees
+   * either no variant or a complete one. Storing it is an optimisation: a
+   * failure leaves the caller with the bytes it derived and the next request
+   * derives them again.
+   */
+  async saveVariant(storageKey: string, variant: string, content: Buffer): Promise<void> {
+    const tempPath = resolve(avatarConfig.tempDirectory, `${randomUUID()}.part`);
+    try {
+      await writeFile(tempPath, content, { mode: 0o600 });
+      await rename(tempPath, this.resolveVariant(storageKey, variant));
+    } catch {
+      await rm(tempPath, { force: true });
+    }
+  }
+
   async reconcile(): Promise<void> {
     if (this.reconciliationRunning) {
       return;
@@ -241,6 +303,14 @@ export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy 
         });
       }),
     );
+  }
+
+  private resolveVariant(storageKey: string, variant: string): string {
+    const path = resolve(this.resolveDirectory(storageKey), variant);
+    if (!isInsideDirectory(avatarConfig.directory, path)) {
+      throw new Error('Avatar storage path is outside the configured directory');
+    }
+    return path;
   }
 
   private resolveDirectory(storageKey: string): string {

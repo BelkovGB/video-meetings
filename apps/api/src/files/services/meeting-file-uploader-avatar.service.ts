@@ -2,7 +2,8 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { MeetingFileStatus } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
-import { AvatarContent, UserAvatarService } from '../../profile/user-avatar.service';
+import { AvatarContent } from '../../profile/avatar-content';
+import { UserAvatarService } from '../../profile/user-avatar.service';
 import { MeetingAccessService } from './meeting-access.service';
 
 /**
@@ -11,6 +12,8 @@ import { MeetingAccessService } from './meeting-access.service';
  * of a meeting they own or take part in, never through a user identifier, so
  * the rest of the uploader's profile stays private. The user record is read on
  * every request, so a replaced avatar is served and a removed one is gone.
+ * A file row paints a 24 px picture, so what leaves here is the list variant of
+ * the avatar rather than the stored original.
  */
 @Injectable()
 export class MeetingFileUploaderAvatarService {
@@ -42,6 +45,6 @@ export class MeetingFileUploaderAvatarService {
       throw new NotFoundException('Avatar not found');
     }
 
-    return this.userAvatars.open(file.uploadedById);
+    return this.userAvatars.openListVariant(file.uploadedById);
   }
 }

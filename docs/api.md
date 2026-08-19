@@ -494,6 +494,15 @@ is the only way another user reads that avatar: the meeting file is the subject,
 so the caller needs no uploader ID, gets no other profile field, and cannot
 reach the avatar of a user they share no meeting file with.
 
+What this route streams is a list variant of the avatar, not the stored
+original: at most 96 px on each side, in the stored format, so the row's 24 px
+picture never costs the `AVATAR_MAX_BYTES` (5 MiB by default) an upload may
+occupy. An avatar that already fits that box is served byte for byte. The
+variant is derived on the first request and kept beside the original under the
+same storage key, so a replacement or a removal drops it with the avatar it was
+derived from and the route never serves a stale picture. `GET /users/me/avatar`
+is not a list context and still serves the original.
+
 Access is the containing meeting's own. An outsider receives the same
 `404 Meeting not found` as the other meeting-file routes, an unauthenticated
 request receives `401`, and a file ID outside the named meeting — including a
@@ -510,7 +519,10 @@ streams the new image, and after a removal, for an uploader who never set one,
 or for a deleted uploader account it returns `404 Avatar not found`. The
 `avatar.updatedAt` value in `uploadedBy` changes with each replacement, so a
 client can key its own cache on `avatar.key` together with `avatar.updatedAt`
-and read this route once per uploader instead of once per file.
+and read this route once per uploader instead of once per file. That cache is
+all the sharing there is: `private, no-store` deliberately keeps avatars out of
+the browser cache, so every reload and every return to the meeting downloads
+each shown uploader's variant again.
 
 ### `POST /meetings/:meetingId/files/:fileId/download-ticket`
 
