@@ -10,6 +10,7 @@ import * as request from 'supertest';
 const sharp = createRequire(__filename)('sharp') as typeof import('sharp').default;
 
 import { AppModule } from '../src/app.module';
+import { avatarConfig } from '../src/profile/avatar.config';
 import { configureHttpApplication } from '../src/http-application';
 import { MeetingFileDeletionReconciliationService } from '../src/files/services/meeting-file-deletion-reconciliation.service';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -702,6 +703,32 @@ describe('Meeting files (e2e)', () => {
     expect(Buffer.from(after.body as Buffer)).not.toEqual(Buffer.from(before.body as Buffer));
     const { channels } = await sharp(Buffer.from(after.body as Buffer)).stats();
     expect(channels[0].mean).toBeGreaterThan(200);
+  });
+
+  it('reports an avatar whose stored object is gone as missing rather than failing the row', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner, await createWideAvatarPng());
+    const uploaded = await uploadPdf(meeting.id, owner);
+
+    // The user row still names a storage key, so the request reaches the disk
+    // and finds nothing there — the one path the removal tests short-circuit
+    // before, since they clear the metadata first.
+    const user = await prisma.user.findUnique({
+      where: { id: getUserId(owner.accessToken) },
+      select: { avatarStorageKey: true },
+    });
+    await rm(join(avatarConfig.directory, user!.avatarStorageKey!), {
+      recursive: true,
+      force: true,
+    });
+
+    const missing = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    expect(missing.body).toMatchObject({ message: 'Avatar not found' });
   });
 
   it('denies the uploader avatar outside the meeting and to an unauthenticated caller', async () => {

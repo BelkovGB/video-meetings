@@ -177,14 +177,24 @@ export class LocalAvatarStorageService implements OnModuleInit, OnModuleDestroy 
    * Publishes a derived picture through a rename, so a concurrent reader sees
    * either no variant or a complete one. Storing it is an optimisation: a
    * failure leaves the caller with the bytes it derived and the next request
-   * derives them again.
+   * derives them again. That fallback is silent to the client, so it is logged:
+   * a store that fails for good — a read-only volume, a full disk — otherwise
+   * turns the optimisation off with no signal anywhere. The destination is
+   * resolved before the write, so a path-policy misconfiguration surfaces as
+   * itself instead of being swallowed as a transient write failure.
    */
   async saveVariant(storageKey: string, variant: string, content: Buffer): Promise<void> {
+    const destination = this.resolveVariant(storageKey, variant);
     const tempPath = resolve(avatarConfig.tempDirectory, `${randomUUID()}.part`);
     try {
       await writeFile(tempPath, content, { mode: 0o600 });
-      await rename(tempPath, this.resolveVariant(storageKey, variant));
-    } catch {
+      await rename(tempPath, destination);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to store the "${variant}" avatar variant, serving it without caching: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
       await rm(tempPath, { force: true });
     }
   }

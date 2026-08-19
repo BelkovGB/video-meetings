@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { AvatarListVariantService } from './avatar-list-variant.service';
 import { AvatarMetadata, AvatarValidationService } from './avatar-validation.service';
 import { LocalAvatarStorageService } from './local-avatar-storage.service';
 
@@ -35,6 +36,7 @@ export class ProfileService {
     private readonly prisma: PrismaService,
     private readonly avatars: LocalAvatarStorageService,
     private readonly avatarValidation: AvatarValidationService,
+    private readonly listVariants: AvatarListVariantService,
   ) {}
 
   async getCurrentProfile(userId: string): Promise<Profile> {
@@ -209,6 +211,10 @@ export class ProfileService {
         return existing.avatarStorageKey;
       });
       switched = true;
+      // The list variant is derived here, where the picture is decoded once per
+      // upload anyway, so that reading it stays a plain file open instead of a
+      // buffer-and-decode inside every first request.
+      await this.listVariants.prepare(storageKey, avatar.mimeType);
       await this.discardSafely(existingStorageKey);
     } catch (error) {
       if (!switched) {

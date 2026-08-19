@@ -38,9 +38,7 @@ export class UserAvatarService {
   async openListVariant(userId: string): Promise<AvatarContent> {
     const stored = await this.requireStoredAvatar(userId);
 
-    return this.readOrReportMissing(async () =>
-      this.listVariants.open(stored.storageKey, stored.mimeType),
-    );
+    return this.readOrReportMissing(async () => this.listVariants.open(stored));
   }
 
   private async requireStoredAvatar(userId: string): Promise<StoredAvatar> {

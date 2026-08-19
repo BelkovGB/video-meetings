@@ -90,9 +90,17 @@ private `AVATAR_DIR/<storageKey>/content` object store and the profile service
 writes its metadata to the user row. Failed validation and failed persistence
 discard the candidate or final object. Startup removes only `.part` files older
 than the configured safety window, so a second API instance cannot remove an
-active upload on a shared storage volume. Retrieval has only `GET /users/me/avatar`, which
-streams the requesting user's verified object with private, non-sniffable
-headers. Neither the profile response nor the HTTP API exposes storage keys.
+active upload on a shared storage volume. `AvatarListVariantService`, also owned
+by `ProfileModule`, then derives a list-sized picture from the accepted upload
+and stores it beside the original as `AVATAR_DIR/<storageKey>/list-96`,
+publishing it through a `.part` file in `AVATAR_TEMP_DIR` like every other
+write; an empty `list-96` records that the original is already list-sized, so it
+is never copied twice. Deriving at upload keeps reads a plain file open, and
+keeping the derived file under the avatar's own storage key means replacement,
+removal and reconciliation drop it with the avatar it belongs to. Retrieval has
+`GET /users/me/avatar`, which streams the requesting user's verified original
+with private, non-sniffable headers. Neither the profile response nor the HTTP
+API exposes storage keys.
 Avatar removal clears the user-row metadata atomically before private-object
 cleanup. A transient cleanup failure leaves the user in the stable
 avatar-absent state and is reconciled by the storage service without exposing
@@ -100,7 +108,10 @@ the object's internal path.
 
 Another user reads an avatar only through shared activity, never by user ID:
 `GET /meetings/:meetingId/files/:fileId/uploader-avatar` streams it under the
-containing meeting's own authorization. So that a client can tell that many rows
+containing meeting's own authorization. That route is a list context and so
+deliberately answers with the derived `list-96` picture rather than the bytes
+`GET /users/me/avatar` returns, falling back to the original only when it was
+never derived and cannot be. So that a client can tell that many rows
 name one picture and read it once, the identity in a shared response carries an
 opaque `avatar.key` where the user ID would otherwise be: a MAC of the uploader's
 ID, scoped to the meeting, keyed on material derived from the configured

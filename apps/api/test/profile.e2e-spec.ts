@@ -11,6 +11,7 @@ import { configureHttpApplication } from '../src/http-application';
 import { LocalAvatarStorageService } from '../src/profile/local-avatar-storage.service';
 import { avatarConfig } from '../src/profile/avatar.config';
 import { AvatarValidationService } from '../src/profile/avatar-validation.service';
+import { AvatarListVariantService } from '../src/profile/avatar-list-variant.service';
 import { ProfileService } from '../src/profile/profile.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { UsersService } from '../src/users/services/users.service';
@@ -837,8 +838,9 @@ describe('Current user profile (e2e)', () => {
         .fn()
         .mockResolvedValue({ mimeType: 'image/png', sizeBytes: firstContent.length }),
     } as unknown as AvatarValidationService;
-    const firstService = new ProfileService(firstPrisma, storage, validation);
-    const secondService = new ProfileService(secondPrisma, storage, validation);
+    const listVariants = new AvatarListVariantService(storage);
+    const firstService = new ProfileService(firstPrisma, storage, validation, listVariants);
+    const secondService = new ProfileService(secondPrisma, storage, validation, listVariants);
 
     try {
       const first = firstService.uploadAvatar(user.id, {
@@ -902,11 +904,16 @@ describe('Current user profile (e2e)', () => {
       await commitAllowed;
     });
     const replacementPrisma = new PrismaService();
-    const service = new ProfileService(replacementPrisma, storage, {
-      validate: jest
-        .fn()
-        .mockResolvedValue({ mimeType: 'image/jpeg', sizeBytes: validJpeg.length }),
-    } as unknown as AvatarValidationService);
+    const service = new ProfileService(
+      replacementPrisma,
+      storage,
+      {
+        validate: jest
+          .fn()
+          .mockResolvedValue({ mimeType: 'image/jpeg', sizeBytes: validJpeg.length }),
+      } as unknown as AvatarValidationService,
+      new AvatarListVariantService(storage),
+    );
 
     try {
       await replacementPrisma.onModuleInit();
