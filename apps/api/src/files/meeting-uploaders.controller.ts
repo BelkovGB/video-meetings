@@ -64,7 +64,10 @@ export class MeetingUploadersController {
     // would revalidate it successfully and keep serving the error as the image.
     const avatar = await this.uploaderAvatars.open(version.uploaderId);
 
-    allowRevalidatedReuse(response, version.etag);
+    // The opened avatar's own tag, not `describe`'s: a replacement in the window
+    // between the two reads would otherwise label these bytes with the previous
+    // version, leaving the client a cache entry its validator misdescribes.
+    allowRevalidatedReuse(response, avatar.etag);
     response.set({
       'Content-Length': String(avatar.sizeBytes),
       'Content-Type': avatar.mimeType,

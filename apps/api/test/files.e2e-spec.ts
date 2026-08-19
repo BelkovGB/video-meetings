@@ -10,6 +10,7 @@ import * as request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureHttpApplication } from '../src/http-application';
 import { MeetingFileDeletionReconciliationService } from '../src/files/services/meeting-file-deletion-reconciliation.service';
+import { MeetingUploaderAvatarService } from '../src/files/services/meeting-uploader-avatar.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { TrustedProxyClients } from './support/trusted-proxy';
 
@@ -804,6 +805,61 @@ describe('Meeting files (e2e)', () => {
     // recorded version is unchanged.
     expect(missing.headers.etag).not.toBe(served.headers.etag);
     expect(missing.headers['cache-control']).toBe('private, no-store');
+  });
+
+  it('labels a body streamed after a mid-request replacement with the version it carries', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const url = `/meetings/${meeting.id}/uploaders/${getUploaderHandle(uploaded)}/avatar`;
+
+    const served = await request(app.getHttpServer())
+      .get(url)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    // The uploader replaces the avatar in the window between resolving the
+    // version and opening the object, which the route cannot narrow away.
+    const avatars = app.get(MeetingUploaderAvatarService);
+    const describe = avatars.describe.bind(avatars);
+    const raceOnce = jest
+      .spyOn(avatars, 'describe')
+      .mockImplementationOnce(async (meetingId, uploaderHandle, userId) => {
+        const version = await describe(meetingId, uploaderHandle, userId);
+        await uploadAvatar(owner, replacementPng);
+
+        return version;
+      });
+
+    try {
+      const raced = await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200);
+
+      expect(raceOnce).toHaveBeenCalledTimes(1);
+      expect(Buffer.from(raced.body as Buffer)).toEqual(replacementPng);
+      // The published validator must describe the bytes that were streamed, not
+      // the version read before them: a client storing this entry revalidates
+      // it successfully and would otherwise keep serving the replaced image.
+      expect(raced.headers.etag).not.toBe(served.headers.etag);
+
+      const settled = await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .expect(200);
+
+      expect(settled.headers.etag).toBe(raced.headers.etag);
+
+      await request(app.getHttpServer())
+        .get(url)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .set('If-None-Match', raced.headers.etag as string)
+        .expect(304);
+    } finally {
+      raceOnce.mockRestore();
+    }
   });
 
   it('revokes the avatar handle once the uploader has no ready file left in the meeting', async () => {

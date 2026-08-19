@@ -7,6 +7,17 @@ import { deriveUserHandle } from '../../users/models/user-identity.response';
 import { MeetingAccessService } from './meeting-access.service';
 
 export type UploaderAvatarVersion = { uploaderId: string; etag: string };
+export type UploaderAvatarContent = AvatarContent & { etag: string };
+
+/**
+ * The recorded version is the only thing that changes when an avatar is
+ * replaced, so the entity tag is derived from it — and from the same read that
+ * produced the rest of the answer, never from a second lookup that could see a
+ * different version.
+ */
+function deriveAvatarEntityTag(updatedAt: Date): string {
+  return `"${updatedAt.getTime().toString(36)}"`;
+}
 
 /**
  * Serves the avatar of an uploader named by the meeting-scoped handle that the
@@ -74,11 +85,20 @@ export class MeetingUploaderAvatarService {
 
     return {
       uploaderId: uploader.id,
-      etag: `"${uploader.avatarUpdatedAt.getTime().toString(36)}"`,
+      etag: deriveAvatarEntityTag(uploader.avatarUpdatedAt),
     };
   }
 
-  open(uploaderId: string): Promise<AvatarContent> {
-    return this.userAvatars.open(uploaderId);
+  /**
+   * Carries its own entity tag rather than reusing `describe`'s: the uploader
+   * may replace their avatar between the two calls, and a body published under
+   * the version read before it would be a validator that does not describe it —
+   * a client would revalidate the stored entry and keep serving the replaced
+   * image as the current one.
+   */
+  async open(uploaderId: string): Promise<UploaderAvatarContent> {
+    const avatar = await this.userAvatars.open(uploaderId);
+
+    return { ...avatar, etag: deriveAvatarEntityTag(avatar.updatedAt) };
   }
 }
