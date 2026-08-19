@@ -109,7 +109,12 @@ per-process random value keeps every instance behind a load balancer, and the
 same instance after a restart, agreeing on the key, so a response from one
 instance does not invalidate a cache filled by another. `userIdentitySelect`
 stays the allowlist of fields a shared response may expose; the user ID is read
-through the separate `userIdentityReadSelect` and is never emitted.
+through the separate `userIdentityReadSelect` and is never emitted. Failures on
+that route are split for the same reason the key exists: a file that is gone
+answers `404 FILE_NOT_FOUND`, which is scoped to the one route and lets a client
+read the uploader's avatar through another of their files, while every other
+failure answers identically for all of them and must end the read at one
+request, not one per row.
 
 ## Ownership and authorization
 

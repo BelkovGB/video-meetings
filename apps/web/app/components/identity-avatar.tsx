@@ -3,8 +3,13 @@
 import { useEffect, useState } from 'react';
 
 import { apiUrl } from '../../lib/api/config';
+import { readApiErrorBody } from '../../lib/api/errors';
 import { readAccessToken } from '../../lib/auth/session';
-import { acquireAvatarImage, discardAvatarImage } from './avatar-image-cache';
+import {
+  AvatarSourceGoneError,
+  acquireAvatarImage,
+  discardAvatarImage,
+} from './avatar-image-cache';
 
 type IdentityAvatarImage = {
   /**
@@ -33,6 +38,26 @@ type IdentityAvatarProps = {
   testId: string;
   className?: string;
 };
+
+/**
+ * Tells the one failure the cache may answer by reading another holder's route
+ * from the ones it must not. `FILE_NOT_FOUND` is the API saying this route is
+ * gone — the meeting file behind this row no longer exists — while the
+ * uploader's avatar is still served through their other files. Every other
+ * failure, including a bare 404 for an avatar that was removed, answers the
+ * same on all of that uploader's routes, so it stops the read at one request
+ * instead of one per row.
+ */
+async function readAvatarFailure(response: Response): Promise<Error> {
+  if (response.status === 404) {
+    const body = await readApiErrorBody(response);
+    if (body?.code === 'FILE_NOT_FOUND') {
+      return new AvatarSourceGoneError();
+    }
+  }
+
+  return new Error(`Unable to load avatar (${response.status})`);
+}
 
 /**
  * A user's avatar as everyone else in the product sees it: the image when it
@@ -75,7 +100,7 @@ export function IdentityAvatar({
           signal,
         });
         if (!response.ok) {
-          throw new Error('Unable to load avatar');
+          throw await readAvatarFailure(response);
         }
 
         return response.blob();

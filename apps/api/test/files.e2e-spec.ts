@@ -683,6 +683,43 @@ describe('Meeting files (e2e)', () => {
       .expect(404);
   });
 
+  it('codes a missing file apart from a missing avatar on the uploader-avatar route', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner.accessToken);
+    await uploadAvatar(owner);
+    const uploaded = await uploadPdf(meeting.id, owner);
+    const deleted = await uploadPdf(meeting.id, owner);
+
+    await request(app.getHttpServer())
+      .delete(`/meetings/${meeting.id}/files/${deleted.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(204);
+
+    // The file behind one row is gone; the same uploader's avatar is still
+    // there through their other files, so the client may read another route.
+    const missingFile = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${deleted.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    expect(missingFile.body).toMatchObject({ message: 'File not found', code: 'FILE_NOT_FOUND' });
+
+    // A removed avatar is the same answer on every one of that uploader's
+    // routes, so it carries no code and the client stops after the first.
+    await request(app.getHttpServer())
+      .delete('/users/me/avatar')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    const missingAvatar = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files/${uploaded.id}/uploader-avatar`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(404);
+
+    expect(missingAvatar.body).toMatchObject({ message: 'Avatar not found' });
+    expect(missingAvatar.body).not.toHaveProperty('code');
+  });
+
   it('reports an avatar the uploader never had and a deleted uploader account as absent', async () => {
     const owner = await registerUser();
     const participant = await registerUser();

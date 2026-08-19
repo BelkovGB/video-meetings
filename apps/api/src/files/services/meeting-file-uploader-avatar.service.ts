@@ -29,7 +29,13 @@ export class MeetingFileUploaderAvatarService {
     });
 
     if (!file) {
-      throw new NotFoundException('File not found');
+      // Coded because this failure is about the route and not about the
+      // picture: the file behind one row is gone while the uploader's avatar is
+      // still readable through their other files. The web cache reads the code
+      // to decide it may try another row's route; every other failure here —
+      // no access to the meeting, no avatar — is the same for every route of
+      // this uploader, so it must not send the client round all of them.
+      throw new NotFoundException({ message: 'File not found', code: 'FILE_NOT_FOUND' });
     }
 
     if (!file.uploadedById) {

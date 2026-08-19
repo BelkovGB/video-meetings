@@ -880,7 +880,13 @@ test('keeps the other rows of an uploader when the row that fetched fails', asyn
   const staleRequests: string[] = [];
   await page.route(`**/files/${staleFile.id}/uploader-avatar`, (route) => {
     staleRequests.push(route.request().url());
-    return route.fulfill({ status: 404 });
+    // The coded body the API sends for this file-scoped 404, and the only
+    // failure that says the picture may still be read through another row.
+    return route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'File not found', code: 'FILE_NOT_FOUND' }),
+    });
   });
   await page.goto(`/meetings/${meeting.id}`);
 
@@ -910,6 +916,86 @@ test('keeps the other rows of an uploader when the row that fetched fails', asyn
   // another row's route is a fallback, not a retry loop over every row.
   expect(staleRequests).toHaveLength(1);
   await page.unroute(`**/files/${staleFile.id}/uploader-avatar`);
+});
+
+test('stops at one avatar request when the failure is the same for every row', async ({
+  page,
+  request,
+}) => {
+  const avatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const owner = await register(request, 'phase-6-avatar-shared-failure');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(request, owner, avatar);
+  for (const name of ['phase-6-fail-1.pdf', 'phase-6-fail-2.pdf', 'phase-6-fail-3.pdf']) {
+    await uploadPdf(request, owner, meeting, { name });
+  }
+  await authenticate(page, owner);
+
+  const avatarRequests: string[] = [];
+  page.on('request', (sent) => {
+    if (sent.method() === 'GET' && sent.url().includes('/uploader-avatar')) {
+      avatarRequests.push(sent.url());
+    }
+  });
+
+  const avatars = page.getByTestId('meeting-file-uploader-avatar');
+  // Every row shows the fallback before its picture arrives, so the initials
+  // alone do not say the reads are over. The count is only meaningful once no
+  // further request can still be on its way: the mocked route answers at once,
+  // so a second one would have been sent long inside this window.
+  const settledAvatarRequests = async () => {
+    await expect(avatars).toHaveCount(3);
+    for (const index of [0, 1, 2]) {
+      await expect(avatars.nth(index)).toHaveText('А');
+    }
+
+    await page.waitForTimeout(1_000);
+    return avatarRequests.length;
+  };
+
+  // The uploader removed their avatar after the list was built: the route
+  // answers the same for every one of their files, so reading a second row
+  // would only repeat the refusal — once per row, which is the duplication the
+  // shared cache exists to remove.
+  await page.route('**/uploader-avatar', (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Avatar not found' }),
+    }),
+  );
+  await page.goto(`/meetings/${meeting.id}`);
+
+  expect(await settledAvatarRequests()).toBe(1);
+  await page.unroute('**/uploader-avatar');
+
+  // An expired token or a failing API is the same story: the count stays at
+  // one however many rows the uploader has.
+  avatarRequests.length = 0;
+  await page.route('**/uploader-avatar', (route) => route.fulfill({ status: 500 }));
+  await page.reload();
+
+  expect(await settledAvatarRequests()).toBe(1);
+  await page.unroute('**/uploader-avatar');
+
+  // Even the failure that may be answered by another row's route is bounded:
+  // a whole list gone stale reads one alternate, not one route per row.
+  avatarRequests.length = 0;
+  await page.route('**/uploader-avatar', (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'File not found', code: 'FILE_NOT_FOUND' }),
+    }),
+  );
+  await page.reload();
+
+  expect(await settledAvatarRequests()).toBe(2);
+  await page.unroute('**/uploader-avatar');
 });
 
 test('participant can download but never sees the delete action', async ({ page, request }) => {

@@ -3,14 +3,38 @@
 /**
  * One route the bytes can come from. Several holders of a key usually name the
  * same picture through different routes — one meeting file each — so a route
- * that fails says nothing about the picture, and the entry falls through to the
- * next one instead of blanking every holder. `id` is the route itself, so a
- * route already tried is not tried again.
+ * that is itself gone says nothing about the picture, and the entry falls
+ * through to the next one instead of blanking every holder. `id` is the route
+ * itself, so a route already tried is not tried again.
  */
 export type AvatarImageSource = {
   id: string;
   load: (signal: AbortSignal) => Promise<Blob>;
 };
+
+/**
+ * The one failure that is worth another route: this route is gone while the
+ * picture may still be readable through a different holder's route — the
+ * meeting file behind one row was deleted, say. A loader must not throw it for
+ * a failure that every route of the key would repeat (an expired token, a 5xx,
+ * a lost network, an avatar the owner removed): the holders of a key are the
+ * rows of one uploader, so falling through on those would cost one request per
+ * row, which is the duplication this cache exists to remove.
+ */
+export class AvatarSourceGoneError extends Error {
+  constructor(message = 'Avatar route is gone') {
+    super(message);
+    this.name = 'AvatarSourceGoneError';
+  }
+}
+
+/**
+ * How many routes one key may read before it gives up. A stale row is the case
+ * this covers, and one alternate answers it; the cap is what keeps a meeting
+ * whose whole list went stale at two requests instead of one per row, whatever
+ * the loader reports.
+ */
+const maxSourceReads = 2;
 
 type AvatarImageEntry = {
   leases: number;
@@ -182,11 +206,18 @@ function readNextSource(key: string, entry: AvatarImageEntry) {
         return;
       }
 
-      if (entry.untried.length > 0 && !entry.controller.signal.aborted) {
-        // One holder's route is gone — a file deleted out from under its row,
+      if (
+        error instanceof AvatarSourceGoneError &&
+        entry.untried.length > 0 &&
+        entry.triedIds.size < maxSourceReads &&
+        !entry.controller.signal.aborted
+      ) {
+        // This holder's route is gone — a file deleted out from under its row,
         // say — while the others still stream the same picture. Read one of
         // theirs before giving up, so a single stale row cannot blank every row
-        // of the same uploader.
+        // of the same uploader. Any other failure ends the read here: it would
+        // answer the same on every route, and trying them would turn one
+        // download per uploader back into one per row.
         readNextSource(key, entry);
         return;
       }

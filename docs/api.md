@@ -497,7 +497,12 @@ reach the avatar of a user they share no meeting file with.
 Access is the containing meeting's own. An outsider receives the same
 `404 Meeting not found` as the other meeting-file routes, an unauthenticated
 request receives `401`, and a file ID outside the named meeting — including a
-deleted or not-yet-ready file — receives `404 File not found`.
+deleted or not-yet-ready file — receives `404 File not found` with
+`code: "FILE_NOT_FOUND"`. That code is the one failure scoped to a single route:
+the uploader's avatar may still be read through another of their files, so a
+client sharing one download per uploader may retry once through a different
+file. No other failure of this route carries it, because `404 Meeting not found`
+and `404 Avatar not found` answer the same for every file of that uploader.
 
 The user record is read on every request rather than captured at upload time, so
 a historical file never serves a stale avatar: after a replacement the route
