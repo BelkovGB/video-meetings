@@ -3,7 +3,6 @@ import { MeetingFileStatus } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { access, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
@@ -12,6 +11,7 @@ import { configureHttpApplication } from '../src/http-application';
 import { MeetingFileDeletionReconciliationService } from '../src/files/services/meeting-file-deletion-reconciliation.service';
 import { MeetingUploaderAvatarService } from '../src/files/services/meeting-uploader-avatar.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { avatarUploadRoot, uploadRoot } from './support/storage-roots';
 import { TrustedProxyClients } from './support/trusted-proxy';
 
 type Meeting = { id: string };
@@ -27,7 +27,6 @@ type UploadedFile = {
 
 const validPassword = 'secure-password-123';
 const validDate = '2026-08-03T10:00:00.000Z';
-const uploadRoot = join(tmpdir(), 'video-meetings-api-e2e-uploads');
 const validPng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4z8AAAAMBAQCc479ZAAAAAElFTkSuQmCC',
   'base64',
@@ -58,7 +57,12 @@ describe('Meeting files (e2e)', () => {
   const clients = new TrustedProxyClients();
 
   beforeAll(async () => {
+    // The uploader-avatar tests write to the avatar root as well, so both roots
+    // are cleared here and after the suite: leftovers survive the e2e database,
+    // and every later application start pays a reconciliation transaction per
+    // stale directory.
     await rm(uploadRoot, { recursive: true, force: true });
+    await rm(avatarUploadRoot, { recursive: true, force: true });
     clients.enable();
 
     const moduleRef = await Test.createTestingModule({
@@ -75,6 +79,7 @@ describe('Meeting files (e2e)', () => {
     try {
       await app.close();
       await rm(uploadRoot, { recursive: true, force: true });
+      await rm(avatarUploadRoot, { recursive: true, force: true });
     } finally {
       clients.restore();
     }

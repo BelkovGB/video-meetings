@@ -2,7 +2,6 @@ import { INestApplication } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { Test } from '@nestjs/testing';
 import * as request from 'supertest';
 
@@ -14,6 +13,7 @@ import { AvatarValidationService } from '../src/profile/avatar-validation.servic
 import { ProfileService } from '../src/profile/profile.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { UsersService } from '../src/users/services/users.service';
+import { avatarUploadRoot } from './support/storage-roots';
 import { TrustedProxyClients } from './support/trusted-proxy';
 
 type UserSession = {
@@ -30,7 +30,6 @@ type Profile = {
 };
 
 const validPassword = 'secure-password-123';
-const avatarUploadRoot = join(tmpdir(), 'video-meetings-api-e2e-avatars');
 const validPng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4z8AAAAMBAQCc479ZAAAAAElFTkSuQmCC',
   'base64',
