@@ -189,8 +189,13 @@ The handle is `HMAC-SHA256(key, length-prefixed scope + user ID)` truncated to
 128 bits, under a key derived from the JWT secret so a handle can never be
 confused with a token. The scope is the meeting ID, which makes the value stable
 for one uploader inside one meeting — the property that lets a client collapse
-many files onto a single avatar URL — while keeping it unlinkable across
-meetings and non-invertible to the user ID.
+many files onto a single avatar URL — and scopes authorization: a handle is
+accepted only by the meeting it was minted for, and the user ID cannot be
+recovered from it. This is an authorization boundary, not anonymity: the
+`uploadedBy` fields around the handle — the display name and the avatar
+version timestamp that also drives the avatar route's `ETag` — are
+deliberately the same values in every meeting, so a caller who is in two
+meetings can still tell that the same person uploaded in both.
 
 Listing and download ticket creation return only `READY` records.
 

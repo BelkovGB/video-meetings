@@ -37,8 +37,11 @@ const userHandleKey = createHmac('sha256', environment.jwtSecret)
  * Derives the stable, opaque handle under which one user appears inside one
  * scope, such as a single meeting. Two rows of the same scope naming the same
  * user share a handle, so a client can collapse them onto one avatar request;
- * the same user in another scope gets an unrelated value, so handles cannot be
- * joined across meetings, and the user ID cannot be recovered from either.
+ * the same user in another scope gets an unrelated value, which scopes
+ * authorization to that one scope, and the user ID cannot be recovered from
+ * either. The scoping is not anonymity: the display name and avatar timestamp
+ * shipped beside the handle are identical in every scope, so a caller holding
+ * two responses can still link them to one user.
  */
 export function deriveUserHandle(scope: string, userId: string): string {
   // The scope is length-prefixed, so no scope and user ID can be rearranged
