@@ -41,9 +41,9 @@ export class MeetingUploadersController {
     response.set({
       'Cache-Control': 'private, no-store',
       'Referrer-Policy': 'no-referrer',
-      Vary: 'Authorization',
       'X-Content-Type-Options': 'nosniff',
     });
+    varyOnAuthorization(response);
 
     const version = await this.uploaderAvatars.describe(
       meetingId,
@@ -84,6 +84,18 @@ export class MeetingUploadersController {
  */
 function allowRevalidatedReuse(response: Response, etag: string): void {
   response.set({ 'Cache-Control': 'private, max-age=0, must-revalidate', ETag: etag });
+  varyOnAuthorization(response);
+}
+
+/**
+ * `response.set` writes a header field whole, so naming `Vary` there would drop
+ * the `Origin` the CORS layer already appended — and this route is the one that
+ * made this URL cache-eligible, so a short `Vary` is exactly the hazard it must
+ * not introduce. Express's `vary` helper appends instead, and is idempotent, so
+ * every exit of the route may call it.
+ */
+function varyOnAuthorization(response: Response): void {
+  response.vary('Authorization');
 }
 
 function matchesEntityTag(header: string | undefined, etag: string): boolean {

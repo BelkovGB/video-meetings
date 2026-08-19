@@ -505,7 +505,9 @@ or for a deleted uploader account it returns `404 Avatar not found`.
 
 Caching is revalidated, not skipped, because the URL is authorization-dependent:
 a successful response carries `Cache-Control: private, max-age=0, must-revalidate`,
-`Vary: Authorization`, and an `ETag` derived from the avatar's current version.
+an `ETag` derived from the avatar's current version, and `Authorization` appended
+to `Vary` — appended, so the `Origin` the CORS layer contributes survives and the
+full field reads `Vary: Origin, Authorization`.
 `max-age=0` is stated rather than implied so no cache assigns a heuristic
 lifetime and reuses a replaced avatar unchecked. A request repeating the tag in
 `If-None-Match` receives `304 Not Modified` without a body, carrying the same

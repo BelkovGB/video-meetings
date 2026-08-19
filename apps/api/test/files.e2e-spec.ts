@@ -627,7 +627,11 @@ describe('Meeting files (e2e)', () => {
         .set('Authorization', `Bearer ${viewer.accessToken}`)
         .expect('Content-Type', /image\/png/)
         .expect('Cache-Control', 'private, max-age=0, must-revalidate')
-        .expect('Vary', 'Authorization')
+        // The route appends its own field to the `Vary: Origin` that the CORS
+        // layer contributes, instead of replacing it: on a URL this route makes
+        // cache-eligible, dropping a field a shared middleware added would let a
+        // cache key the entry on too little.
+        .expect('Vary', 'Origin, Authorization')
         .expect('X-Content-Type-Options', 'nosniff')
         .expect(200);
 
@@ -663,7 +667,7 @@ describe('Meeting files (e2e)', () => {
     // unrevalidatable, so the header block is asserted on this path too.
     expect(revalidated.headers.etag).toBe(etag);
     expect(revalidated.headers['cache-control']).toBe('private, max-age=0, must-revalidate');
-    expect(revalidated.headers.vary).toBe('Authorization');
+    expect(revalidated.headers.vary).toBe('Origin, Authorization');
 
     await request(app.getHttpServer())
       .get(url)
@@ -710,7 +714,7 @@ describe('Meeting files (e2e)', () => {
     // validator, or a client would revalidate the error body successfully and
     // go on serving it in place of the image.
     expect(denied.headers['cache-control']).toBe('private, no-store');
-    expect(denied.headers.vary).toBe('Authorization');
+    expect(denied.headers.vary).toBe('Origin, Authorization');
     expect(denied.headers.etag).not.toBe(served.headers.etag);
 
     await request(app.getHttpServer()).get(url).expect(401);
