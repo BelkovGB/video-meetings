@@ -15,6 +15,7 @@ import {
   avatarUploadRoot,
   storageDirectories,
   uploadDirectory,
+  uploadRoot,
 } from './support/storage-roots';
 
 // Missing storage cleanup is cleared before the run (test/global-setup.ts),
@@ -408,5 +409,35 @@ describe('global setup', () => {
 
   it('resolves when there is nothing to clear', async () => {
     await expect(globalSetup()).resolves.toBeUndefined();
+  });
+
+  // The clearing is an optimisation for a cost the per-suite guard already
+  // self-heals: a root that survives costs one locked reconciliation
+  // transaction per application start, and the guard clears it after the first
+  // suite that observes it. Aborting the whole run before a single suite is
+  // scheduled is strictly worse than that, and on Windows a handle held by an
+  // indexer, an antivirus scan or a crashed earlier run is enough to reject a
+  // removal that `maxRetries: 0` never retries.
+  it('warns and lets the run proceed when a root cannot be removed', async () => {
+    const removal = jest.spyOn(cleanup, 'removeStorageRoots').mockRejectedValue(
+      Object.assign(new Error('EBUSY: resource busy or locked'), {
+        code: 'EBUSY',
+      }),
+    );
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await expect(globalSetup()).resolves.toBeUndefined();
+
+      expect(removal).toHaveBeenCalledWith([uploadRoot, avatarUploadRoot]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const [message] = warn.mock.calls[0] as [string];
+      expect(message).toContain(uploadRoot);
+      expect(message).toContain(avatarUploadRoot);
+      expect(message).toContain('EBUSY');
+    } finally {
+      warn.mockRestore();
+      removal.mockRestore();
+    }
   });
 });
