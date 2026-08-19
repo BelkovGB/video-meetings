@@ -11,6 +11,7 @@ import { configureHttpApplication } from '../src/http-application';
 import { MeetingFileDeletionReconciliationService } from '../src/files/services/meeting-file-deletion-reconciliation.service';
 import { MeetingUploaderAvatarService } from '../src/files/services/meeting-uploader-avatar.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { teardownStorageSuite } from './support/storage-cleanup';
 import { avatarUploadRoot, uploadRoot } from './support/storage-roots';
 import { TrustedProxyClients } from './support/trusted-proxy';
 
@@ -76,16 +77,15 @@ describe('Meeting files (e2e)', () => {
   });
 
   afterAll(async () => {
-    try {
-      await app.close();
-    } finally {
-      // A failing close must not keep the roots: the leftovers would make every
-      // later application start in this run pay a reconciliation transaction
-      // per stale directory.
-      await rm(uploadRoot, { recursive: true, force: true });
-      await rm(avatarUploadRoot, { recursive: true, force: true });
-      clients.restore();
-    }
+    // A failing close must not keep the roots — the leftovers would make every
+    // later application start in this run pay a reconciliation transaction per
+    // stale directory — and a failing removal must not keep the trusted-proxy
+    // environment, which the rest of the in-band run depends on.
+    await teardownStorageSuite({
+      close: () => app.close(),
+      storageRoots: [uploadRoot, avatarUploadRoot],
+      restoreEnvironment: () => clients.restore(),
+    });
   });
 
   async function registerUser(): Promise<UserSession> {
