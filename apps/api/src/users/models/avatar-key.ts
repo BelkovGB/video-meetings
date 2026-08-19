@@ -1,12 +1,16 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHmac } from 'node:crypto';
+
+import { environment } from '../../config/environment';
 
 /**
- * Random per process and never persisted. The key it derives exists only so a
- * client can tell that two responses carry the same avatar; it must not be
- * linkable to the user, so it may not be reversible, guessable, or comparable
- * across scopes or across restarts.
+ * Derived from the configured server secret, and so identical in every API
+ * process and across restarts: a client behind a load balancer must recognize
+ * one avatar whichever instance answered. The label separates this use of the
+ * secret from signing, so a key can never be mistaken for, or replayed as, a
+ * token. The key stays unlinkable to the user because it is a MAC of an
+ * unguessable secret, not because the secret is short-lived.
  */
-const keyingMaterial = randomBytes(32);
+const keyingMaterial = createHmac('sha256', environment.jwtSecret).update('avatar-key/v1').digest();
 
 /**
  * An opaque name for one user's avatar inside one scope, so a viewer holding

@@ -64,16 +64,22 @@ export function IdentityAvatar({
 
     let isActive = true;
     const path = image.path;
-    const lease = acquireAvatarImage(imageKey, async (signal) => {
-      const response = await fetch(`${apiUrl}${path}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal,
-      });
-      if (!response.ok) {
-        throw new Error('Unable to load avatar');
-      }
+    const lease = acquireAvatarImage(imageKey, {
+      // The route this component was given: another component sharing the key
+      // reads the same picture through its own, and the cache falls through to
+      // it if this one is gone.
+      id: path,
+      load: async (signal) => {
+        const response = await fetch(`${apiUrl}${path}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal,
+        });
+        if (!response.ok) {
+          throw new Error('Unable to load avatar');
+        }
 
-      return response.blob();
+        return response.blob();
+      },
     });
 
     void lease.url.then(
@@ -107,7 +113,7 @@ export function IdentityAvatar({
           // The image belongs to every component sharing this key, so it is the
           // cache that frees it and lets the next one try again.
           if (imageKey) {
-            discardAvatarImage(imageKey);
+            discardAvatarImage(imageKey, imageUrl);
           }
           setLoaded(null);
         }}

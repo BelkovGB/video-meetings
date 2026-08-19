@@ -459,11 +459,14 @@ Successful requests return `201 Created`:
 request, so a renamed uploader or a replaced avatar shows the current value
 without rewriting stored files. It carries only a display name and the avatar
 state: email, the user ID, and every other private profile value stay out.
-`avatar.key` names that avatar without naming its owner: it is derived from a
-secret the API generates at startup, scoped to the containing meeting, so two
-files of one uploader share a key and a client can download and hold the image
-once, while the key reveals no user ID and matches nothing in another meeting or
-after a restart. The avatar bytes are served only by
+`avatar.key` names that avatar without naming its owner: it is a MAC of the
+uploader's identity under the configured server secret, scoped to the containing
+meeting, so two files of one uploader share a key and a client can download and
+hold the image once, while the key reveals no user ID and matches nothing in
+another meeting. The same secret is configured for every API process, so the key
+is also the same from every instance and across restarts, and a client may keep
+its cache across a list refetch or an upload answered by another instance. The
+avatar bytes are served only by
 `GET /meetings/:meetingId/files/:fileId/uploader-avatar` below, never by a route
 that names the uploader. `displayName` is `null` until the uploader sets one,
 `avatar` is `null` while the uploader has none, and

@@ -3,7 +3,7 @@ import { MeetingFile, Prisma } from '@prisma/client';
 import {
   UserIdentityResponse,
   toUserIdentityResponse,
-  userIdentitySelect,
+  userIdentityReadSelect,
 } from '../../users/models/user-identity.response';
 
 export const meetingFileSelect = {
@@ -14,7 +14,7 @@ export const meetingFileSelect = {
   mimeType: true,
   sizeBytes: true,
   createdAt: true,
-  uploadedBy: { select: userIdentitySelect },
+  uploadedBy: { select: userIdentityReadSelect },
 } satisfies Prisma.MeetingFileSelect;
 
 export type MeetingFileResponse = {

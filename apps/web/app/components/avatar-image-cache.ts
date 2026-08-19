@@ -1,11 +1,28 @@
 'use client';
 
+/**
+ * One route the bytes can come from. Several holders of a key usually name the
+ * same picture through different routes — one meeting file each — so a route
+ * that fails says nothing about the picture, and the entry falls through to the
+ * next one instead of blanking every holder. `id` is the route itself, so a
+ * route already tried is not tried again.
+ */
+export type AvatarImageSource = {
+  id: string;
+  load: (signal: AbortSignal) => Promise<Blob>;
+};
+
 type AvatarImageEntry = {
   leases: number;
   controller: AbortController;
   objectUrl: string | null;
   /** Resolves to the object URL every holder of this key shares. */
   url: Promise<string>;
+  resolve: (url: string) => void;
+  reject: (error: unknown) => void;
+  /** Routes offered by holders and not read yet, in the order they arrived. */
+  untried: AvatarImageSource[];
+  triedIds: Set<string>;
   teardown: ReturnType<typeof setTimeout> | null;
 };
 
@@ -23,11 +40,13 @@ export type AvatarImageLease = {
   release: () => void;
 };
 
-export function acquireAvatarImage(
-  key: string,
-  loadBlob: (signal: AbortSignal) => Promise<Blob>,
-): AvatarImageLease {
-  const entry = entries.get(key) ?? createEntry(key, loadBlob);
+export function acquireAvatarImage(key: string, source: AvatarImageSource): AvatarImageLease {
+  const joined = entries.get(key);
+  const entry = joined ?? createEntry(key, source);
+  if (joined) {
+    offerSource(joined, source);
+  }
+
   if (entry.teardown) {
     clearTimeout(entry.teardown);
     entry.teardown = null;
@@ -74,10 +93,15 @@ export function acquireAvatarImage(
  * and the next component asking for this key downloads it again instead of
  * inheriting the broken one. Every holder of the key falls back on its own,
  * since a picture that failed to decode fails for all of them.
+ *
+ * @param objectUrl the image that failed. A component can report a failure long
+ *   after its entry was dropped and a healthy one took the key, so the URL says
+ *   which entry this is about and keeps the replacement from being revoked out
+ *   from under the rows now showing it.
  */
-export function discardAvatarImage(key: string) {
+export function discardAvatarImage(key: string, objectUrl: string) {
   const entry = entries.get(key);
-  if (!entry) {
+  if (!entry || entry.objectUrl !== objectUrl) {
     return;
   }
 
@@ -88,41 +112,88 @@ export function discardAvatarImage(key: string) {
   }
 }
 
-function createEntry(key: string, loadBlob: (signal: AbortSignal) => Promise<Blob>) {
+function createEntry(key: string, source: AvatarImageSource) {
   const controller = new AbortController();
+  let resolve!: (url: string) => void;
+  let reject!: (error: unknown) => void;
+  const url = new Promise<string>((resolveUrl, rejectUrl) => {
+    resolve = resolveUrl;
+    reject = rejectUrl;
+  });
+
   const entry: AvatarImageEntry = {
     leases: 0,
     controller,
     objectUrl: null,
     teardown: null,
-    // The callbacks run long after this object exists, so they may name it.
-    url: loadBlob(controller.signal).then(
-      (blob) => {
-        const objectUrl = URL.createObjectURL(blob);
-        if (entries.get(key) !== entry) {
-          // The last holder left while the download was finishing.
-          URL.revokeObjectURL(objectUrl);
-          throw new Error('Avatar no longer needed');
-        }
-
-        entry.objectUrl = objectUrl;
-        return objectUrl;
-      },
-      (error: unknown) => {
-        // A failure is not cached: the next holder of this key retries.
-        if (entries.get(key) === entry) {
-          entries.delete(key);
-        }
-
-        throw error;
-      },
-    ),
+    url,
+    resolve,
+    reject,
+    untried: [source],
+    triedIds: new Set(),
   };
 
   // Every holder attaches its own handler; this one keeps a rejection reported
   // to nobody from surfacing as an unhandled one.
   entry.url.catch(() => undefined);
   entries.set(key, entry);
+  readNextSource(key, entry);
 
   return entry;
+}
+
+function offerSource(entry: AvatarImageEntry, source: AvatarImageSource) {
+  if (entry.objectUrl) {
+    // The picture is already here; a spare route would only be kept alive for
+    // nothing, and the whole entry is dropped if this image ever fails.
+    return;
+  }
+
+  if (entry.triedIds.has(source.id) || entry.untried.some((known) => known.id === source.id)) {
+    return;
+  }
+
+  entry.untried.push(source);
+}
+
+function readNextSource(key: string, entry: AvatarImageEntry) {
+  const source = entry.untried.shift();
+  if (!source) {
+    return;
+  }
+
+  entry.triedIds.add(source.id);
+  void source.load(entry.controller.signal).then(
+    (blob) => {
+      const objectUrl = URL.createObjectURL(blob);
+      if (entries.get(key) !== entry) {
+        // The last holder left while the download was finishing.
+        URL.revokeObjectURL(objectUrl);
+        entry.reject(new Error('Avatar no longer needed'));
+        return;
+      }
+
+      entry.objectUrl = objectUrl;
+      entry.resolve(objectUrl);
+    },
+    (error: unknown) => {
+      if (entries.get(key) !== entry) {
+        entry.reject(error);
+        return;
+      }
+
+      if (entry.untried.length > 0 && !entry.controller.signal.aborted) {
+        // One holder's route is gone — a file deleted out from under its row,
+        // say — while the others still stream the same picture. Read one of
+        // theirs before giving up, so a single stale row cannot blank every row
+        // of the same uploader.
+        readNextSource(key, entry);
+        return;
+      }
+
+      // A failure is not cached: the next holder of this key retries.
+      entries.delete(key);
+      entry.reject(error);
+    },
+  );
 }

@@ -719,6 +719,17 @@ test('shows the uploader avatar through the meeting, and falls back neutrally', 
   await expect(namedAvatar).not.toHaveAttribute('src');
   await page.unroute('**/uploader-avatar');
 
+  // The failure is not remembered: coming back in the same session — through
+  // links, so no reload clears the shared cache — reads the picture again
+  // instead of inheriting the refusal.
+  await page.getByRole('link', { name: 'Все встречи' }).click();
+  await expect(page).toHaveURL('/');
+  await page.getByRole('link', { name: `Открыть встречу ${meeting.title}` }).click();
+
+  await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
+  await expect(namedAvatar).toHaveAttribute('src', /^blob:/);
+  await expect.poll(decodedWidth).toBe(2);
+
   // Outside the meeting there is no authorized context, so there is no avatar.
   const foreignMeeting = await createForeignMeeting('phase-6-avatar-outsider');
   await page.goto(`/meetings/${foreignMeeting.id}`);
@@ -729,20 +740,39 @@ test('shows the uploader avatar through the meeting, and falls back neutrally', 
   await expect(page.getByTestId('meeting-file-uploader-avatar')).toHaveCount(0);
 });
 
-test('reads one uploader avatar for all of their rows, and drops it on leaving', async ({
+test('reads one uploader avatar per uploader, and drops it on leaving', async ({
   page,
   request,
 }) => {
-  const avatar = Buffer.from(
+  // Two sizes tell the two uploaders' pictures apart once they are decoded.
+  const ownerAvatar = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const otherAvatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAMAAAADCAIAAADZSiLoAAAAEElEQVR4nGPgmLgJghiwsACosQukZ7GQBAAAAABJRU5ErkJggg==',
     'base64',
   );
   const owner = await register(request, 'phase-6-avatar-shared');
   const meeting = await createMeeting(request, owner);
   await setDisplayName(request, owner, 'Ада Лавлейс');
-  await setAvatar(request, owner, avatar);
+  await setAvatar(request, owner, ownerAvatar);
   for (const name of ['phase-6-shared-1.pdf', 'phase-6-shared-2.pdf', 'phase-6-shared-3.pdf']) {
     await uploadPdf(request, owner, meeting, { name });
+  }
+
+  // A second uploader with an avatar of their own. Sharing has to stop at the
+  // person: rows that collapse onto one image across uploaders would show one
+  // participant's face under another participant's name.
+  const other = await register(request, 'phase-6-avatar-shared-other');
+  await setDisplayName(request, other, 'Грейс Хоппер');
+  await setAvatar(request, other, otherAvatar);
+  for (const name of ['phase-6-other-1.pdf', 'phase-6-other-2.pdf']) {
+    const file = await uploadPdf(request, owner, meeting, { name });
+    await prisma.meetingFile.update({
+      where: { id: file.id },
+      data: { uploadedById: other.userId },
+    });
   }
   await authenticate(page, owner);
 
@@ -755,25 +785,47 @@ test('reads one uploader avatar for all of their rows, and drops it on leaving',
 
   await page.goto(`/meetings/${meeting.id}`);
 
+  const avatarOf = (name: string) =>
+    page
+      .getByRole('listitem')
+      .filter({ hasText: name })
+      .getByTestId('meeting-file-uploader-avatar');
+  const sourceOf = (name: string) =>
+    avatarOf(name).evaluate((element) => (element as HTMLImageElement).src);
+  const widthOf = (name: string) =>
+    avatarOf(name).evaluate((element) => (element as HTMLImageElement).naturalWidth);
+
   const avatars = page.getByTestId('meeting-file-uploader-avatar');
-  await expect(avatars).toHaveCount(3);
-  for (const index of [0, 1, 2]) {
+  await expect(avatars).toHaveCount(5);
+  for (const index of [0, 1, 2, 3, 4]) {
     await expect(avatars.nth(index)).toHaveAttribute('src', /^blob:/);
   }
 
-  // The rows differ only by file: the picture behind them is one download and
-  // one decoded image, not one per row.
-  const sources = await avatars.evaluateAll((elements) =>
-    elements.map((element) => (element as HTMLImageElement).src),
-  );
-  expect(new Set(sources).size).toBe(1);
-  expect(avatarRequests).toHaveLength(1);
+  // The rows of one uploader differ only by file: the picture behind them is
+  // one download and one decoded image, not one per row.
+  const ownerSource = await sourceOf('phase-6-shared-1.pdf');
+  expect(await sourceOf('phase-6-shared-2.pdf')).toBe(ownerSource);
+  expect(await sourceOf('phase-6-shared-3.pdf')).toBe(ownerSource);
+
+  const otherSource = await sourceOf('phase-6-other-1.pdf');
+  expect(await sourceOf('phase-6-other-2.pdf')).toBe(otherSource);
+
+  // The two uploaders keep their own image, and it is the right one: the
+  // decoded sizes say the pictures were not swapped, only the URLs shared.
+  expect(otherSource).not.toBe(ownerSource);
+  await expect.poll(() => widthOf('phase-6-shared-1.pdf')).toBe(2);
+  await expect.poll(() => widthOf('phase-6-other-1.pdf')).toBe(3);
+
+  // One download per uploader: not one per row, and not one for both of them.
+  expect(avatarRequests).toHaveLength(2);
 
   // Leaving the list while the image is still arriving stops the download,
   // instead of letting a page nobody is looking at finish it.
   await page.route('**/uploader-avatar', async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 10_000));
-    await route.fulfill({ status: 200, contentType: 'image/png', body: avatar }).catch(() => {});
+    await route
+      .fulfill({ status: 200, contentType: 'image/png', body: ownerAvatar })
+      .catch(() => {});
   });
   const abandoned = page.waitForEvent('requestfailed', (failed) =>
     failed.url().includes('/uploader-avatar'),
@@ -785,6 +837,79 @@ test('reads one uploader avatar for all of their rows, and drops it on leaving',
   await expect(page).toHaveURL('/');
   expect((await abandoned).failure()?.errorText).toBeTruthy();
   await page.unroute('**/uploader-avatar');
+
+  // The abandoned download leaves nothing behind: coming back in the same
+  // session — no reload, so the cache is the one the abort tore down — loads
+  // the avatar again instead of inheriting a dead entry.
+  await page.getByRole('link', { name: `Открыть встречу ${meeting.title}` }).click();
+
+  await expect(page.getByRole('heading', { name: meeting.title })).toBeVisible();
+  await expect(avatarOf('phase-6-shared-1.pdf')).toHaveAttribute('src', /^blob:/);
+  await expect.poll(() => widthOf('phase-6-shared-1.pdf')).toBe(2);
+});
+
+test('keeps the other rows of an uploader when the row that fetched fails', async ({
+  page,
+  request,
+}) => {
+  const avatar = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGO4o6Z2R02NAUIBACNGBKHo5yw4AAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const owner = await register(request, 'phase-6-avatar-row-failure');
+  const meeting = await createMeeting(request, owner);
+  await setDisplayName(request, owner, 'Ада Лавлейс');
+  await setAvatar(request, owner, avatar);
+  const staleFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-stale-row.pdf' });
+  const healthyFile = await uploadPdf(request, owner, meeting, { name: 'phase-6-healthy-row.pdf' });
+  // The list is newest first, so this puts the failing row on top, where it is
+  // the row that starts the shared download.
+  await prisma.meetingFile.update({
+    where: { id: staleFile.id },
+    data: { createdAt: new Date('2026-08-15T10:00:00.000Z') },
+  });
+  await prisma.meetingFile.update({
+    where: { id: healthyFile.id },
+    data: { createdAt: new Date('2026-08-14T10:00:00.000Z') },
+  });
+  await authenticate(page, owner);
+
+  // The route answers 404 for a file that is gone, whatever the uploader's
+  // avatar is doing — a list grown stale in another tab is enough. One such row
+  // must not take the picture away from every other row of the same person.
+  const staleRequests: string[] = [];
+  await page.route(`**/files/${staleFile.id}/uploader-avatar`, (route) => {
+    staleRequests.push(route.request().url());
+    return route.fulfill({ status: 404 });
+  });
+  await page.goto(`/meetings/${meeting.id}`);
+
+  const avatarOf = (name: string) =>
+    page
+      .getByRole('listitem')
+      .filter({ hasText: name })
+      .getByTestId('meeting-file-uploader-avatar');
+  const healthyAvatar = avatarOf('phase-6-healthy-row.pdf');
+  const staleAvatar = avatarOf('phase-6-stale-row.pdf');
+
+  await expect(healthyAvatar).toHaveAttribute('src', /^blob:/);
+  await expect(healthyAvatar).toHaveAccessibleName('Аватар: Ада Лавлейс');
+  await expect
+    .poll(() => healthyAvatar.evaluate((element) => (element as HTMLImageElement).naturalWidth))
+    .toBe(2);
+
+  // The picture belongs to the uploader, not to the file that happened to be
+  // read first, so the stale row shows it too — through the healthy row's
+  // route, which the same viewer is just as authorized to read.
+  await expect(staleAvatar).toHaveAttribute('src', /^blob:/);
+  expect(await staleAvatar.evaluate((element) => (element as HTMLImageElement).src)).toBe(
+    await healthyAvatar.evaluate((element) => (element as HTMLImageElement).src),
+  );
+
+  // The failing route is read once and then left alone: falling through to
+  // another row's route is a fallback, not a retry loop over every row.
+  expect(staleRequests).toHaveLength(1);
+  await page.unroute(`**/files/${staleFile.id}/uploader-avatar`);
 });
 
 test('participant can download but never sees the delete action', async ({ page, request }) => {

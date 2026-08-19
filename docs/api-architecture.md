@@ -98,6 +98,19 @@ cleanup. A transient cleanup failure leaves the user in the stable
 avatar-absent state and is reconciled by the storage service without exposing
 the object's internal path.
 
+Another user reads an avatar only through shared activity, never by user ID:
+`GET /meetings/:meetingId/files/:fileId/uploader-avatar` streams it under the
+containing meeting's own authorization. So that a client can tell that many rows
+name one picture and read it once, the identity in a shared response carries an
+opaque `avatar.key` where the user ID would otherwise be: a MAC of the uploader's
+ID, scoped to the meeting, keyed on material derived from the configured
+`JWT_SECRET` under a distinct label. Deriving it from configuration rather than a
+per-process random value keeps every instance behind a load balancer, and the
+same instance after a restart, agreeing on the key, so a response from one
+instance does not invalidate a cache filled by another. `userIdentitySelect`
+stays the allowlist of fields a shared response may expose; the user ID is read
+through the separate `userIdentityReadSelect` and is never emitted.
+
 ## Ownership and authorization
 
 The JWT payload contains the user ID in `sub` and, for newly issued tokens, a
