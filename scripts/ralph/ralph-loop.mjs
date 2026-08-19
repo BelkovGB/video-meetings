@@ -1169,6 +1169,26 @@ export async function runContinuousLoop(context, actions) {
           continue;
         }
         actions.verifyReviewedPullRequestHead(config, repository, pullRequest);
+        // Отложенная issue открыта и невыполнена: закрывать milestone под неё
+        // значило бы объявить фазу законченной, когда работа осталась.
+        // Очередь её не видит по построению, поэтому проверка нужна отдельно —
+        // иначе цикл доходит до `closeMilestone`, тот перечитывает issues без
+        // этого фильтра и падает на «появились открытые issues».
+        if (parkedIssueNumbers.size > 0) {
+          const parked = [...parkedIssueNumbers].map((number) => `#${number}`).join(', ');
+          console.log(
+            `Milestone не закрыт: ${parked} отложены после ${config.maxReviewFixAttempts} отказов ревью подряд. ` +
+              'Работа в ветке, замечания в теле задач; разберите их и запустите цикл снова.',
+          );
+          stateStore?.finish();
+          return {
+            mode: 'run',
+            verdict: 'parked',
+            iterations: iteration,
+            pullRequest,
+            parkedIssues: [...parkedIssueNumbers],
+          };
+        }
         actions.closeMilestone(repository, milestone);
         return { verdict: 'pass', iterations: iteration, pullRequest };
       }
