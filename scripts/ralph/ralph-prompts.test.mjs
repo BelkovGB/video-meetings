@@ -317,6 +317,10 @@ test('Ralph infrastructure is never treated as product work', () => {
     'scripts/ralph/ralph-loop.mjs:975',
     'AGENTS.md',
     'apps/api/AGENTS.md',
+    // Тот же файл инструкций для Claude Code: он задаёт поведение будущей
+    // сессии наравне с `AGENTS.md`, поэтому и защищён наравне с ним.
+    'CLAUDE.md',
+    'apps/api/CLAUDE.md',
     // Claude Code читает `.claude/**`: положенный туда файл управляет будущей
     // сессией, поэтому каталог принадлежит оператору, как и `.agents/**`.
     '.claude/security-reviewer.md',

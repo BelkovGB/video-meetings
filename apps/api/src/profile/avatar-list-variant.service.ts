@@ -98,9 +98,10 @@ export class AvatarListVariantService {
   /**
    * Derives the variant ahead of the first read, from the bytes the upload path
    * already validated, so the read path stays a plain file open and the upload
-   * neither reads the picture off disk a second time nor decodes what it is
-   * holding. A failure is not the uploader's problem: the read path derives
-   * again.
+   * reads the picture off disk once rather than twice. The decode and re-encode
+   * are paid here, in a request that is already serialised behind one upload,
+   * rather than in the first view of every file list. A failure is not the
+   * uploader's problem: the read path derives again.
    */
   async prepare(storageKey: string, mimeType: string, content: Buffer): Promise<void> {
     try {
