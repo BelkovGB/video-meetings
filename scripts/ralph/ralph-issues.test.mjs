@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -515,7 +516,7 @@ test('skill frontmatter parser keeps multi-line values and quoted descriptions v
 });
 
 test('every project-local SKILL.md exposes loadable frontmatter', () => {
-  // .agents/skills is gitignored, so a clean checkout legitimately has none.
+  // Installed skills are gitignored, so a clean checkout legitimately has fewer.
   // The assertion is "whatever is present must load", not "skills must exist".
   const files = agentSkillFiles();
   for (const file of files) {
@@ -523,6 +524,41 @@ test('every project-local SKILL.md exposes loadable frontmatter', () => {
     assert.deepEqual(errors, [], `${file}: ${errors.join('; ')}`);
   }
   assert.doesNotThrow(() => verifyAgentSkills());
+});
+
+test('skills of both CLI conventions are discovered, not just one', () => {
+  // Codex reads `.agents/skills`, Claude Code reads `.claude/skills`. Checking
+  // one of them left the other's broken frontmatter to be discovered at
+  // runtime, where a skill that fails to load is only a line in the log.
+  const directory = mkdtempSync(path.join(tmpdir(), 'ralph-skills-'));
+  try {
+    for (const [root, skill] of [
+      ['.agents', 'codex-side'],
+      ['.claude', 'claude-side'],
+    ]) {
+      mkdirSync(path.join(directory, root, 'skills', skill), { recursive: true });
+      writeFileSync(
+        path.join(directory, root, 'skills', skill, 'SKILL.md'),
+        `---\nname: ${skill}\ndescription: d\n---\n`,
+        'utf8',
+      );
+    }
+
+    const found = agentSkillFiles([
+      path.join(directory, '.agents', 'skills'),
+      path.join(directory, '.claude', 'skills'),
+    ]).map((file) => path.relative(directory, file).split(path.sep).join('/'));
+
+    assert.deepEqual(found, [
+      '.agents/skills/codex-side/SKILL.md',
+      '.claude/skills/claude-side/SKILL.md',
+    ]);
+    // Отсутствующий каталог — норма, а не ошибка: у проекта может не быть
+    // скиллов одного из CLI.
+    assert.deepEqual(agentSkillFiles([path.join(directory, 'nowhere')]), []);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('skill preflight fails with every invalid skill listed at once', () => {
