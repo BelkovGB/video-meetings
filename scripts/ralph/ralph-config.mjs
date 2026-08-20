@@ -60,6 +60,18 @@ const ignoredAgentInstructionDirectories = new Set([
   'node_modules',
 ]);
 
+/**
+ * Файлы `.claude/**`, которые ведёт сам инструмент, а не человек.
+ *
+ * Они не инструкция и ничьё поведение не описывают: Claude Code переписывает их
+ * когда ему нужно, в том числе пока идёт прогон Ralph. В доверенном наборе они
+ * означали бы остановку с «AFK-сессия изменила доверенный файл» от постороннего
+ * события — обвинялась бы сессия агента, которая этот файл не открывала.
+ * Список закрытый и перечисляет только машинные файлы: всё, что может нести
+ * инструкцию — агенты, скиллы, настройки, хуки, — остаётся доверенным.
+ */
+const toolManagedClaudeFiles = new Set(['scheduled_tasks.lock']);
+
 export function agentInstructionFiles(directory = projectRoot, root = directory) {
   const files = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -74,7 +86,9 @@ export function agentInstructionFiles(directory = projectRoot, root = directory)
     // Code читает оттуда агентов, скиллы, настройки и хуки, то есть любой файл
     // там меняет поведение будущей сессии, а не только файл с известным именем.
     if (entry.name === 'AGENTS.md' || isClaudeInstructionDirectory(directory, root)) {
-      files.push(path.join(directory, entry.name));
+      if (!toolManagedClaudeFiles.has(entry.name)) {
+        files.push(path.join(directory, entry.name));
+      }
     }
   }
   return files.sort();

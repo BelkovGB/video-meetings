@@ -582,6 +582,10 @@ test('a file planted in .claude enters the trusted instruction set', () => {
     writeFileSync(path.join(directory, '.claude', 'agents', 'reviewer.md'), '# a\n', 'utf8');
     // Продуктовый файл рядом в набор попадать не должен.
     writeFileSync(path.join(directory, 'apps', 'web', 'page.tsx'), 'export {}\n', 'utf8');
+    // А этот ведёт сам Claude Code и переписывает когда ему нужно, в том числе
+    // посреди прогона: в наборе он останавливал бы Ralph от постороннего
+    // события, обвиняя сессию агента, которая его не открывала.
+    writeFileSync(path.join(directory, '.claude', 'scheduled_tasks.lock'), '{}\n', 'utf8');
 
     const collected = agentInstructionFiles(directory).map((file) =>
       path.relative(directory, file).split(path.sep).join('/'),

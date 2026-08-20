@@ -20,6 +20,14 @@ apps/web/next-env.d.ts
 !.agents/ralph-rules.md
 !.agents/ralph.config.json
 !.agents/review.schema.json
+# Каталог Claude Code: субагенты версионируются, потому что задают, как и что
+# ревьюится, и их изменение меняет результат. Остальное — нет: скиллы
+# восстанавливаются из skills-lock.json, как зависимости из lock-файла, а lock
+# планировщика и локальные разрешения принадлежат машине, а не проекту.
+.claude/*
+!.claude/agents/
+.claude/skills/
+.claude/settings.local.json
 .playwright-mcp/
 .playwright-cli/
 apps/web/test-results/
