@@ -19,7 +19,16 @@ import { agentClis, reasoningEffortsFor } from './ralph-agent-backends.mjs';
 // оркестратора дал бы цикл.
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..', '..');
-const skillsDirectory = path.join(projectRoot, '.agents', 'skills');
+/**
+ * Где лежат project-local skills. Каталог зависит от CLI: Codex читает
+ * `.agents/skills`, Claude Code — `.claude/skills`, и проверяются оба, потому
+ * что невалидный frontmatter не роняет сессию — агент молча теряет skill и
+ * пишет `failed to load skill`, что видно только в логе.
+ */
+const skillsDirectories = [
+  path.join(projectRoot, '.agents', 'skills'),
+  path.join(projectRoot, '.claude', 'skills'),
+];
 
 export const configPath = path.join(projectRoot, '.agents', 'ralph.config.json');
 
@@ -168,12 +177,17 @@ export function parseSkillFrontmatter(content) {
   return { fields, errors };
 }
 
-export function agentSkillFiles(directory = skillsDirectory) {
-  if (!existsSync(directory)) return [];
-  return readdirSync(directory, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => path.join(directory, entry.name, 'SKILL.md'))
-    .filter((file) => existsSync(file))
+export function agentSkillFiles(directories = skillsDirectories) {
+  const roots = Array.isArray(directories) ? directories : [directories];
+
+  return roots
+    .filter((directory) => existsSync(directory))
+    .flatMap((directory) =>
+      readdirSync(directory, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(directory, entry.name, 'SKILL.md'))
+        .filter((file) => existsSync(file)),
+    )
     .sort();
 }
 
