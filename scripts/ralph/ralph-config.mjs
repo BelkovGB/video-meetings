@@ -72,6 +72,13 @@ const ignoredAgentInstructionDirectories = new Set([
  */
 const toolManagedClaudeFiles = new Set(['scheduled_tasks.lock']);
 
+/**
+ * Имена файлов инструкций, которые агент читает сам, где бы они ни лежали.
+ * `AGENTS.md` читает Codex, `CLAUDE.md` — Claude Code, и оба управляют будущей
+ * сессией одинаково, поэтому и защищены одинаково.
+ */
+const instructionFileNames = new Set(['AGENTS.md', 'CLAUDE.md']);
+
 export function agentInstructionFiles(directory = projectRoot, root = directory) {
   const files = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -85,7 +92,7 @@ export function agentInstructionFiles(directory = projectRoot, root = directory)
     // набор инструкций собирается заново. `.claude/**` входит целиком: Claude
     // Code читает оттуда агентов, скиллы, настройки и хуки, то есть любой файл
     // там меняет поведение будущей сессии, а не только файл с известным именем.
-    if (entry.name === 'AGENTS.md' || isClaudeInstructionDirectory(directory, root)) {
+    if (instructionFileNames.has(entry.name) || isClaudeInstructionDirectory(directory, root)) {
       if (!toolManagedClaudeFiles.has(entry.name)) {
         files.push(path.join(directory, entry.name));
       }

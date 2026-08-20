@@ -4,7 +4,7 @@
  * Ralph управляет продуктовым циклом, но его собственная реализация и
  * инструкции настраиваются оператором вручную. Поэтому findings и issues,
  * указывающие на `.agents/**`, `.claude/**`, `scripts/ralph/**` и любые
- * `AGENTS.md`, не должны попадать в продуктовую очередь.
+ * `AGENTS.md` или `CLAUDE.md`, не должны попадать в продуктовую очередь.
  *
  * Модуль намеренно не импортирует ничего: это делает его пригодным для
  * использования из любого другого модуля Ralph без риска цикла.
@@ -23,9 +23,13 @@ export function isRalphInfrastructurePath(file) {
     .replace(/^\.\//, '')
     .replace(/:\d+(?::\d+)?$/, '');
 
+  // `AGENTS.md` читает Codex, `CLAUDE.md` — Claude Code; обоими задаётся
+  // поведение будущей сессии, поэтому и защищены они одинаково.
   return (
     normalized === 'AGENTS.md' ||
     normalized.endsWith('/AGENTS.md') ||
+    normalized === 'CLAUDE.md' ||
+    normalized.endsWith('/CLAUDE.md') ||
     normalized === '.agents' ||
     normalized.startsWith('.agents/') ||
     // Claude Code читает из `.claude/**` агентов, скиллы, настройки и хуки.
@@ -51,6 +55,8 @@ export const controlPlaneExcludePathspec = [
   ':(exclude)scripts/ralph',
   ':(exclude)AGENTS.md',
   ':(exclude,glob)**/AGENTS.md',
+  ':(exclude)CLAUDE.md',
+  ':(exclude,glob)**/CLAUDE.md',
 ];
 
 /**

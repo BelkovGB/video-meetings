@@ -577,6 +577,10 @@ test('a file planted in .claude enters the trusted instruction set', () => {
     mkdirSync(path.join(directory, 'apps', 'web'), { recursive: true });
     writeFileSync(path.join(directory, 'AGENTS.md'), '# root\n', 'utf8');
     writeFileSync(path.join(directory, 'apps', 'web', 'AGENTS.md'), '# web\n', 'utf8');
+    // Claude Code читает `CLAUDE.md` там же, где Codex читает `AGENTS.md`, и
+    // задаёт им ровно то же — поведение будущей сессии.
+    writeFileSync(path.join(directory, 'CLAUDE.md'), '# root claude\n', 'utf8');
+    writeFileSync(path.join(directory, 'apps', 'web', 'CLAUDE.md'), '# web claude\n', 'utf8');
     writeFileSync(path.join(directory, '.claude', 'security-reviewer.md'), '', 'utf8');
     writeFileSync(path.join(directory, '.claude', 'settings.json'), '{}\n', 'utf8');
     writeFileSync(path.join(directory, '.claude', 'agents', 'reviewer.md'), '# a\n', 'utf8');
@@ -596,7 +600,9 @@ test('a file planted in .claude enters the trusted instruction set', () => {
       '.claude/security-reviewer.md',
       '.claude/settings.json',
       'AGENTS.md',
+      'CLAUDE.md',
       'apps/web/AGENTS.md',
+      'apps/web/CLAUDE.md',
     ]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
