@@ -89,6 +89,17 @@ export function useMeetingFiles(meetingId: string) {
   }, [loadAttempt, meetingId, router]);
 
   const hasPendingTranscription = useMemo(() => files.some(isTranscriptionPending), [files]);
+  const [pollingStopped, setPollingStopped] = useState(false);
+
+  // A meeting the user just lost access to (removed while the tab stayed
+  // open) is a different page every time it's opened, so a stale "stopped"
+  // flag from a previous meeting must not carry over.
+  useEffect(() => {
+    setPollingStopped(false);
+  }, [meetingId]);
+
+  const POLL_INTERVAL_MS = 4000;
+  const MAX_POLL_BACKOFF_MS = 30000;
 
   // Polls while any file has a transcription job still in flight, so the
   // already-open page picks up status changes and the resulting transcript
@@ -101,12 +112,13 @@ export function useMeetingFiles(meetingId: string) {
   // The boolean stays referentially the same across polls that are still
   // pending, so the effect only re-runs when polling should start or stop.
   useEffect(() => {
-    if (!hasPendingTranscription) {
+    if (!hasPendingTranscription || pollingStopped) {
       return;
     }
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     let cancelled = false;
+    let consecutiveFailures = 0;
 
     const pollOnce = async () => {
       const token = readAccessToken();
@@ -130,11 +142,24 @@ export function useMeetingFiles(meetingId: string) {
           return;
         }
 
-        if (!response.ok) {
-          scheduleNext();
+        // A meeting the user could see a moment ago can stop being visible to
+        // them mid-poll (removed as a participant, meeting deleted). Both
+        // guard checks in the backend answer that the same way as an unknown
+        // meeting, so retrying forever would only keep hammering an access
+        // check that is never going to pass again in this session.
+        if (response.status === 403 || response.status === 404) {
+          setLoadError('Встреча не найдена или у вас больше нет к ней доступа.');
+          setPollingStopped(true);
           return;
         }
 
+        if (!response.ok) {
+          consecutiveFailures += 1;
+          scheduleNext(consecutiveFailures);
+          return;
+        }
+
+        consecutiveFailures = 0;
         const nextFiles = (await response.json()) as MeetingFile[];
 
         if (cancelled) {
@@ -144,24 +169,26 @@ export function useMeetingFiles(meetingId: string) {
         setFiles(nextFiles);
 
         if (nextFiles.some(isTranscriptionPending)) {
-          scheduleNext();
+          scheduleNext(0);
         }
       } catch {
         // A transient network failure during a background poll should not
-        // surface as an action error; just try again on the next tick.
+        // surface as an action error; just try again, with backoff.
         if (!cancelled) {
-          scheduleNext();
+          consecutiveFailures += 1;
+          scheduleNext(consecutiveFailures);
         }
       }
     };
 
-    const scheduleNext = () => {
+    const scheduleNext = (failureCount: number) => {
+      const delay = Math.min(POLL_INTERVAL_MS * 2 ** failureCount, MAX_POLL_BACKOFF_MS);
       timeoutId = setTimeout(() => {
         void pollOnce();
-      }, 4000);
+      }, delay);
     };
 
-    scheduleNext();
+    scheduleNext(0);
 
     return () => {
       cancelled = true;
@@ -170,7 +197,7 @@ export function useMeetingFiles(meetingId: string) {
         clearTimeout(timeoutId);
       }
     };
-  }, [meetingId, router, hasPendingTranscription]);
+  }, [meetingId, router, hasPendingTranscription, pollingStopped]);
 
   const retryLoading = () => {
     setIsLoading(true);

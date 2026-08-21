@@ -184,6 +184,17 @@ test('shows the matching Russian label for each transcription status', async ({
   );
 });
 
+function countFileListRequests(page: Page, meeting: Meeting): () => number {
+  let count = 0;
+  page.on('request', (req) => {
+    if (req.method() === 'GET' && req.url().includes(`/meetings/${meeting.id}/files`)) {
+      count += 1;
+    }
+  });
+
+  return () => count;
+}
+
 test('picks up transcription status changes and the new transcript file without a reload', async ({
   page,
   request,
@@ -210,6 +221,8 @@ test('picks up transcription status changes and the new transcript file without 
       status: TranscriptionJobStatus.QUEUED,
     },
   });
+
+  const requestCount = countFileListRequests(page, meeting);
 
   await authenticate(page, owner);
   await page.goto(`/meetings/${meeting.id}`);
@@ -257,4 +270,64 @@ test('picks up transcription status changes and the new transcript file without 
   await expect(page.getByRole('listitem').filter({ hasText: 'phase-8-source.txt' })).toBeVisible({
     timeout: 8000,
   });
+
+  // The list has nothing left pending: the poll must not keep hitting the API
+  // forever. Give it two poll intervals' worth of room, then check the count
+  // is no longer climbing.
+  const settledCount = requestCount();
+  await page.waitForTimeout(9000);
+  expect(requestCount()).toBe(settledCount);
+});
+
+test('stops polling and shows the access-lost screen when the meeting stops being visible mid-poll', async ({
+  page,
+  request,
+}) => {
+  const owner = await register(request, 'phase-9-transcription-poll-404');
+  const meeting = await createMeeting(request, owner);
+
+  await createFileWithJob(meeting, owner, {
+    name: 'phase-9-source.mp3',
+    category: MeetingFileCategory.AUDIO,
+    jobStatus: TranscriptionJobStatus.QUEUED,
+  });
+
+  const requestCount = countFileListRequests(page, meeting);
+  let pollsShouldFail = false;
+
+  await page.route(`${apiUrl}/meetings/${meeting.id}/files`, async (route) => {
+    if (pollsShouldFail) {
+      await route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Meeting not found' }),
+      });
+      return;
+    }
+
+    await route.continue();
+  });
+
+  await authenticate(page, owner);
+  await page.goto(`/meetings/${meeting.id}`);
+
+  await expect(
+    page
+      .getByRole('listitem')
+      .filter({ hasText: 'phase-9-source.mp3' })
+      .getByTestId('transcription-status'),
+  ).toHaveText(transcriptionStatusLabels.queued);
+
+  // The initial load and the first poll already went through the route above
+  // as a pass-through; only requests from here on should see the 404.
+  pollsShouldFail = true;
+
+  await expect(page.locator('p[role="alert"]')).toHaveText(
+    'Встреча не найдена или у вас больше нет к ней доступа.',
+    { timeout: 8000 },
+  );
+
+  const settledCount = requestCount();
+  await page.waitForTimeout(9000);
+  expect(requestCount()).toBe(settledCount);
 });

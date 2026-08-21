@@ -10,7 +10,7 @@ import { formatUploaderName } from '../../../lib/format/user-identity';
 import { DeleteFileConfirmation } from './delete-file-confirmation';
 import { DownloadIcon, FileIcon, TrashIcon } from './meeting-file-list-icons';
 import { MeetingFileUploaderAvatar } from './meeting-file-uploader-avatar';
-import { transcriptionFailureReasons, transcriptionStatusLabels } from './transcription-status';
+import { transcriptionFailureReason, transcriptionStatusLabel } from './transcription-status';
 
 type MeetingFileRowProps = {
   meetingId: string;
@@ -91,11 +91,11 @@ export function MeetingFileRow({
                   •
                 </span>
                 <span data-testid="transcription-status">
-                  {transcriptionStatusLabels[file.transcriptionStatus]}
+                  {transcriptionStatusLabel(file.transcriptionStatus)}
                 </span>
                 {file.transcriptionStatus === 'error' && file.transcriptionFailureCode ? (
                   <span data-testid="transcription-failure-reason">
-                    {transcriptionFailureReasons[file.transcriptionFailureCode]}
+                    {transcriptionFailureReason(file.transcriptionFailureCode)}
                   </span>
                 ) : null}
               </>

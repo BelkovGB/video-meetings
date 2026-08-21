@@ -17,3 +17,21 @@ export const transcriptionFailureReasons: Record<TranscriptionFailureCode, strin
   SOURCE_FILE_UNAVAILABLE: 'Исходная запись стала недоступна',
   INTERNAL_ERROR: 'Внутренняя ошибка сервиса',
 };
+
+/**
+ * Both maps above are indexed with a string the server sent, so a plain
+ * bracket lookup would resolve an unexpected value like `__proto__` or
+ * `toString` to a function instead of `undefined` and crash the row's render.
+ * `Object.hasOwn` keeps the lookup to the map's own labelled entries.
+ */
+export function transcriptionStatusLabel(status: TranscriptionStatus): string {
+  return Object.hasOwn(transcriptionStatusLabels, status)
+    ? transcriptionStatusLabels[status]
+    : transcriptionStatusLabels.error;
+}
+
+export function transcriptionFailureReason(code: TranscriptionFailureCode): string {
+  return Object.hasOwn(transcriptionFailureReasons, code)
+    ? transcriptionFailureReasons[code]
+    : transcriptionFailureReasons.INTERNAL_ERROR;
+}
