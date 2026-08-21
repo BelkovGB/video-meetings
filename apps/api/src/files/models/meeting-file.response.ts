@@ -1,4 +1,4 @@
-import { MeetingFile, Prisma } from '@prisma/client';
+import { MeetingFile, Prisma, TranscriptionJobStatus } from '@prisma/client';
 
 import {
   UserIdentityResponse,
@@ -15,7 +15,10 @@ export const meetingFileSelect = {
   sizeBytes: true,
   createdAt: true,
   uploadedBy: { select: userIdentitySelect },
+  transcriptionJob: { select: { status: true } },
 } satisfies Prisma.MeetingFileSelect;
+
+export type TranscriptionStatus = 'queued' | 'processing' | 'ready' | 'error';
 
 export type MeetingFileResponse = {
   id: string;
@@ -25,9 +28,17 @@ export type MeetingFileResponse = {
   sizeBytes: number;
   uploadedAt: Date;
   uploadedBy: UserIdentityResponse | null;
+  transcriptionStatus: TranscriptionStatus | null;
 };
 
 type SelectedMeetingFile = Prisma.MeetingFileGetPayload<{ select: typeof meetingFileSelect }>;
+
+const transcriptionStatusByJobStatus: Record<TranscriptionJobStatus, TranscriptionStatus> = {
+  [TranscriptionJobStatus.QUEUED]: 'queued',
+  [TranscriptionJobStatus.PROCESSING]: 'processing',
+  [TranscriptionJobStatus.COMPLETED]: 'ready',
+  [TranscriptionJobStatus.FAILED]: 'error',
+};
 
 export function toMeetingFileResponse(file: SelectedMeetingFile): MeetingFileResponse {
   return {
@@ -40,5 +51,8 @@ export function toMeetingFileResponse(file: SelectedMeetingFile): MeetingFileRes
     // The meeting scopes the uploader handle: the same person appears under one
     // handle within a meeting and under an unrelated one in every other.
     uploadedBy: toUserIdentityResponse(file.uploadedBy, file.meetingId),
+    transcriptionStatus: file.transcriptionJob
+      ? transcriptionStatusByJobStatus[file.transcriptionJob.status]
+      : null,
   };
 }

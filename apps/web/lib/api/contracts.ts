@@ -71,6 +71,8 @@ export type Meeting = {
 
 export type MeetingFileCategory = 'audio' | 'video' | 'transcript' | 'document';
 
+export type TranscriptionStatus = 'queued' | 'processing' | 'ready' | 'error';
+
 export type MeetingFile = {
   id: string;
   name: string;
@@ -80,4 +82,6 @@ export type MeetingFile = {
   uploadedAt: string;
   /** `null` once the uploading account no longer exists; the file stays listed. */
   uploadedBy: UserIdentity | null;
+  /** `null` for document and transcript files, which never get a transcription job. */
+  transcriptionStatus: TranscriptionStatus | null;
 };
