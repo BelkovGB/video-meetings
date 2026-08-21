@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
 import type { ApiError, Meeting, MeetingFile } from '../../../lib/api/contracts';
@@ -9,6 +9,10 @@ import { apiErrorMessage, readApiErrorMessage } from '../../../lib/api/errors';
 import { sessionRejectedLoginPath } from '../../../lib/auth/login-notice';
 import { clearAccessToken, clearSessionIdentity, readAccessToken } from '../../../lib/auth/session';
 import { useRestoredSessionGuard } from '../../../lib/auth/use-restored-session-guard';
+
+function isTranscriptionPending(file: MeetingFile): boolean {
+  return file.transcriptionStatus === 'queued' || file.transcriptionStatus === 'processing';
+}
 
 export function useMeetingFiles(meetingId: string) {
   const router = useRouter();
@@ -83,6 +87,117 @@ export function useMeetingFiles(meetingId: string) {
 
     void loadMeetingFiles();
   }, [loadAttempt, meetingId, router]);
+
+  const hasPendingTranscription = useMemo(() => files.some(isTranscriptionPending), [files]);
+  const [pollingStopped, setPollingStopped] = useState(false);
+
+  // A meeting the user just lost access to (removed while the tab stayed
+  // open) is a different page every time it's opened, so a stale "stopped"
+  // flag from a previous meeting must not carry over.
+  useEffect(() => {
+    setPollingStopped(false);
+  }, [meetingId]);
+
+  const POLL_INTERVAL_MS = 4000;
+  const MAX_POLL_BACKOFF_MS = 30000;
+
+  // Polls while any file has a transcription job still in flight, so the
+  // already-open page picks up status changes and the resulting transcript
+  // file without a reload. Kept separate from the initial-load effect above,
+  // which must not rerun on every `files` update this effect produces.
+  //
+  // Depends on the derived boolean below, not on `files` itself: `files` gets
+  // a new array reference on every poll response, which would tear down and
+  // restart this effect (and its setTimeout chain) after every single tick.
+  // The boolean stays referentially the same across polls that are still
+  // pending, so the effect only re-runs when polling should start or stop.
+  useEffect(() => {
+    if (!hasPendingTranscription || pollingStopped) {
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    let consecutiveFailures = 0;
+
+    const pollOnce = async () => {
+      const token = readAccessToken();
+
+      if (!token) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${apiUrl}/meetings/${meetingId}/files`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        if (response.status === 401) {
+          clearSessionIdentity();
+          router.replace(sessionRejectedLoginPath);
+          return;
+        }
+
+        // A meeting the user could see a moment ago can stop being visible to
+        // them mid-poll (removed as a participant, meeting deleted). Both
+        // guard checks in the backend answer that the same way as an unknown
+        // meeting, so retrying forever would only keep hammering an access
+        // check that is never going to pass again in this session.
+        if (response.status === 403 || response.status === 404) {
+          setLoadError('Встреча не найдена или у вас больше нет к ней доступа.');
+          setPollingStopped(true);
+          return;
+        }
+
+        if (!response.ok) {
+          consecutiveFailures += 1;
+          scheduleNext(consecutiveFailures);
+          return;
+        }
+
+        consecutiveFailures = 0;
+        const nextFiles = (await response.json()) as MeetingFile[];
+
+        if (cancelled) {
+          return;
+        }
+
+        setFiles(nextFiles);
+
+        if (nextFiles.some(isTranscriptionPending)) {
+          scheduleNext(0);
+        }
+      } catch {
+        // A transient network failure during a background poll should not
+        // surface as an action error; just try again, with backoff.
+        if (!cancelled) {
+          consecutiveFailures += 1;
+          scheduleNext(consecutiveFailures);
+        }
+      }
+    };
+
+    const scheduleNext = (failureCount: number) => {
+      const delay = Math.min(POLL_INTERVAL_MS * 2 ** failureCount, MAX_POLL_BACKOFF_MS);
+      timeoutId = setTimeout(() => {
+        void pollOnce();
+      }, delay);
+    };
+
+    scheduleNext(0);
+
+    return () => {
+      cancelled = true;
+
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }, [meetingId, router, hasPendingTranscription, pollingStopped]);
 
   const retryLoading = () => {
     setIsLoading(true);

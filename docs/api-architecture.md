@@ -255,6 +255,49 @@ it does not race an active request. If a download discovers missing local
 content, the metadata moves to `MISSING` and is excluded from subsequent
 list/download operations.
 
+## Transcription worker
+
+`TranscriptionWorkerModule` is assembled by a separate process
+(`apps/api/src/transcription/worker/main.ts`), not by `AppModule`: the HTTP
+process would then hold the GPU and block on a recording hours long, which is
+the one thing a separate worker exists to prevent.
+
+Uploading an audio or video file creates its `TranscriptionJob` row nested
+inside the same `create` call as the `MeetingFile` row, in status `QUEUED`; a
+document or an already-uploaded transcript never gets one.
+
+The worker polls every `TRANSCRIPTION_POLL_INTERVAL_MS` and processes one job
+at a time — the queue is drained sequentially because the GPU fits one
+recognition run. `claimNextJob` finds the oldest `QUEUED` job whose source
+file is still `READY`, then claims it with an `updateMany` guarded by
+`status: QUEUED`: two workers reading the same candidate produce one update
+with `count === 1` and one with `count === 0`, so exactly one worker wins. The
+winning update moves the job to `PROCESSING`, sets `leaseOwner` to an
+identifier unique to this worker process (`hostname:pid:uuid`) and
+`leaseExpiresAt` to now plus `TRANSCRIPTION_LEASE_TIMEOUT_MS`, and increments
+`attemptCount`.
+
+The worker then converts the recording to 16 kHz mono WAV, runs the
+configured recognizer, and writes the result as a new `MeetingFile` in
+category `TRANSCRIPT`. `completeJob` records that file and closes the job to
+`COMPLETED` in one transaction, but only when the job is still `PROCESSING`
+under this worker's own `leaseOwner` and the source file is still `READY`;
+otherwise it returns false and the caller discards the transcript bytes
+instead of leaving a transcript with no matching recording. Any failure
+instead calls `failJob`, which closes the job to `FAILED` with one of the
+failure codes documented in `docs/api.md`, again guarded by
+`status: PROCESSING` and this worker's `leaseOwner`.
+
+`leaseOwner` and `leaseExpiresAt` record which worker process holds a
+`PROCESSING` job and until when, so a second worker instance never claims a
+job the first is already running. In this phase that is all they do: nothing
+sweeps a lease whose `leaseExpiresAt` has passed and returns the job to
+`QUEUED`. A worker asked to stop finishes the job in flight first, but one that
+is killed or crashes mid-job leaves its job `PROCESSING` under an expired lease
+that no process retries; the recording stays without a transcript until it is
+uploaded again. That is a deliberate scope cut for this
+phase, not a gap — automatic lease reclaim is future work.
+
 ## Persistence and migrations
 
 Prisma models live in `apps/api/prisma/schema.prisma`; SQL migrations are stored

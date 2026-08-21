@@ -10,6 +10,7 @@ import { formatUploaderName } from '../../../lib/format/user-identity';
 import { DeleteFileConfirmation } from './delete-file-confirmation';
 import { DownloadIcon, FileIcon, TrashIcon } from './meeting-file-list-icons';
 import { MeetingFileUploaderAvatar } from './meeting-file-uploader-avatar';
+import { transcriptionFailureReason, transcriptionStatusLabel } from './transcription-status';
 
 type MeetingFileRowProps = {
   meetingId: string;
@@ -84,6 +85,21 @@ export function MeetingFileRow({
                 Загрузил(а): {formatUploaderName(file.uploadedBy)}
               </span>
             </span>
+            {file.transcriptionStatus !== null ? (
+              <>
+                <span aria-hidden="true" className="text-slate-300">
+                  •
+                </span>
+                <span data-testid="transcription-status">
+                  {transcriptionStatusLabel(file.transcriptionStatus)}
+                </span>
+                {file.transcriptionStatus === 'error' && file.transcriptionFailureCode ? (
+                  <span data-testid="transcription-failure-reason">
+                    {transcriptionFailureReason(file.transcriptionFailureCode)}
+                  </span>
+                ) : null}
+              </>
+            ) : null}
           </div>
         </div>
         <div className="flex flex-wrap gap-2 sm:justify-end">
