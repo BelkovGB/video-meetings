@@ -24,6 +24,7 @@ describe('MeetingFilesService failure handling', () => {
       meetingAccess as never,
       {} as never,
       storage as never,
+      {} as never,
     );
 
     await expect(service.delete('meeting-1', 'file-1', 'owner-1')).rejects.toBeInstanceOf(
@@ -60,6 +61,7 @@ describe('MeetingFilesService failure handling', () => {
     const service = new MeetingFilesService(
       prisma as never,
       meetingAccess as never,
+      {} as never,
       {} as never,
       {} as never,
     );
@@ -120,6 +122,7 @@ describe('MeetingFilesService failure handling', () => {
         updatedAt: { lte: new Date('2026-08-11T11:59:00.000Z') },
       },
       select: { id: true, storageKey: true },
+      orderBy: { sourceFileId: { sort: 'asc', nulls: 'last' } },
     });
     logger.mockRestore();
   });

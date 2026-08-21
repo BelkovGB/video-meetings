@@ -83,6 +83,13 @@ enum MeetingFileCategory {
   DOCUMENT
 }
 
+enum TranscriptionJobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 enum MeetingFileStatus {
   READY
   DELETING
@@ -90,26 +97,53 @@ enum MeetingFileStatus {
 }
 
 model MeetingFile {
-  id              String                      @id @default(cuid())
-  meetingId       String                      @map("meeting_id")
-  uploadedById    String?                     @map("uploaded_by_id")
-  originalName    String                      @map("original_name") @db.VarChar(255)
-  storageKey      String                      @unique @map("storage_key")
-  category        MeetingFileCategory
-  mimeType        String                      @map("mime_type") @db.VarChar(255)
-  sizeBytes       Int                         @map("size_bytes")
-  status          MeetingFileStatus           @default(READY)
-  createdAt       DateTime                    @default(now()) @map("created_at")
-  updatedAt       DateTime                    @updatedAt @map("updated_at")
-  meeting         Meeting                     @relation(fields: [meetingId], references: [id], onDelete: Restrict)
-  uploadedBy      User?                       @relation("UploadedMeetingFiles", fields: [uploadedById], references: [id], onDelete: SetNull)
-  downloadTickets MeetingFileDownloadTicket[]
+  id               String                      @id @default(cuid())
+  meetingId        String                      @map("meeting_id")
+  uploadedById     String?                     @map("uploaded_by_id")
+  originalName     String                      @map("original_name") @db.VarChar(255)
+  storageKey       String                      @unique @map("storage_key")
+  category         MeetingFileCategory
+  mimeType         String                      @map("mime_type") @db.VarChar(255)
+  sizeBytes        Int                         @map("size_bytes")
+  status           MeetingFileStatus           @default(READY)
+  sourceFileId     String?                     @unique @map("source_file_id")
+  createdAt        DateTime                    @default(now()) @map("created_at")
+  updatedAt        DateTime                    @updatedAt @map("updated_at")
+  meeting          Meeting                     @relation(fields: [meetingId], references: [id], onDelete: Restrict)
+  uploadedBy       User?                       @relation("UploadedMeetingFiles", fields: [uploadedById], references: [id], onDelete: SetNull)
+  downloadTickets  MeetingFileDownloadTicket[]
+  // Restrict, not Cascade: a cascade would drop the transcript row together
+  // with the only copy of its storage key and leave its bytes on disk until
+  // storage reconciliation notices, a day later. Deleting a recording deletes
+  // its transcript row first, on purpose.
+  sourceFile       MeetingFile?                @relation("MeetingFileTranscript", fields: [sourceFileId], references: [id], onDelete: Restrict)
+  transcript       MeetingFile?                @relation("MeetingFileTranscript")
+  transcriptionJob TranscriptionJob?
 
   @@index([meetingId, status, createdAt])
   @@index([meetingId, status, uploadedById])
   @@index([status, createdAt, id])
   @@index([uploadedById])
   @@map("meeting_files")
+}
+
+model TranscriptionJob {
+  id             String                 @id @default(cuid())
+  sourceFileId   String                 @unique @map("source_file_id")
+  status         TranscriptionJobStatus @default(QUEUED)
+  attemptCount   Int                    @default(0) @map("attempt_count")
+  leaseOwner     String?                @map("lease_owner") @db.VarChar(128)
+  leaseExpiresAt DateTime?              @map("lease_expires_at")
+  startedAt      DateTime?              @map("started_at")
+  finishedAt     DateTime?              @map("finished_at")
+  failureCode    String?                @map("failure_code") @db.VarChar(64)
+  createdAt      DateTime               @default(now()) @map("created_at")
+  updatedAt      DateTime               @updatedAt @map("updated_at")
+  sourceFile     MeetingFile            @relation(fields: [sourceFileId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@map("transcription_jobs")
 }
 
 model MeetingFileDownloadTicket {

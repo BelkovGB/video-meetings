@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "concurrently -n web,api -c cyan,green \"npm run dev --workspace @video-meetings/web\" \"npm run dev --workspace @video-meetings/api\"",
     "build": "npm run build --workspaces --if-present",
+    "worker": "npm run worker --workspace @video-meetings/api",
     "start": "concurrently -n web,api -c cyan,green \"npm run start --workspace @video-meetings/web\" \"npm run start --workspace @video-meetings/api\"",
     "db:up": "docker compose up -d postgres",
     "db:ready": "docker compose up -d --wait --wait-timeout 120 postgres",

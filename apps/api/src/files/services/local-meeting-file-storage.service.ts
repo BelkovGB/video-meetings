@@ -225,6 +225,23 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
     }
   }
 
+  /**
+   * Absolute path of stored content, for a reader that needs a real file rather
+   * than a stream — ffmpeg seeks in an mp4 container and cannot take it on stdin.
+   *
+   * Containment is checked here, in the one module that owns it; callers never
+   * build a storage path themselves.
+   */
+  async resolveExistingContentPath(storageKey: string): Promise<string> {
+    const contentPath = this.resolveContentPath(storageKey);
+
+    if (!(await this.exists(storageKey))) {
+      throw new NotFoundException('File not found');
+    }
+
+    return contentPath;
+  }
+
   async open(storageKey: string): Promise<ReadStream> {
     const contentPath = this.resolveContentPath(storageKey);
 
@@ -271,14 +288,7 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
       }
 
       try {
-        const filesystem = await statfs(uploadConfig.directory, { bigint: true });
-        const availableBytes = filesystem.bavail * filesystem.bsize;
-        const requiredBytes =
-          BigInt(requestBytes) +
-          BigInt(this.activeReservations) +
-          BigInt(uploadConfig.minFreeBytes);
-
-        if (availableBytes < requiredBytes) {
+        if (!(await this.hasFreeSpaceFor(requestBytes, this.activeReservations))) {
           return undefined;
         }
 
@@ -299,6 +309,22 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
         return undefined;
       }
     });
+  }
+
+  /**
+   * Whether the storage filesystem keeps its free-space reserve after writing
+   * `bytes`, with `pendingBytes` already promised to writes in flight.
+   *
+   * Shared with the upload capacity reservation on purpose: a transcript is
+   * written past the active-upload limit but not past the reserve, and two
+   * copies of this arithmetic would drift apart.
+   */
+  async hasFreeSpaceFor(bytes: number, pendingBytes = 0): Promise<boolean> {
+    const filesystem = await statfs(uploadConfig.directory, { bigint: true });
+    const availableBytes = filesystem.bavail * filesystem.bsize;
+    const requiredBytes = BigInt(bytes) + BigInt(pendingBytes) + BigInt(uploadConfig.minFreeBytes);
+
+    return availableBytes >= requiredBytes;
   }
 
   private async probeWriteAccess(): Promise<void> {
