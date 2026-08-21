@@ -1,7 +1,10 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { PrismaClient, MeetingFileCategory, TranscriptionJobStatus } from '@prisma/client';
 
-import { transcriptionStatusLabels } from '../app/meetings/[id]/transcription-status';
+import {
+  transcriptionFailureReasons,
+  transcriptionStatusLabels,
+} from '../app/meetings/[id]/transcription-status';
 
 type Session = {
   accessToken: string;
@@ -70,6 +73,7 @@ async function createFileWithJob(
     name: string;
     category: MeetingFileCategory;
     jobStatus: TranscriptionJobStatus;
+    failureCode?: string;
   },
 ): Promise<void> {
   const file = await prisma.meetingFile.create({
@@ -89,6 +93,7 @@ async function createFileWithJob(
     data: {
       sourceFileId: file.id,
       status: options.jobStatus,
+      failureCode: options.failureCode,
     },
   });
 }
@@ -154,6 +159,7 @@ test('shows the matching Russian label for each transcription status', async ({
     name: 'phase-7-failed.mp4',
     category: MeetingFileCategory.VIDEO,
     jobStatus: TranscriptionJobStatus.FAILED,
+    failureCode: 'NO_SPEECH_DETECTED',
   });
 
   await authenticate(page, owner);
@@ -172,6 +178,9 @@ test('shows the matching Russian label for each transcription status', async ({
   );
   await expect(rowFor('phase-7-failed.mp4').getByTestId('transcription-status')).toHaveText(
     transcriptionStatusLabels.error,
+  );
+  await expect(rowFor('phase-7-failed.mp4').getByTestId('transcription-failure-reason')).toHaveText(
+    transcriptionFailureReasons.NO_SPEECH_DETECTED,
   );
 });
 
