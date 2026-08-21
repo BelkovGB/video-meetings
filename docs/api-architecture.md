@@ -292,9 +292,10 @@ failure codes documented in `docs/api.md`, again guarded by
 `PROCESSING` job and until when, so a second worker instance never claims a
 job the first is already running. In this phase that is all they do: nothing
 sweeps a lease whose `leaseExpiresAt` has passed and returns the job to
-`QUEUED`. A worker that stops or crashes mid-job leaves its job `PROCESSING`
-under an expired lease that no process retries; the recording stays without a
-transcript until it is uploaded again. That is a deliberate scope cut for this
+`QUEUED`. A worker asked to stop finishes the job in flight first, but one that
+is killed or crashes mid-job leaves its job `PROCESSING` under an expired lease
+that no process retries; the recording stays without a transcript until it is
+uploaded again. That is a deliberate scope cut for this
 phase, not a gap — automatic lease reclaim is future work.
 
 ## Persistence and migrations

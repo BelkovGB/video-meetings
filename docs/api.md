@@ -463,8 +463,12 @@ audio and video files; a document or transcript file always carries `null` in
 both. `transcriptionStatus` is one of:
 
 - `queued` — the recording is waiting for a worker to pick it up.
-- `processing` — a worker is transcribing the recording now.
-- `ready` — a transcript file exists and is listed alongside the recording.
+- `processing` — a worker claimed the recording. The job stays in this state
+  until that worker finishes it, and keeps it if the worker is killed first:
+  nothing reclaims an abandoned job in this phase.
+- `ready` — the worker recognized the recording and recorded its transcript.
+  The transcript is listed alongside the recording unless it was deleted
+  since; the status is not revised when it is.
 - `error` — the job stopped without a transcript; `transcriptionFailureCode`
   says why.
 
@@ -484,8 +488,7 @@ and is one of:
 - `TRANSCRIPT_STORAGE_FAILED` — writing or finalizing the transcript file, or
   recording it in the database, failed.
 - `SOURCE_FILE_UNAVAILABLE` — the recording could not be read from storage, or
-  it was deleted, or another worker's lease took over the job, before the
-  transcript could be recorded.
+  it was deleted before the transcript could be recorded.
 - `INTERNAL_ERROR` — any other unexpected failure.
 
 Failure codes carry no storage paths or internal identifiers.
@@ -510,8 +513,9 @@ person.
 
 `displayName` is `null` until the uploader sets one, `avatar` is `null` while
 the uploader has none, and
-`uploadedBy` itself is `null` when the uploading account no longer exists — the
-file stays listed and downloadable. Only the meeting owner and its participants
+`uploadedBy` itself is `null` when the uploading account no longer exists, and
+on every file the system wrote rather than a person — a transcript always
+carries `null`. The file stays listed and downloadable. Only the meeting owner and its participants
 ever see it; an outsider receives the same `404 Meeting not found` as before.
 
 Invalid multipart requests return `400` with `INVALID_MULTIPART_UPLOAD`; a
@@ -651,21 +655,22 @@ if the temporary and permanent paths are on different filesystems.
 
 ## Transcription worker configuration
 
-These variables configure the separate worker process (`npm run worker`), not
-the API process. The worker refuses to start unless `TRANSCRIPTION_COMMAND` is
-set.
+Only the worker process (`npm run worker`) acts on these variables, and it
+refuses to start unless `TRANSCRIPTION_COMMAND` is set. The API process reads
+the same module at startup, so a malformed numeric value or a non-array
+argument list stops the API too, even though it never runs a job.
 
-| Variable                               | Default               | Purpose                                                                                                |
-| -------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------ |
-| `TRANSCRIPTION_COMMAND`                | none, required        | Executable that runs speech recognition on prepared audio.                                             |
-| `TRANSCRIPTION_COMMAND_ARGS`           | `[]`                  | JSON array of arguments passed to the recognition command before the audio path.                       |
-| `TRANSCRIPTION_FFMPEG_PATH`            | `ffmpeg`              | Executable used to prepare audio from the meeting recording.                                           |
-| `TRANSCRIPTION_FFMPEG_ARGS`            | `[]`                  | JSON array of arguments placed before the conversion arguments, for a wrapper or an acceleration flag. |
-| `TRANSCRIPTION_WORK_DIR`               | `./var/transcription` | Working directory for in-flight transcription files, kept separate from `UPLOAD_TEMP_DIR`.             |
-| `TRANSCRIPTION_POLL_INTERVAL_MS`       | `5000`                | Interval between polls for new transcription jobs.                                                     |
-| `TRANSCRIPTION_LEASE_TIMEOUT_MS`       | `900000`              | How long a claimed job stays leased before it is considered abandoned.                                 |
-| `TRANSCRIPTION_AUDIO_TIMEOUT_MS`       | `3600000`             | Timeout for the audio preparation step.                                                                |
-| `TRANSCRIPTION_RECOGNITION_TIMEOUT_MS` | `14400000`            | Timeout for the recognition command.                                                                   |
+| Variable                               | Default               | Purpose                                                                                                         |
+| -------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `TRANSCRIPTION_COMMAND`                | none, required        | Executable that runs speech recognition on prepared audio.                                                      |
+| `TRANSCRIPTION_COMMAND_ARGS`           | `[]`                  | JSON array of arguments passed to the recognition command before the audio path.                                |
+| `TRANSCRIPTION_FFMPEG_PATH`            | `ffmpeg`              | Executable used to prepare audio from the meeting recording.                                                    |
+| `TRANSCRIPTION_FFMPEG_ARGS`            | `[]`                  | JSON array of arguments placed before the conversion arguments, for a wrapper or an acceleration flag.          |
+| `TRANSCRIPTION_WORK_DIR`               | `./var/transcription` | Working directory for in-flight transcription files, kept separate from `UPLOAD_TEMP_DIR`.                      |
+| `TRANSCRIPTION_POLL_INTERVAL_MS`       | `5000`                | Interval between polls for new transcription jobs.                                                              |
+| `TRANSCRIPTION_LEASE_TIMEOUT_MS`       | `900000`              | How long a claimed job records its lease, so a second worker never takes it. Nothing reclaims an expired lease. |
+| `TRANSCRIPTION_AUDIO_TIMEOUT_MS`       | `3600000`             | Timeout for the audio preparation step.                                                                         |
+| `TRANSCRIPTION_RECOGNITION_TIMEOUT_MS` | `14400000`            | Timeout for the recognition command.                                                                            |
 
 ## Running checks
 
