@@ -6,6 +6,10 @@ import { tmpdir } from 'node:os';
 // paths live here instead of being re-derived in every spec.
 export const uploadRoot = join(tmpdir(), 'video-meetings-api-e2e-uploads');
 export const avatarUploadRoot = join(tmpdir(), 'video-meetings-api-e2e-avatars');
+// The worker converts audio here. Deliberately outside uploadRoot: storage
+// reconciliation deletes stale entries under the upload roots and cannot see a
+// conversion another process still has open.
+export const transcriptionWorkRoot = join(tmpdir(), 'video-meetings-api-e2e-transcription');
 
 export const uploadDirectory = join(uploadRoot, 'files');
 export const uploadTempDirectory = join(uploadRoot, 'temp');

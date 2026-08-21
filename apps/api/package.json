@@ -6,6 +6,8 @@
     "dev": "npm run prisma:generate && node --env-file=../../.env ../../node_modules/@nestjs/cli/bin/nest.js start --watch",
     "build": "npm run prisma:generate && nest build",
     "start": "node --env-file=../../.env dist/main.js",
+    "worker": "node --env-file=../../.env dist/transcription/worker/main.js",
+    "worker:dev": "npm run prisma:generate && node --env-file=../../.env ../../node_modules/@nestjs/cli/bin/nest.js start --watch --entryFile transcription/worker/main",
     "lint": "eslint \"src/**/*.ts\"",
     "test:e2e": "npm run prisma:generate && jest --config ./test/jest-e2e.json --runInBand",
     "prisma": "node --env-file=../../.env ../../node_modules/prisma/build/index.js",

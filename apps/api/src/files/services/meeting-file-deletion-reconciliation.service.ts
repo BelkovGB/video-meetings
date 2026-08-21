@@ -89,6 +89,10 @@ export class MeetingFileDeletionReconciliationService
         updatedAt: { lte: retryBefore },
       },
       select: { id: true, storageKey: true },
+      // Transcripts first: a transcript row references its recording, and that
+      // reference is restricted, so the other order fails the recording's own
+      // delete until the next pass.
+      orderBy: { sourceFileId: { sort: 'asc', nulls: 'last' } },
     });
 
     for (const file of files) {

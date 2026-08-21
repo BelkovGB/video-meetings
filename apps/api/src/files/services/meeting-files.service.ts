@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { ReadStream } from 'node:fs';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { TranscriptionJobsService } from '../../transcription/services/transcription-jobs.service';
 import { meetingFileSelect, toMeetingFileResponse } from '../models/meeting-file.response';
 import { LocalMeetingFileStorageService } from './local-meeting-file-storage.service';
 import { MeetingAccessService } from './meeting-access.service';
@@ -16,6 +17,7 @@ export class MeetingFilesService {
     private readonly meetingAccess: MeetingAccessService,
     private readonly validation: MeetingFileValidationService,
     private readonly storage: LocalMeetingFileStorageService,
+    private readonly transcriptionJobs: TranscriptionJobsService,
   ) {}
 
   async upload(meetingId: string, userId: string, file: Express.Multer.File | undefined) {
@@ -40,6 +42,10 @@ export class MeetingFilesService {
             category: allowedFile.category,
             mimeType: file.mimetype,
             sizeBytes: file.size,
+            // Nested, so a recording never exists without the job that
+            // transcribes it: a failure between two writes would leave one
+            // waiting forever with nothing to notice it.
+            transcriptionJob: this.transcriptionJobs.jobCreateForCategory(allowedFile.category),
           },
           select: meetingFileSelect,
         });
@@ -174,10 +180,14 @@ export class MeetingFilesService {
   async delete(meetingId: string, fileId: string, userId: string): Promise<void> {
     await this.meetingAccess.requireOwner(meetingId, userId);
 
-    const file = await this.prisma.$transaction(async (transaction) => {
+    const claimed = await this.prisma.$transaction(async (transaction) => {
       const storedFile = await transaction.meetingFile.findFirst({
         where: { id: fileId, meetingId, status: MeetingFileStatus.READY },
-        select: { id: true, storageKey: true },
+        select: {
+          id: true,
+          storageKey: true,
+          transcript: { select: { id: true, storageKey: true } },
+        },
       });
 
       if (!storedFile) {
@@ -197,13 +207,31 @@ export class MeetingFilesService {
         throw new NotFoundException('File not found');
       }
 
+      if (storedFile.transcript) {
+        // Whatever status the transcript is in, it goes with its recording: a
+        // transcript left behind would outlive the only thing it describes.
+        await transaction.meetingFile.updateMany({
+          where: { id: storedFile.transcript.id },
+          data: { status: MeetingFileStatus.DELETING },
+        });
+      }
+
+      // Removing the job here, rather than leaving it to the cascade a moment
+      // later, is what stops a worker holding it from completing: its own
+      // completion is guarded by this row still being its own.
+      await this.transcriptionJobs.removeForSourceFile(transaction, storedFile.id);
+
       return storedFile;
     });
 
-    await this.storage.delete(file.storageKey);
-    await this.prisma.meetingFile.deleteMany({
-      where: { id: file.id, status: MeetingFileStatus.DELETING },
-    });
+    // The transcript first, in both storage and the database: its row
+    // references the recording, and the reference is restricted on purpose.
+    for (const file of claimed.transcript ? [claimed.transcript, claimed] : [claimed]) {
+      await this.storage.delete(file.storageKey);
+      await this.prisma.meetingFile.deleteMany({
+        where: { id: file.id, status: MeetingFileStatus.DELETING },
+      });
+    }
   }
 
   private hashTicket(ticket: string): string {
