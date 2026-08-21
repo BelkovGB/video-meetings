@@ -649,6 +649,24 @@ The API creates the directories with private permissions at startup, removes
 only stale avatar `.part` files from interrupted uploads, and refuses to start
 if the temporary and permanent paths are on different filesystems.
 
+## Transcription worker configuration
+
+These variables configure the separate worker process (`npm run worker`), not
+the API process. The worker refuses to start unless `TRANSCRIPTION_COMMAND` is
+set.
+
+| Variable                               | Default               | Purpose                                                                                                |
+| -------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------ |
+| `TRANSCRIPTION_COMMAND`                | none, required        | Executable that runs speech recognition on prepared audio.                                             |
+| `TRANSCRIPTION_COMMAND_ARGS`           | `[]`                  | JSON array of arguments passed to the recognition command before the audio path.                       |
+| `TRANSCRIPTION_FFMPEG_PATH`            | `ffmpeg`              | Executable used to prepare audio from the meeting recording.                                           |
+| `TRANSCRIPTION_FFMPEG_ARGS`            | `[]`                  | JSON array of arguments placed before the conversion arguments, for a wrapper or an acceleration flag. |
+| `TRANSCRIPTION_WORK_DIR`               | `./var/transcription` | Working directory for in-flight transcription files, kept separate from `UPLOAD_TEMP_DIR`.             |
+| `TRANSCRIPTION_POLL_INTERVAL_MS`       | `5000`                | Interval between polls for new transcription jobs.                                                     |
+| `TRANSCRIPTION_LEASE_TIMEOUT_MS`       | `900000`              | How long a claimed job stays leased before it is considered abandoned.                                 |
+| `TRANSCRIPTION_AUDIO_TIMEOUT_MS`       | `3600000`             | Timeout for the audio preparation step.                                                                |
+| `TRANSCRIPTION_RECOGNITION_TIMEOUT_MS` | `14400000`            | Timeout for the recognition command.                                                                   |
+
 ## Running checks
 
 End-to-end tests need PostgreSQL running with the `DATABASE_URL` from `.env`.
