@@ -174,3 +174,78 @@ test('shows the matching Russian label for each transcription status', async ({
     transcriptionStatusLabels.error,
   );
 });
+
+test('picks up transcription status changes and the new transcript file without a reload', async ({
+  page,
+  request,
+}) => {
+  const owner = await register(request, 'phase-8-transcription-poll');
+  const meeting = await createMeeting(request, owner);
+
+  const sourceFile = await prisma.meetingFile.create({
+    data: {
+      meetingId: meeting.id,
+      uploadedById: owner.userId,
+      originalName: 'phase-8-source.mp3',
+      storageKey: `transcription-status-e2e/${meeting.id}/phase-8-source.mp3`,
+      category: MeetingFileCategory.AUDIO,
+      mimeType: 'audio/mpeg',
+      sizeBytes: 16,
+    },
+  });
+  createdFileIds.add(sourceFile.id);
+
+  const job = await prisma.transcriptionJob.create({
+    data: {
+      sourceFileId: sourceFile.id,
+      status: TranscriptionJobStatus.QUEUED,
+    },
+  });
+
+  await authenticate(page, owner);
+  await page.goto(`/meetings/${meeting.id}`);
+
+  const sourceRow = page.getByRole('listitem').filter({ hasText: 'phase-8-source.mp3' });
+
+  await expect(sourceRow.getByTestId('transcription-status')).toHaveText(
+    transcriptionStatusLabels.queued,
+  );
+
+  await prisma.transcriptionJob.update({
+    where: { id: job.id },
+    data: { status: TranscriptionJobStatus.PROCESSING },
+  });
+
+  await expect(sourceRow.getByTestId('transcription-status')).toHaveText(
+    transcriptionStatusLabels.processing,
+    { timeout: 8000 },
+  );
+
+  await prisma.transcriptionJob.update({
+    where: { id: job.id },
+    data: { status: TranscriptionJobStatus.COMPLETED, finishedAt: new Date() },
+  });
+
+  const transcriptFile = await prisma.meetingFile.create({
+    data: {
+      meetingId: meeting.id,
+      sourceFileId: sourceFile.id,
+      uploadedById: null,
+      originalName: 'phase-8-source.txt',
+      storageKey: `transcription-status-e2e/${meeting.id}/phase-8-source.txt`,
+      category: MeetingFileCategory.TRANSCRIPT,
+      mimeType: 'text/plain',
+      sizeBytes: 42,
+    },
+  });
+  createdFileIds.add(transcriptFile.id);
+
+  await expect(sourceRow.getByTestId('transcription-status')).toHaveText(
+    transcriptionStatusLabels.ready,
+    { timeout: 8000 },
+  );
+
+  await expect(page.getByRole('listitem').filter({ hasText: 'phase-8-source.txt' })).toBeVisible({
+    timeout: 8000,
+  });
+});

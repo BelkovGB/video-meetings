@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { apiUrl } from '../../../lib/api/config';
 import type { ApiError, Meeting, MeetingFile } from '../../../lib/api/contracts';
@@ -9,6 +9,10 @@ import { apiErrorMessage, readApiErrorMessage } from '../../../lib/api/errors';
 import { sessionRejectedLoginPath } from '../../../lib/auth/login-notice';
 import { clearAccessToken, clearSessionIdentity, readAccessToken } from '../../../lib/auth/session';
 import { useRestoredSessionGuard } from '../../../lib/auth/use-restored-session-guard';
+
+function isTranscriptionPending(file: MeetingFile): boolean {
+  return file.transcriptionStatus === 'queued' || file.transcriptionStatus === 'processing';
+}
 
 export function useMeetingFiles(meetingId: string) {
   const router = useRouter();
@@ -83,6 +87,90 @@ export function useMeetingFiles(meetingId: string) {
 
     void loadMeetingFiles();
   }, [loadAttempt, meetingId, router]);
+
+  const hasPendingTranscription = useMemo(() => files.some(isTranscriptionPending), [files]);
+
+  // Polls while any file has a transcription job still in flight, so the
+  // already-open page picks up status changes and the resulting transcript
+  // file without a reload. Kept separate from the initial-load effect above,
+  // which must not rerun on every `files` update this effect produces.
+  //
+  // Depends on the derived boolean below, not on `files` itself: `files` gets
+  // a new array reference on every poll response, which would tear down and
+  // restart this effect (and its setTimeout chain) after every single tick.
+  // The boolean stays referentially the same across polls that are still
+  // pending, so the effect only re-runs when polling should start or stop.
+  useEffect(() => {
+    if (!hasPendingTranscription) {
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+
+    const pollOnce = async () => {
+      const token = readAccessToken();
+
+      if (!token) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${apiUrl}/meetings/${meetingId}/files`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        if (response.status === 401) {
+          clearSessionIdentity();
+          router.replace(sessionRejectedLoginPath);
+          return;
+        }
+
+        if (!response.ok) {
+          scheduleNext();
+          return;
+        }
+
+        const nextFiles = (await response.json()) as MeetingFile[];
+
+        if (cancelled) {
+          return;
+        }
+
+        setFiles(nextFiles);
+
+        if (nextFiles.some(isTranscriptionPending)) {
+          scheduleNext();
+        }
+      } catch {
+        // A transient network failure during a background poll should not
+        // surface as an action error; just try again on the next tick.
+        if (!cancelled) {
+          scheduleNext();
+        }
+      }
+    };
+
+    const scheduleNext = () => {
+      timeoutId = setTimeout(() => {
+        void pollOnce();
+      }, 4000);
+    };
+
+    scheduleNext();
+
+    return () => {
+      cancelled = true;
+
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }, [meetingId, router, hasPendingTranscription]);
 
   const retryLoading = () => {
     setIsLoading(true);
