@@ -5,6 +5,7 @@ import {
   toUserIdentityResponse,
   userIdentitySelect,
 } from '../../users/models/user-identity.response';
+import { TranscriptionFailureCode } from '../../transcription/models/transcription-failure';
 
 export const meetingFileSelect = {
   id: true,
@@ -15,7 +16,7 @@ export const meetingFileSelect = {
   sizeBytes: true,
   createdAt: true,
   uploadedBy: { select: userIdentitySelect },
-  transcriptionJob: { select: { status: true } },
+  transcriptionJob: { select: { status: true, failureCode: true } },
 } satisfies Prisma.MeetingFileSelect;
 
 export type TranscriptionStatus = 'queued' | 'processing' | 'ready' | 'error';
@@ -29,6 +30,7 @@ export type MeetingFileResponse = {
   uploadedAt: Date;
   uploadedBy: UserIdentityResponse | null;
   transcriptionStatus: TranscriptionStatus | null;
+  transcriptionFailureCode: TranscriptionFailureCode | null;
 };
 
 type SelectedMeetingFile = Prisma.MeetingFileGetPayload<{ select: typeof meetingFileSelect }>;
@@ -41,6 +43,10 @@ const transcriptionStatusByJobStatus: Record<TranscriptionJobStatus, Transcripti
 };
 
 export function toMeetingFileResponse(file: SelectedMeetingFile): MeetingFileResponse {
+  const transcriptionStatus = file.transcriptionJob
+    ? transcriptionStatusByJobStatus[file.transcriptionJob.status]
+    : null;
+
   return {
     id: file.id,
     name: file.originalName,
@@ -51,8 +57,12 @@ export function toMeetingFileResponse(file: SelectedMeetingFile): MeetingFileRes
     // The meeting scopes the uploader handle: the same person appears under one
     // handle within a meeting and under an unrelated one in every other.
     uploadedBy: toUserIdentityResponse(file.uploadedBy, file.meetingId),
-    transcriptionStatus: file.transcriptionJob
-      ? transcriptionStatusByJobStatus[file.transcriptionJob.status]
-      : null,
+    transcriptionStatus,
+    // The column is a plain VARCHAR in the schema, but `failJob` never writes
+    // anything outside `TranscriptionFailureCode`, so the cast is safe here.
+    transcriptionFailureCode:
+      transcriptionStatus === 'error'
+        ? ((file.transcriptionJob?.failureCode ?? null) as TranscriptionFailureCode | null)
+        : null,
   };
 }

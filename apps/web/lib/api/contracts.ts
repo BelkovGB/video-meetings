@@ -73,6 +73,22 @@ export type MeetingFileCategory = 'audio' | 'video' | 'transcript' | 'document';
 
 export type TranscriptionStatus = 'queued' | 'processing' | 'ready' | 'error';
 
+/**
+ * Machine-readable reason a transcription job failed, safe to show to the
+ * client: no storage paths, no internal identifiers. Duplicated from
+ * apps/api/src/transcription/models/transcription-failure.ts — the web side
+ * never imports a backend module.
+ */
+export type TranscriptionFailureCode =
+  | 'AUDIO_PREPARATION_FAILED'
+  | 'RECOGNITION_FAILED'
+  | 'RECOGNITION_OUTPUT_INVALID'
+  | 'NO_SPEECH_DETECTED'
+  | 'INSUFFICIENT_STORAGE'
+  | 'TRANSCRIPT_STORAGE_FAILED'
+  | 'SOURCE_FILE_UNAVAILABLE'
+  | 'INTERNAL_ERROR';
+
 export type MeetingFile = {
   id: string;
   name: string;
@@ -84,4 +100,6 @@ export type MeetingFile = {
   uploadedBy: UserIdentity | null;
   /** `null` for document and transcript files, which never get a transcription job. */
   transcriptionStatus: TranscriptionStatus | null;
+  /** Set only when `transcriptionStatus` is `'error'`; `null` otherwise. */
+  transcriptionFailureCode: TranscriptionFailureCode | null;
 };

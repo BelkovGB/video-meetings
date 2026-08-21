@@ -171,6 +171,71 @@ describe('Transcription job queue (e2e)', () => {
     );
   });
 
+  it('reports the transcription failure code only for a failed job in the file list', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner);
+    const queued = await upload(meeting.id, owner, recordings.audio);
+    const processing = await upload(meeting.id, owner, recordings.audio);
+    const ready = await upload(meeting.id, owner, recordings.audio);
+    const failed = await upload(meeting.id, owner, recordings.audio);
+
+    await prisma.transcriptionJob.update({
+      where: { sourceFileId: processing.id },
+      data: { status: TranscriptionJobStatus.PROCESSING },
+    });
+    await prisma.transcriptionJob.update({
+      where: { sourceFileId: ready.id },
+      data: { status: TranscriptionJobStatus.COMPLETED },
+    });
+    await prisma.transcriptionJob.update({
+      where: { sourceFileId: failed.id },
+      data: { status: TranscriptionJobStatus.FAILED, failureCode: 'NO_SPEECH_DETECTED' },
+    });
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(listed.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: queued.id,
+          transcriptionStatus: 'queued',
+          transcriptionFailureCode: null,
+        }),
+        expect.objectContaining({
+          id: processing.id,
+          transcriptionStatus: 'processing',
+          transcriptionFailureCode: null,
+        }),
+        expect.objectContaining({
+          id: ready.id,
+          transcriptionStatus: 'ready',
+          transcriptionFailureCode: null,
+        }),
+        expect.objectContaining({
+          id: failed.id,
+          transcriptionStatus: 'error',
+          transcriptionFailureCode: 'NO_SPEECH_DETECTED',
+        }),
+      ]),
+    );
+
+    const failedItem = (listed.body as Array<{ id: string }>).find((file) => file.id === failed.id);
+    expect(Object.keys(failedItem as object)).toEqual([
+      'id',
+      'name',
+      'category',
+      'mimeType',
+      'sizeBytes',
+      'uploadedAt',
+      'uploadedBy',
+      'transcriptionStatus',
+      'transcriptionFailureCode',
+    ]);
+  });
+
   it('removes the queued job and the stored bytes when the recording is deleted', async () => {
     const owner = await registerUser();
     const meeting = await createMeeting(owner);
