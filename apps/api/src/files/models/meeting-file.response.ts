@@ -5,7 +5,10 @@ import {
   toUserIdentityResponse,
   userIdentitySelect,
 } from '../../users/models/user-identity.response';
-import { TranscriptionFailureCode } from '../../transcription/models/transcription-failure';
+import {
+  TranscriptionFailureCode,
+  transcriptionFailureCodes,
+} from '../../transcription/models/transcription-failure';
 
 export const meetingFileSelect = {
   id: true,
@@ -58,11 +61,23 @@ export function toMeetingFileResponse(file: SelectedMeetingFile): MeetingFileRes
     // handle within a meeting and under an unrelated one in every other.
     uploadedBy: toUserIdentityResponse(file.uploadedBy, file.meetingId),
     transcriptionStatus,
-    // The column is a plain VARCHAR in the schema, but `failJob` never writes
-    // anything outside `TranscriptionFailureCode`, so the cast is safe here.
     transcriptionFailureCode:
       transcriptionStatus === 'error'
-        ? ((file.transcriptionJob?.failureCode ?? null) as TranscriptionFailureCode | null)
+        ? toTranscriptionFailureCode(file.transcriptionJob?.failureCode ?? null)
         : null,
   };
+}
+
+// The column is a plain VARCHAR in the schema, and `failJob` only ever writes
+// a `TranscriptionFailureCode`, but this response is the client-facing
+// boundary: an unrecognised value (a hand-edited row, a restored backup) must
+// not reach the client verbatim, so it is coerced to the generic code instead.
+function toTranscriptionFailureCode(value: string | null): TranscriptionFailureCode | null {
+  if (value === null) {
+    return null;
+  }
+
+  return (transcriptionFailureCodes as readonly string[]).includes(value)
+    ? (value as TranscriptionFailureCode)
+    : 'INTERNAL_ERROR';
 }

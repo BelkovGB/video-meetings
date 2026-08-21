@@ -236,6 +236,34 @@ describe('Transcription job queue (e2e)', () => {
     ]);
   });
 
+  it('coerces an unrecognised stored failure code to INTERNAL_ERROR instead of passing it through', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner);
+    const failed = await upload(meeting.id, owner, recordings.audio);
+
+    // Not a value `failJob` would ever write — simulates a hand-edited row or
+    // a value from a future worker version an older API does not recognise.
+    await prisma.transcriptionJob.update({
+      where: { sourceFileId: failed.id },
+      data: { status: TranscriptionJobStatus.FAILED, failureCode: 'SOME_FUTURE_CODE' },
+    });
+
+    const listed = await request(app.getHttpServer())
+      .get(`/meetings/${meeting.id}/files`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    expect(listed.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: failed.id,
+          transcriptionStatus: 'error',
+          transcriptionFailureCode: 'INTERNAL_ERROR',
+        }),
+      ]),
+    );
+  });
+
   it('removes the queued job and the stored bytes when the recording is deleted', async () => {
     const owner = await registerUser();
     const meeting = await createMeeting(owner);
