@@ -452,9 +452,43 @@ Successful requests return `201 Created`:
       "key": "8f14e45fce5fa3b1c0c9d6ef2a7b41d3",
       "updatedAt": "2026-08-11T09:00:00.000Z"
     }
-  }
+  },
+  "transcriptionStatus": "queued",
+  "transcriptionFailureCode": null
 }
 ```
+
+`transcriptionStatus` and `transcriptionFailureCode` are meaningful only for
+audio and video files; a document or transcript file always carries `null` in
+both. `transcriptionStatus` is one of:
+
+- `queued` — the recording is waiting for a worker to pick it up.
+- `processing` — a worker is transcribing the recording now.
+- `ready` — a transcript file exists and is listed alongside the recording.
+- `error` — the job stopped without a transcript; `transcriptionFailureCode`
+  says why.
+
+`transcriptionFailureCode` is set only when `transcriptionStatus` is `error`,
+and is one of:
+
+- `AUDIO_PREPARATION_FAILED` — converting the recording to 16 kHz mono WAV
+  failed or timed out.
+- `RECOGNITION_FAILED` — the recognizer process failed to start, exited with a
+  non-zero code, timed out, or wrote too much to stdout.
+- `RECOGNITION_OUTPUT_INVALID` — the recognizer's stdout was not valid JSON,
+  carried no segment list, or a segment had a malformed `start`, `end`, or
+  `text`.
+- `NO_SPEECH_DETECTED` — the recognizer returned no non-empty segments.
+- `INSUFFICIENT_STORAGE` — too little free disk space remained to write the
+  transcript.
+- `TRANSCRIPT_STORAGE_FAILED` — writing or finalizing the transcript file, or
+  recording it in the database, failed.
+- `SOURCE_FILE_UNAVAILABLE` — the recording could not be read from storage, or
+  it was deleted, or another worker's lease took over the job, before the
+  transcript could be recorded.
+- `INTERNAL_ERROR` — any other unexpected failure.
+
+Failure codes carry no storage paths or internal identifiers.
 
 `uploadedBy` is the uploader's safe identity, read from the user record on every
 request, so a renamed uploader or a replaced avatar shows the current value
