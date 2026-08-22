@@ -88,7 +88,9 @@ export function AvatarUploadForm({
               alt="Предпросмотр нового аватара"
               className="h-16 w-16 rounded-full object-cover"
             />
-            <p className="text-sm font-medium text-slate-700">Предпросмотр нового аватара</p>
+            <p className="text-sm font-medium text-slate-700">
+              Новый аватар ещё не сохранён. Нажмите «Сохранить аватар».
+            </p>
           </div>
         ) : null}
         {error ? (
@@ -116,14 +118,14 @@ export function AvatarUploadForm({
           disabled={!file || isPending}
           className="mt-4 inline-flex min-h-11 touch-manipulation items-center justify-center rounded-xl bg-slate-950 px-5 text-sm font-semibold text-white transition duration-200 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-cyan-700 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
         >
-          {isUploading ? 'Загружаем аватар…' : avatar ? 'Заменить аватар' : 'Загрузить аватар'}
+          {isUploading ? 'Сохраняем аватар…' : 'Сохранить аватар'}
         </button>
         {avatar ? (
           <button
             ref={removeButtonRef}
             type="button"
             disabled={isPending}
-            className="mt-3 inline-flex min-h-11 w-[151px] touch-manipulation items-center justify-center rounded-xl border border-red-300 px-5 text-sm font-semibold text-red-700 transition duration-200 hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-cyan-700 focus:ring-offset-2 disabled:cursor-wait disabled:border-slate-300 disabled:text-slate-400"
+            className="mt-3 inline-flex min-h-11 w-[158px] touch-manipulation items-center justify-center rounded-xl border border-red-300 px-5 text-sm font-semibold text-red-700 transition duration-200 hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-cyan-700 focus:ring-offset-2 disabled:cursor-wait disabled:border-slate-300 disabled:text-slate-400"
             onClick={() => void removeAvatar()}
           >
             {isRemoving ? 'Удаляем аватар…' : 'Удалить аватар'}
