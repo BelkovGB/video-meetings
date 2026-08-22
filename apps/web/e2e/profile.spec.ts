@@ -326,18 +326,24 @@ test('uploads, previews, replaces, validates, and synchronizes the current-user 
   await expect(avatarInput).toBeFocused();
   await avatarInput.setInputFiles({ name: 'avatar.png', mimeType: 'image/png', buffer: image });
   await expect(page.getByTestId('avatar-preview')).toHaveAttribute('src', /^blob:/);
+  // The preview once read "Предпросмотр нового аватара", which readers took for a
+  // saved avatar and left without pressing anything, so the panel names the
+  // pending state and the button that ends it.
+  await expect(page.getByTestId('avatar-preview-panel')).toContainText(
+    'Новый аватар ещё не сохранён. Нажмите «Сохранить аватар».',
+  );
   await expect(page.getByTestId('avatar-preview-panel')).toHaveScreenshot(
     'avatar-preview-panel.png',
   );
-  await page.getByRole('button', { name: 'Загрузить аватар' }).click();
-  await expect(page.getByRole('button', { name: 'Загружаем аватар…' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Сохранить аватар' }).click();
+  await expect(page.getByRole('button', { name: 'Сохраняем аватар…' })).toBeDisabled();
   await expect(avatarInput).toBeDisabled();
   await expect(page.getByText('Аватар сохранён.', { exact: true })).toBeVisible();
   await expect(page.getByTestId('current-user-avatar')).toHaveAttribute('src', /^blob:/);
   await expect(page.getByLabel('Email')).toHaveText(session.email);
 
   await avatarInput.setInputFiles({ name: 'avatar-2.png', mimeType: 'image/png', buffer: image });
-  await page.getByRole('button', { name: 'Заменить аватар' }).click();
+  await page.getByRole('button', { name: 'Сохранить аватар' }).click();
   await expect(page.getByText('Аватар обновлён.', { exact: true })).toBeVisible();
 
   await avatarInput.setInputFiles({ name: 'avatar.txt', mimeType: 'text/plain', buffer: image });
@@ -358,7 +364,7 @@ test('uploads, previews, replaces, validates, and synchronizes the current-user 
 
   failUpload = true;
   await avatarInput.setInputFiles({ name: 'avatar-3.png', mimeType: 'image/png', buffer: image });
-  await page.getByRole('button', { name: 'Заменить аватар' }).click();
+  await page.getByRole('button', { name: 'Сохранить аватар' }).click();
   await expect(page.locator('#avatar-upload-error')).toContainText('Сервер отклонил аватар.');
   await expect(page.getByTestId('current-user-avatar')).toHaveAttribute('src', /^blob:/);
 
