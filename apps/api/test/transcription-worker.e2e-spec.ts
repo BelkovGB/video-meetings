@@ -60,6 +60,18 @@ const failureCases: [string, TranscriptionFixtureControl, string][] = [
   ['recognition fails', { recognizerExitCode: 3 }, 'RECOGNITION_FAILED'],
   ['recognition prints no JSON', { stdout: 'loading model' }, 'RECOGNITION_OUTPUT_INVALID'],
   ['the recording holds no speech', { segments: [] }, 'NO_SPEECH_DETECTED'],
+  // Structurally valid JSON whose text is cp1251, which is what a Python
+  // recognizer writes on a Russian Windows unless it reconfigures stdout. The
+  // JSON parses, because its structure is ASCII, so only the decoded text
+  // shows the damage.
+  [
+    'recognition prints text that is not UTF-8',
+    {
+      stdoutBase64:
+        'eyJzZWdtZW50cyI6IFt7InN0YXJ0IjogMC4wLCAiZW5kIjogMi4wLCAidGV4dCI6ICLE7uHw++kg5OXt/C4ifV19',
+    },
+    'RECOGNITION_OUTPUT_INVALID',
+  ],
 ];
 
 function createUniqueValue(prefix: string) {
@@ -336,6 +348,28 @@ describe('Transcription worker (e2e)', () => {
       prisma.meetingFile.count({ where: { sourceFileId: { in: [first.id, second.id] } } }),
     ).resolves.toBe(2);
     await expect(filesystem.readdir(transcriptionWorkRoot)).resolves.toEqual([]);
+  });
+
+  it('keeps its process alive while it polls the queue', async () => {
+    // The worker process has no server and no open socket: the poll timer is
+    // the only thing that can hold its event loop. An unreferenced timer let
+    // `npm run worker` print "started" and exit before the first recording
+    // arrived, which no test that drives `processNextJob` directly can see.
+    const timersBefore = process
+      .getActiveResourcesInfo()
+      .filter((resource) => resource === 'Timeout').length;
+
+    worker.run();
+
+    try {
+      const timersWhileRunning = process
+        .getActiveResourcesInfo()
+        .filter((resource) => resource === 'Timeout').length;
+
+      expect(timersWhileRunning).toBe(timersBefore + 1);
+    } finally {
+      await worker.stop();
+    }
   });
 
   it.each(failureCases)(

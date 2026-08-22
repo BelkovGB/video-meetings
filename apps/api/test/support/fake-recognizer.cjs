@@ -7,6 +7,7 @@
 // audio path the worker appends last. The control file is JSON and may hold:
 //   segments             array of { start, end, text } to print
 //   stdout               raw stdout, for malformed-output cases
+//   stdoutBase64         exact stdout bytes, for output that is not UTF-8
 //   recognizerExitCode   non-zero to fail the job
 //   holdMs               how long to stay running, so a spec can act on a job
 //                        in flight
@@ -53,6 +54,11 @@ if (control.tracePath) {
 if (control.recognizerExitCode) {
   process.stderr.write('fake recognizer failure\n');
   process.exit(control.recognizerExitCode);
+}
+
+if (control.stdoutBase64 !== undefined) {
+  process.stdout.write(Buffer.from(control.stdoutBase64, 'base64'));
+  process.exit(0);
 }
 
 if (control.stdout !== undefined) {

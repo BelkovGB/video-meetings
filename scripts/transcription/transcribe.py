@@ -33,6 +33,12 @@ import sys
 
 
 def main() -> int:
+    # The worker decodes this stream as UTF-8. Python otherwise encodes a
+    # redirected stdout in the locale encoding, which on a Russian Windows is
+    # cp1251: the JSON still parses, because its structure is ASCII, and every
+    # recognized word silently becomes replacement characters in the transcript.
+    sys.stdout.reconfigure(encoding="utf-8")
+
     if len(sys.argv) < 2:
         print("usage: transcribe.py <audio-path>", file=sys.stderr)
         return 2

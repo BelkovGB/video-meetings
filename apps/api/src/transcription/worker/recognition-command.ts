@@ -55,6 +55,8 @@ function toSegment(raw: RawSegment): TranscriptSegment {
  * The contract is the audio path as the last argument and JSON on stdout: a
  * segment array, or an object carrying one under `segments`, each segment
  * `start`, `end` in seconds from the beginning of the recording and `text`.
+ * The stream must be UTF-8; a recognizer that writes its console encoding
+ * instead fails the job rather than storing replacement characters.
  */
 export async function recognizeAudio(audioPath: string): Promise<TranscriptSegment[]> {
   let stdout: string;
@@ -70,6 +72,14 @@ export async function recognizeAudio(audioPath: string): Promise<TranscriptSegme
       'RECOGNITION_FAILED',
       error instanceof Error ? error.message : undefined,
     );
+  }
+
+  // The stream is decoded as UTF-8. A recognizer that wrote its text in the
+  // console encoding instead still produces parseable JSON, because the
+  // structure is ASCII, and the damage shows only as a replacement character
+  // where a word was. Failing the job beats storing a transcript of them.
+  if (stdout.includes('�')) {
+    throw new TranscriptionFailure('RECOGNITION_OUTPUT_INVALID', 'stdout is not UTF-8');
   }
 
   return readSegmentList(stdout)
