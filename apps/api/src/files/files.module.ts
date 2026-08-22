@@ -28,5 +28,6 @@ import { MeetingFileValidationService } from './services/meeting-file-validation
     MeetingFilesService,
     MeetingFileValidationService,
   ],
+  exports: [MeetingAccessService, LocalMeetingFileStorageService],
 })
 export class FilesModule {}

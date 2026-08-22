@@ -23,6 +23,21 @@
   place where avatar bytes cross a module boundary, and they do so behind the
   meeting's own access rule.
 - `PrismaModule` owns the shared Prisma database client.
+- `ClaudeAgentModule` sends a single prompt to Claude through the Claude Agent
+  SDK and exports `ClaudeAgentService`. It authenticates with `ANTHROPIC_API_KEY`
+  from `apps/api/.env`, runs on `claude-haiku-4-5`, and starts the child agent
+  with no built-in tools, no settings from disk, and one turn. The child inherits
+  an explicit list of variables rather than `process.env`, and keeps its own
+  configuration under `apps/api/var/claude-agent`, so it cannot fall back to the
+  Claude Code login of whoever runs the suite — without that it authenticated as
+  the developer and the test passed with any key at all. `MeetingSummaryModule`
+  now imports it — see "Meeting summary processing" below — and
+  `test/claude-agent.e2e-spec.ts` still exercises it directly. That suite calls
+  the real Anthropic API, so it bills the account; it skips itself when no key
+  is configured.
+- `MeetingSummaryModule` owns the meeting summary HTTP API and runs its job
+  in-process inside the API, with no separate worker; see "Meeting summary
+  processing" below.
 
 ## CQRS in `MeetingsModule`
 
@@ -195,7 +210,8 @@ for a meeting owner or a `MeetingParticipant`. Its guard runs after JWT
 verification and before Nest's Multer interceptor, so an outsider gets the same
 `404` before any upload bytes are retained. The service repeats the access check
 before it commits a validated upload, covering a participant whose membership
-was revoked during a long transfer.
+was revoked during a long transfer. `MeetingSummaryModule` reuses the same
+`MeetingAccessService` rather than adding a second access policy.
 
 ## Meeting file storage
 
@@ -297,6 +313,75 @@ is killed or crashes mid-job leaves its job `PROCESSING` under an expired lease
 that no process retries; the recording stays without a transcript until it is
 uploaded again. That is a deliberate scope cut for this
 phase, not a gap — automatic lease reclaim is future work.
+
+## Meeting summary processing
+
+`MeetingSummaryModule` runs entirely inside the API process; there is no
+separate worker the way there is for transcription. A summary job is one
+bounded model call, seconds to a few minutes against `SUMMARY_TIMEOUT_MS`, not
+the hours-long recognition run the transcription worker exists to keep off the
+HTTP process, so holding it in-process costs nothing the way holding a GPU
+recognition job would.
+
+`POST /meetings/:meetingId/summary` upserts the meeting's single
+`MeetingSummary` row — unique on `meetingId`, so a meeting has at most one — to
+`QUEUED`, clearing any previous result, and calls
+`MeetingSummaryRunnerService.process` without awaiting it. The HTTP response
+returns as soon as the row is written; the model call happens after.
+
+`process` first claims the job with an `updateMany` guarded by
+`status: QUEUED`, the same defensive pattern the transcription worker uses to
+claim a job: the update reports how many rows it touched, and a caller that
+claims zero returns immediately instead of processing a row it does not
+actually own. The claimed run then reads every `TRANSCRIPT` file's text for
+the meeting, rejects it with `INPUT_TOO_LARGE` past `SUMMARY_MAX_INPUT_CHARS`,
+and calls `ClaudeAgentService.ask` with `SUMMARY_TIMEOUT_MS` as its timeout,
+`SUMMARY_MAX_AGENT_TURNS` as its turn budget, and the three tools
+`MeetingToolsService.createServer` builds — `find_similar_tasks`,
+`upsert_task`, `write_summary_and_decisions` — as an in-process MCP server
+named `meeting`, the only tools the model may call (`allowedTools` lists their
+fully-qualified `mcp__meeting__*` names; `ClaudeAgentService.ask` still
+hardcodes `tools: []`, so no built-in tool is ever reachable regardless of
+what a caller passes). `ClaudeAgentModule`, written earlier but until now
+imported nowhere, is wired into `AppModule` through `MeetingSummaryModule`'s
+own imports.
+
+`buildMeetingHooks` (`meeting-summary/hooks.ts`) adds a hook layer on top of
+those three tools, built once per run and reused across every retry so its
+tool-call budget is a total for the whole run: a `PreToolUse` hook denies an
+`upsert_task` call whose title is missing or under three characters, another
+`PreToolUse` hook denies any call once the run passes `SUMMARY_MAX_TOOL_CALLS`,
+and a `PostToolUse` hook writes every tool call and its result to the Nest
+logger as an audit trail.
+
+The prompt instructs the model to call `find_similar_tasks` before recording
+each task and, when a similar one is already there, call `upsert_task` with
+its id instead of creating a new row — this is how a task mentioned again in
+another transcript file, or restated later in the same one, becomes one row
+instead of a duplicate. Each tool call writes straight through `PrismaService`
+as the conversation runs; `write_summary_and_decisions`, called once at the
+end, writes the summary text and replaces the run's decisions the same way a
+rerun replaces them (delete then recreate). The model's final reply is still
+the same JSON object as before — `{summary, tasks, decisions}` — but it is now
+a completion check, not the write path: a reply that fails to parse, lacks
+any of these three fields, or has a malformed task or decision fails the job
+with `MODEL_OUTPUT_INVALID`, even though the tool calls up to that point
+already persisted whatever they wrote — nothing currently rolls a partial
+write back on a late failure.
+
+A rerun goes through the same upsert: the existing row's status,
+`summaryText`, `failureCode`, `startedAt`, and `finishedAt` are all
+overwritten in place rather than a new row being created, which is what makes
+a new run replace the previous result outright — there is no history to keep
+or roll back.
+
+The transcription worker documented above leaves a job `PROCESSING` forever
+after an unclean exit, because a second worker process might still resume it.
+Nothing analogous can happen here: only the API process itself ever moves a
+`MeetingSummary` row into `PROCESSING`, so a row still in that state after a
+restart can only mean the previous process died mid-job.
+`MeetingSummaryReconciliationService` runs once at application startup and
+moves every such row to `FAILED` with `failureCode: INTERRUPTED`.
 
 ## Persistence and migrations
 

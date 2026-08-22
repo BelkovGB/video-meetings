@@ -6,6 +6,7 @@ import { formatMeetingDateWithYear } from '../../../lib/format/dates';
 import { MeetingFileList } from './meeting-file-list';
 import { MeetingFileUpload } from './meeting-file-upload';
 import { MeetingFilesHeader } from './meeting-files-header';
+import { MeetingSummaryPanel } from './meeting-summary-panel';
 import { useMeetingFiles } from './use-meeting-files';
 
 type MeetingFilesPageProps = {
@@ -52,6 +53,8 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
     downloadFile,
     deleteFile,
   } = useMeetingFiles(meetingId);
+
+  const hasTranscript = files.some((file) => file.category === 'transcript');
 
   if (isLoading) {
     return (
@@ -110,6 +113,10 @@ export function MeetingFilesPage({ meetingId }: MeetingFilesPageProps) {
                 <p className="mt-1 text-3xl font-semibold text-white">{files.length}</p>
               </div>
             </section>
+
+            <div className="mb-6">
+              <MeetingSummaryPanel meetingId={meetingId} hasTranscript={hasTranscript} />
+            </div>
 
             <section
               aria-labelledby="meeting-files-title"

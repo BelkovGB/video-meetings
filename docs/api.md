@@ -24,6 +24,8 @@ JSON except for the multipart file-upload endpoint.
 | POST   | `/meetings/:meetingId/files/:fileId/download-ticket` | Bearer JWT         |
 | GET    | `/file-downloads/:ticket`                            | One-time ticket    |
 | DELETE | `/meetings/:meetingId/files/:fileId`                 | Bearer JWT (owner) |
+| POST   | `/meetings/:meetingId/summary`                       | Bearer JWT         |
+| GET    | `/meetings/:meetingId/summary`                       | Bearer JWT         |
 
 `UsersModule` is an internal API module and does not expose HTTP routes.
 
@@ -633,6 +635,81 @@ the storage object, deletes the metadata and its download tickets, then returns
 storage or database operation fails after the status transition, a background
 reconciler retries the hidden deletion after one minute.
 
+## Meeting summary
+
+The owner of a meeting and its recorded participants can start a meeting
+summary job and read its result; both routes enforce the same
+owner-or-participant access policy as the meeting-file routes.
+
+### `POST /meetings/:meetingId/summary`
+
+The meeting access check runs before the job is created, so a user outside the
+meeting cannot start or reset a run. A run that is already `queued` or
+`processing` is rejected; a run that is `ready` or `error` is replaced
+entirely by the new one, including its status and result.
+
+The server gathers every `TRANSCRIPT` file currently `READY` on the meeting
+and resets the meeting's one summary row to `queued`. It returns
+`202 Accepted` without waiting for the model:
+
+```json
+{
+  "status": "queued",
+  "summary": null,
+  "failureCode": null,
+  "tasks": [],
+  "decisions": []
+}
+```
+
+A meeting with no ready transcript file returns `422` with
+`NO_TRANSCRIPT_FILES`; a meeting whose summary is already `queued` or
+`processing` returns `409` with `SUMMARY_ALREADY_RUNNING`. A missing or
+inaccessible meeting returns `404 Meeting not found`.
+
+### `GET /meetings/:meetingId/summary`
+
+Returns `200 OK` with the meeting's current summary:
+
+```json
+{
+  "status": "ready",
+  "summary": "Reviewed sprint progress; the team agreed to ship the export feature first.",
+  "failureCode": null,
+  "tasks": [{ "id": "cm...", "title": "Draft the contract", "assignee": "Anna" }],
+  "decisions": [{ "id": "cm...", "text": "Move the release to next sprint" }]
+}
+```
+
+`status` is `null` when no summary job has ever started for the meeting, and
+otherwise one of:
+
+- `queued` — the job is waiting for the in-process runner to pick it up.
+- `processing` — the runner claimed the job and is generating the summary.
+- `ready` — the job finished; `summary` carries its text.
+- `error` — the job stopped without a summary; `failureCode` says why.
+
+`failureCode` is set only when `status` is `error`, and is one of:
+
+- `INPUT_TOO_LARGE` — the combined text of the meeting's transcript files
+  exceeded `SUMMARY_MAX_INPUT_CHARS`.
+- `MODEL_OUTPUT_INVALID` — the model's reply was not the expected JSON shape.
+- `TIME_LIMIT_EXCEEDED` — the model call did not finish within
+  `SUMMARY_TIMEOUT_MS`.
+- `INTERRUPTED` — the API process stopped while the job was still processing.
+- `INTERNAL_ERROR` — any other unexpected failure.
+
+Failure codes carry no storage paths or internal identifiers.
+
+`tasks` and `decisions` are always arrays: empty before the job reaches
+`ready`, and empty afterward if the meeting genuinely produced none. Each
+task's `assignee` is the name exactly as it was spoken in the meeting, or
+`null` when no one was named — free text, not a link to a participant
+account; assigning an actual participant is separate, later work. Both lists
+are replaced in full, like `summary`, on every rerun.
+
+A missing or inaccessible meeting returns `404 Meeting not found`.
+
 ## Local upload configuration
 
 | Variable                           | Default               | Purpose                                              |
@@ -671,6 +748,16 @@ argument list stops the API too, even though it never runs a job.
 | `TRANSCRIPTION_LEASE_TIMEOUT_MS`       | `900000`              | How long a claimed job records its lease, so a second worker never takes it. Nothing reclaims an expired lease. |
 | `TRANSCRIPTION_AUDIO_TIMEOUT_MS`       | `3600000`             | Timeout for the audio preparation step.                                                                         |
 | `TRANSCRIPTION_RECOGNITION_TIMEOUT_MS` | `14400000`            | Timeout for the recognition command.                                                                            |
+
+## Meeting summary configuration
+
+| Variable                      | Default  | Purpose                                                                      |
+| ----------------------------- | -------- | ---------------------------------------------------------------------------- |
+| `SUMMARY_MAX_INPUT_CHARS`     | `500000` | Character limit for the transcript text sent to the model.                   |
+| `SUMMARY_TIMEOUT_MS`          | `600000` | Timeout for the model call.                                                  |
+| `SUMMARY_MAX_AGENT_TURNS`     | `30`     | Turn budget for the model's tool-calling conversation.                       |
+| `SUMMARY_MAX_OUTPUT_ATTEMPTS` | `3`      | Tries at a parseable final reply before failing with `MODEL_OUTPUT_INVALID`. |
+| `SUMMARY_MAX_TOOL_CALLS`      | `20`     | Tool-call budget for the whole run, all retry attempts combined.             |
 
 ## Running checks
 
