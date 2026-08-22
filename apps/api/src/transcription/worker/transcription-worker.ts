@@ -47,10 +47,12 @@ export class TranscriptionWorker {
     }
 
     this.stopping = false;
+    // Referenced on purpose: this timer is the only handle the worker process
+    // owns — it serves no port and holds no socket — so unreferencing it lets
+    // the process exit as soon as the first drain finds an empty queue.
     this.pollTimer = setInterval(() => {
       void this.drainQueue();
     }, transcriptionConfig.pollIntervalMs);
-    this.pollTimer.unref();
     void this.drainQueue();
   }
 

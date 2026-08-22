@@ -18,6 +18,10 @@ export type TranscriptionFixtureControl = {
   segments?: { start: number; end: number; text: string }[];
   /** Raw recognizer stdout, for malformed-output cases. */
   stdout?: string;
+  /** Base64 of the exact bytes the recognizer writes to stdout, for output
+   * that is not UTF-8 at all. `stdout` cannot express it: a string written
+   * from Node is encoded as UTF-8 by definition. */
+  stdoutBase64?: string;
   /** Non-zero fails recognition. */
   recognizerExitCode?: number;
   /** Non-zero fails the conversion. */
