@@ -9,12 +9,13 @@
     "worker": "node --env-file=../../.env dist/transcription/worker/main.js",
     "worker:dev": "npm run prisma:generate && node --env-file=../../.env ../../node_modules/@nestjs/cli/bin/nest.js start --watch --entryFile transcription/worker/main",
     "lint": "eslint \"src/**/*.ts\"",
-    "test:e2e": "npm run prisma:generate && jest --config ./test/jest-e2e.json --runInBand",
+    "test:e2e": "npm run prisma:generate && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand claude-agent.e2e-spec.ts && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand meeting-summary.e2e-spec.ts && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand --testPathIgnorePatterns=\"/node_modules/|claude-agent.e2e-spec.ts|meeting-summary.e2e-spec.ts\"",
     "prisma": "node --env-file=../../.env ../../node_modules/prisma/build/index.js",
     "prisma:generate": "npm run prisma -- generate --schema ./prisma/schema.prisma",
     "prisma:migrate": "npm run prisma -- migrate dev --schema ./prisma/schema.prisma"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.239",
     "@nestjs/common": "^11.1.28",
     "@nestjs/core": "^11.1.28",
     "@nestjs/cqrs": "^11.0.3",
@@ -27,7 +28,8 @@
     "dotenv": "^16.6.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.24",

@@ -59,6 +59,7 @@ model Meeting {
   updatedAt    DateTime             @updatedAt @map("updated_at")
   participants MeetingParticipant[]
   files        MeetingFile[]
+  summary      MeetingSummary?
 
   @@index([ownerId, createdAt])
   @@map("meetings")
@@ -90,6 +91,13 @@ enum TranscriptionJobStatus {
   FAILED
 }
 
+enum MeetingSummaryStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 enum MeetingFileStatus {
   READY
   DELETING
@@ -97,28 +105,29 @@ enum MeetingFileStatus {
 }
 
 model MeetingFile {
-  id               String                      @id @default(cuid())
-  meetingId        String                      @map("meeting_id")
-  uploadedById     String?                     @map("uploaded_by_id")
-  originalName     String                      @map("original_name") @db.VarChar(255)
-  storageKey       String                      @unique @map("storage_key")
-  category         MeetingFileCategory
-  mimeType         String                      @map("mime_type") @db.VarChar(255)
-  sizeBytes        Int                         @map("size_bytes")
-  status           MeetingFileStatus           @default(READY)
-  sourceFileId     String?                     @unique @map("source_file_id")
-  createdAt        DateTime                    @default(now()) @map("created_at")
-  updatedAt        DateTime                    @updatedAt @map("updated_at")
-  meeting          Meeting                     @relation(fields: [meetingId], references: [id], onDelete: Restrict)
-  uploadedBy       User?                       @relation("UploadedMeetingFiles", fields: [uploadedById], references: [id], onDelete: SetNull)
-  downloadTickets  MeetingFileDownloadTicket[]
+  id                 String                      @id @default(cuid())
+  meetingId          String                      @map("meeting_id")
+  uploadedById       String?                     @map("uploaded_by_id")
+  originalName       String                      @map("original_name") @db.VarChar(255)
+  storageKey         String                      @unique @map("storage_key")
+  category           MeetingFileCategory
+  mimeType           String                      @map("mime_type") @db.VarChar(255)
+  sizeBytes          Int                         @map("size_bytes")
+  status             MeetingFileStatus           @default(READY)
+  sourceFileId       String?                     @unique @map("source_file_id")
+  createdAt          DateTime                    @default(now()) @map("created_at")
+  updatedAt          DateTime                    @updatedAt @map("updated_at")
+  meeting            Meeting                     @relation(fields: [meetingId], references: [id], onDelete: Restrict)
+  uploadedBy         User?                       @relation("UploadedMeetingFiles", fields: [uploadedById], references: [id], onDelete: SetNull)
+  downloadTickets    MeetingFileDownloadTicket[]
   // Restrict, not Cascade: a cascade would drop the transcript row together
   // with the only copy of its storage key and leave its bytes on disk until
   // storage reconciliation notices, a day later. Deleting a recording deletes
   // its transcript row first, on purpose.
-  sourceFile       MeetingFile?                @relation("MeetingFileTranscript", fields: [sourceFileId], references: [id], onDelete: Restrict)
-  transcript       MeetingFile?                @relation("MeetingFileTranscript")
-  transcriptionJob TranscriptionJob?
+  sourceFile         MeetingFile?                @relation("MeetingFileTranscript", fields: [sourceFileId], references: [id], onDelete: Restrict)
+  transcript         MeetingFile?                @relation("MeetingFileTranscript")
+  transcriptionJob   TranscriptionJob?
+  summaryTaskSources MeetingSummaryTaskSource[]
 
   @@index([meetingId, status, createdAt])
   @@index([meetingId, status, uploadedById])
@@ -144,6 +153,67 @@ model TranscriptionJob {
   @@index([status, createdAt])
   @@index([status, leaseExpiresAt])
   @@map("transcription_jobs")
+}
+
+model MeetingSummary {
+  id          String                   @id @default(cuid())
+  meetingId   String                   @unique @map("meeting_id")
+  status      MeetingSummaryStatus     @default(QUEUED)
+  summaryText String?                  @map("summary_text")
+  failureCode String?                  @map("failure_code") @db.VarChar(64)
+  startedAt   DateTime?                @map("started_at")
+  finishedAt  DateTime?                @map("finished_at")
+  createdAt   DateTime                 @default(now()) @map("created_at")
+  updatedAt   DateTime                 @updatedAt @map("updated_at")
+  meeting     Meeting                  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  tasks       MeetingSummaryTask[]
+  decisions   MeetingSummaryDecision[]
+
+  @@index([status, createdAt])
+  @@map("meeting_summaries")
+}
+
+model MeetingSummaryTask {
+  id        String                     @id @default(cuid())
+  summaryId String                     @map("summary_id")
+  title     String
+  assignee  String?                    @map("assignee")
+  position  Int
+  summary   MeetingSummary             @relation(fields: [summaryId], references: [id], onDelete: Cascade)
+  sources   MeetingSummaryTaskSource[]
+
+  @@index([summaryId, position])
+  @@map("meeting_summary_tasks")
+}
+
+// Tracks which transcript file(s) a task was drawn from. A future update
+// merges the same task mentioned in more than one transcript into one row
+// instead of one row per mention, and this table is where that merge is
+// recorded — without it, a merged task has no way to say which files agreed
+// on it. Deleting a transcript file only removes its link here: the task text
+// this file contributed to stays, matching the rule that a summary survives
+// the deletion of the files it was built from.
+model MeetingSummaryTaskSource {
+  taskId        String             @map("task_id")
+  meetingFileId String             @map("meeting_file_id")
+  createdAt     DateTime           @default(now()) @map("created_at")
+  task          MeetingSummaryTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  meetingFile   MeetingFile        @relation(fields: [meetingFileId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, meetingFileId])
+  @@index([meetingFileId])
+  @@map("meeting_summary_task_sources")
+}
+
+model MeetingSummaryDecision {
+  id        String         @id @default(cuid())
+  summaryId String         @map("summary_id")
+  text      String
+  position  Int
+  summary   MeetingSummary @relation(fields: [summaryId], references: [id], onDelete: Cascade)
+
+  @@index([summaryId, position])
+  @@map("meeting_summary_decisions")
 }
 
 model MeetingFileDownloadTicket {

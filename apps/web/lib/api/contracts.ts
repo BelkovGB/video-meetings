@@ -103,3 +103,43 @@ export type MeetingFile = {
   /** Set only when `transcriptionStatus` is `'error'`; `null` otherwise. */
   transcriptionFailureCode: TranscriptionFailureCode | null;
 };
+
+export type MeetingSummaryStatus = 'queued' | 'processing' | 'ready' | 'error';
+
+/**
+ * Machine-readable reason a meeting-summary job failed, safe to show to the
+ * client. Duplicated from
+ * apps/api/src/meeting-summary/models/meeting-summary-failure.ts — the web
+ * side never imports a backend module.
+ */
+export type MeetingSummaryFailureCode =
+  | 'INPUT_TOO_LARGE'
+  | 'MODEL_OUTPUT_INVALID'
+  | 'TIME_LIMIT_EXCEEDED'
+  | 'INTERRUPTED'
+  | 'INTERNAL_ERROR';
+
+export type MeetingSummaryTaskResponse = {
+  id: string;
+  title: string;
+  /** The assignee as spoken in the meeting, or `null` when no one was named. */
+  assignee: string | null;
+};
+
+export type MeetingSummaryDecisionResponse = {
+  id: string;
+  text: string;
+};
+
+/**
+ * `status` is `null`, with `summary`, `failureCode`, `tasks` and `decisions`,
+ * until the first run starts. `tasks` and `decisions` are always arrays, empty
+ * when there is nothing to show.
+ */
+export type MeetingSummaryResponse = {
+  status: MeetingSummaryStatus | null;
+  summary: string | null;
+  failureCode: MeetingSummaryFailureCode | null;
+  tasks: MeetingSummaryTaskResponse[];
+  decisions: MeetingSummaryDecisionResponse[];
+};
