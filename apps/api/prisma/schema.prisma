@@ -179,11 +179,17 @@ model MeetingSummary {
   @@map("meeting_summaries")
 }
 
+enum TaskStatus {
+  TODO
+  DONE
+}
+
 model MeetingSummaryTask {
   id        String                     @id @default(cuid())
   summaryId String                     @map("summary_id")
   title     String
   assignee  String?                    @map("assignee")
+  status    TaskStatus                 @default(TODO)
   position  Int
   summary   MeetingSummary             @relation(fields: [summaryId], references: [id], onDelete: Cascade)
   sources   MeetingSummaryTaskSource[]
