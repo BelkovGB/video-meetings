@@ -641,6 +641,27 @@ The owner of a meeting and its recorded participants can start a meeting
 summary job and read its result; both routes enforce the same
 owner-or-participant access policy as the meeting-file routes.
 
+A meeting with at least one `READY` `TRANSCRIPT` file and no `MeetingSummary`
+row yet also starts automatically: an in-process scheduler polls every
+`SUMMARY_SCHEDULER_INTERVAL_MS` for such a meeting and queues it the same way
+the manual route below does. The same scheduler also recomputes a `ready` or
+`error` summary once the meeting's transcript set changes — a new transcript
+finishes, or one that fed the previous run is otherwise no longer counted —
+replacing the previous result entirely, the same as a manual rerun. A summary
+whose transcript set has not changed since it finished is left alone: an
+`error` result in particular never retries on its own, only on a new
+transcript or the manual route below. A meeting whose recognition job is
+still `queued` or `processing`, or that currently has a file upload in
+flight, is skipped either way, until that job or upload finishes, so the
+transcript set the scheduler summarizes or recomputes is always final — an
+upload in progress might itself become a new transcript file. Uploading
+stays available at any time regardless: during recognition, during a summary
+run, or while one is queued to start; only the scheduler's own decision to
+start or recompute waits for an in-flight upload, never the upload route
+itself. The manual route also stays available at any time — as `Обновить
+выжимку` in the UI, `Повторить` after a failure — to rerun a summary sooner
+than the scheduler would, even when the transcript set has not changed.
+
 ### `POST /meetings/:meetingId/summary`
 
 The meeting access check runs before the job is created, so a user outside the
@@ -751,13 +772,14 @@ argument list stops the API too, even though it never runs a job.
 
 ## Meeting summary configuration
 
-| Variable                      | Default  | Purpose                                                                      |
-| ----------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `SUMMARY_MAX_INPUT_CHARS`     | `500000` | Character limit for the transcript text sent to the model.                   |
-| `SUMMARY_TIMEOUT_MS`          | `600000` | Timeout for the model call.                                                  |
-| `SUMMARY_MAX_AGENT_TURNS`     | `30`     | Turn budget for the model's tool-calling conversation.                       |
-| `SUMMARY_MAX_OUTPUT_ATTEMPTS` | `3`      | Tries at a parseable final reply before failing with `MODEL_OUTPUT_INVALID`. |
-| `SUMMARY_MAX_TOOL_CALLS`      | `20`     | Tool-call budget for the whole run, all retry attempts combined.             |
+| Variable                        | Default  | Purpose                                                                      |
+| ------------------------------- | -------- | ---------------------------------------------------------------------------- |
+| `SUMMARY_MAX_INPUT_CHARS`       | `500000` | Character limit for the transcript text sent to the model.                   |
+| `SUMMARY_TIMEOUT_MS`            | `600000` | Timeout for the model call.                                                  |
+| `SUMMARY_MAX_AGENT_TURNS`       | `30`     | Turn budget for the model's tool-calling conversation.                       |
+| `SUMMARY_MAX_OUTPUT_ATTEMPTS`   | `3`      | Tries at a parseable final reply before failing with `MODEL_OUTPUT_INVALID`. |
+| `SUMMARY_MAX_TOOL_CALLS`        | `20`     | Tool-call budget for the whole run, all retry attempts combined.             |
+| `SUMMARY_SCHEDULER_INTERVAL_MS` | `15000`  | Interval between scheduler polls for a meeting to start automatically.       |
 
 ## Running checks
 

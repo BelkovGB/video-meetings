@@ -14,7 +14,7 @@ export function MeetingSummaryPanel({ meetingId, hasTranscript }: MeetingSummary
   const { summary, isStarting, startError, startSummary } = useMeetingSummary(meetingId);
   const { status, failureCode } = summary;
   const isRunning = status === 'queued' || status === 'processing';
-  const buttonLabel = status === 'error' ? 'Повторить' : 'Сделать выжимку';
+  const buttonLabel = status === 'error' ? 'Повторить' : 'Обновить выжимку';
 
   return (
     <section
@@ -42,7 +42,7 @@ export function MeetingSummaryPanel({ meetingId, hasTranscript }: MeetingSummary
         </button>
         {!hasTranscript ? (
           <span data-testid="summary-start-hint" className="text-sm text-slate-600">
-            Нужен готовый транскрипт встречи.
+            Ждём расшифровку.
           </span>
         ) : null}
       </div>

@@ -12,8 +12,8 @@ describe('LocalMeetingFileStorageService', () => {
     } as never);
     const storage = new LocalMeetingFileStorageService();
 
-    const firstReservation = await storage.reserveCapacity(40, 'user-1');
-    const secondReservation = await storage.reserveCapacity(70, 'user-2');
+    const firstReservation = await storage.reserveCapacity(40, 'user-1', 'meeting-1');
+    const secondReservation = await storage.reserveCapacity(70, 'user-2', 'meeting-2');
 
     expect(firstReservation).toEqual(expect.any(Function));
     expect(secondReservation).toBeUndefined();
@@ -23,7 +23,9 @@ describe('LocalMeetingFileStorageService', () => {
     }
     firstReservation();
 
-    await expect(storage.reserveCapacity(70, 'user-2')).resolves.toEqual(expect.any(Function));
+    await expect(storage.reserveCapacity(70, 'user-2', 'meeting-2')).resolves.toEqual(
+      expect.any(Function),
+    );
     statfs.mockRestore();
   });
 
@@ -35,22 +37,56 @@ describe('LocalMeetingFileStorageService', () => {
     const storage = new LocalMeetingFileStorageService();
 
     const reservations = await Promise.all(
-      ['user-1', 'user-2', 'user-3', 'user-4'].map((userId) => storage.reserveCapacity(10, userId)),
+      ['user-1', 'user-2', 'user-3', 'user-4'].map((userId, index) =>
+        storage.reserveCapacity(10, userId, `meeting-${index}`),
+      ),
     );
 
-    await expect(storage.reserveCapacity(10, 'user-1')).resolves.toBe('busy');
-    await expect(storage.reserveCapacity(10, 'user-5')).resolves.toBe('busy');
+    await expect(storage.reserveCapacity(10, 'user-1', 'meeting-0')).resolves.toBe('busy');
+    await expect(storage.reserveCapacity(10, 'user-5', 'meeting-5')).resolves.toBe('busy');
 
     if (typeof reservations[0] !== 'function') {
       throw new Error('Expected the first upload slot to be reserved');
     }
     reservations[0]();
-    await expect(storage.reserveCapacity(10, 'user-5')).resolves.toEqual(expect.any(Function));
+    await expect(storage.reserveCapacity(10, 'user-5', 'meeting-5')).resolves.toEqual(
+      expect.any(Function),
+    );
     reservations.slice(1).forEach((release) => {
       if (typeof release === 'function') {
         release();
       }
     });
+    statfs.mockRestore();
+  });
+
+  it('tracks an active upload per meeting until every reservation for it releases', async () => {
+    const statfs = jest.spyOn(filesystem, 'statfs').mockResolvedValue({
+      bavail: 1_000n,
+      bsize: 1_000n,
+    } as never);
+    const storage = new LocalMeetingFileStorageService();
+
+    expect(storage.hasActiveUpload('meeting-1')).toBe(false);
+
+    const first = await storage.reserveCapacity(10, 'user-1', 'meeting-1');
+    const second = await storage.reserveCapacity(10, 'user-2', 'meeting-1');
+
+    if (typeof first !== 'function' || typeof second !== 'function') {
+      throw new Error('Expected both capacity reservations to succeed');
+    }
+    // Two different users uploading to the same meeting at once: the meeting
+    // still counts as one meeting with an upload in flight, not something the
+    // scheduler needs to count.
+    expect(storage.hasActiveUpload('meeting-1')).toBe(true);
+    expect(storage.hasActiveUpload('meeting-2')).toBe(false);
+
+    first();
+    expect(storage.hasActiveUpload('meeting-1')).toBe(true);
+
+    second();
+    expect(storage.hasActiveUpload('meeting-1')).toBe(false);
+
     statfs.mockRestore();
   });
 

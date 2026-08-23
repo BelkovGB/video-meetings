@@ -300,10 +300,8 @@ test('disables the start button until the meeting has a transcript', async ({ pa
   await authenticate(page, owner);
   await page.goto(`/meetings/${meeting.id}`);
 
-  await expect(page.getByTestId('summary-start-hint')).toHaveText(
-    'Нужен готовый транскрипт встречи.',
-  );
-  await expect(page.getByRole('button', { name: 'Сделать выжимку' })).toBeDisabled();
+  await expect(page.getByTestId('summary-start-hint')).toHaveText('Ждём расшифровку.');
+  await expect(page.getByRole('button', { name: 'Обновить выжимку' })).toBeDisabled();
 });
 
 test('starts a summary run and shows the queued status immediately', async ({ page, request }) => {
@@ -314,7 +312,7 @@ test('starts a summary run and shows the queued status immediately', async ({ pa
   await authenticate(page, owner);
   await page.goto(`/meetings/${meeting.id}`);
 
-  const startButton = page.getByRole('button', { name: 'Сделать выжимку' });
+  const startButton = page.getByRole('button', { name: 'Обновить выжимку' });
   await expect(startButton).toBeEnabled();
   await expect(page.getByTestId('summary-start-hint')).toHaveCount(0);
 

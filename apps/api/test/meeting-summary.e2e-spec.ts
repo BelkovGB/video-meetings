@@ -1,12 +1,13 @@
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { MeetingSummaryStatus } from '@prisma/client';
+import { MeetingFileCategory, MeetingFileStatus, MeetingSummaryStatus } from '@prisma/client';
 import { rm } from 'node:fs/promises';
 import * as request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { claudeAgentApiKey } from '../src/claude-agent/claude-agent.config';
 import { configureHttpApplication } from '../src/http-application';
+import { MeetingSummarySchedulerService } from '../src/meeting-summary/services/meeting-summary-scheduler.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { teardownStorageSuite } from './support/storage-cleanup';
 import { uploadRoot } from './support/storage-roots';
@@ -53,6 +54,7 @@ const describeWithToken = claudeAgentApiKey ? describe : describe.skip;
 describeWithToken('Meeting summary (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
+  let scheduler: MeetingSummarySchedulerService;
   // Every registration needs its own client address: this suite creates more
   // accounts per minute than one client may, and a shared address would fail
   // it on the authentication rate limit instead of on a summary defect.
@@ -70,6 +72,11 @@ describeWithToken('Meeting summary (e2e)', () => {
     configureHttpApplication(app);
     await app.init();
     prisma = app.get(PrismaService);
+    scheduler = app.get(MeetingSummarySchedulerService);
+    // test/setup.ts turns off the scheduler's own auto-start for the whole
+    // suite, so nothing here ticks on its own; every scheduler assertion
+    // below drives run() explicitly, the same no-timers approach
+    // waitForSummaryResult below takes for polling.
   });
 
   afterAll(async () => {
@@ -258,5 +265,84 @@ describeWithToken('Meeting summary (e2e)', () => {
 
     const got = await getSummary(meeting.id, outsider).expect(404);
     expect(got.body).toMatchObject({ message: 'Meeting not found' });
+  });
+
+  it('starts a summary on its own for a meeting with a ready transcript and none yet', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner);
+    await uploadTranscript(meeting.id, owner);
+
+    // No POST to /summary here: the scheduler pass below is the only thing
+    // that queues this run, proving criterion 1 rather than assuming it from
+    // the manual-start test above.
+    await scheduler.run();
+
+    const finished = await waitForSummaryResult(meeting.id, owner, 170_000);
+
+    expect(finished.status).toBe('ready');
+    expect(typeof finished.summary).toBe('string');
+    expect((finished.summary as string).trim().length).toBeGreaterThan(0);
+  }, 180_000);
+
+  it("recomputes a finished summary once a new transcript changes the meeting's transcript set", async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner);
+    await uploadTranscript(meeting.id, owner);
+
+    await scheduler.run();
+    await waitForSummaryResult(meeting.id, owner, 170_000);
+    const afterFirstRun = await prisma.meetingSummary.findUniqueOrThrow({
+      where: { meetingId: meeting.id },
+    });
+    expect(afterFirstRun.status).toBe(MeetingSummaryStatus.COMPLETED);
+
+    // A second ready transcript changes the meeting's transcript set, so its
+    // fingerprint no longer matches the finished run's — that mismatch, not a
+    // fixed delay, is what the scheduler's recompute path keys off.
+    await uploadTranscript(meeting.id, owner);
+    await scheduler.run();
+
+    const secondResult = await waitForSummaryResult(meeting.id, owner, 170_000);
+    expect(secondResult.status).toBe('ready');
+
+    const afterSecondRun = await prisma.meetingSummary.findUniqueOrThrow({
+      where: { meetingId: meeting.id },
+    });
+    // The row is the same one, reset in place rather than replaced, but its
+    // fingerprint and finish time must have actually moved: same status on
+    // both reads would also pass a check that only compared `status`.
+    expect(afterSecondRun.id).toBe(afterFirstRun.id);
+    expect(afterSecondRun.transcriptFingerprint).not.toBe(afterFirstRun.transcriptFingerprint);
+    expect(afterSecondRun.finishedAt!.getTime()).toBeGreaterThan(
+      afterFirstRun.finishedAt!.getTime(),
+    );
+  }, 360_000);
+
+  it('does not start a summary while the meeting still has a recognition job in flight', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner);
+
+    // Seeded before the transcript exists, not after: the real scheduler
+    // keeps running on its own interval for the whole suite, so a transcript
+    // ready with no pending job — even briefly — is a window it could win.
+    // Seeding the pending job first means no such window ever opens.
+    await prisma.meetingFile.create({
+      data: {
+        meetingId: meeting.id,
+        originalName: 'second-recording.mp3',
+        storageKey: createUniqueValue('recognizing-recording'),
+        category: MeetingFileCategory.AUDIO,
+        mimeType: 'audio/mpeg',
+        sizeBytes: 10,
+        status: MeetingFileStatus.READY,
+        transcriptionJob: { create: {} },
+      },
+    });
+    await uploadTranscript(meeting.id, owner);
+
+    await scheduler.run();
+
+    const stillUnstarted = await getSummary(meeting.id, owner).expect(200);
+    expect(stillUnstarted.body).toMatchObject({ status: null });
   });
 });

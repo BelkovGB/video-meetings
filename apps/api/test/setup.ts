@@ -41,3 +41,10 @@ process.env.TRANSCRIPTION_FFMPEG_ARGS = JSON.stringify([
 ]);
 process.env.TRANSCRIPTION_WORK_DIR = transcriptionWorkRoot;
 process.env.TRANSCRIPTION_POLL_INTERVAL_MS = '50';
+// Every e2e spec file boots its own full AppModule, and this suite never
+// clears meeting-summary rows between files. Left on, the scheduler's own
+// boot-time pass would auto-summarize whatever ready-transcript fixture an
+// earlier, unrelated spec file left behind — a real, billed model call
+// against data that spec never meant to reach the model. The one spec that
+// wants scheduler behavior drives it directly (meeting-summary.e2e-spec.ts).
+process.env.SUMMARY_SCHEDULER_AUTOSTART = 'false';

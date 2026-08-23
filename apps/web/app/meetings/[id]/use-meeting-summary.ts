@@ -17,8 +17,11 @@ const noSummaryYet: MeetingSummaryResponse = {
   decisions: [],
 };
 
+// `null` counts as pending too: it means no job has ever started, which the
+// scheduler can still change on its own without any user action. Polling
+// stops only once a run actually reaches a terminal state.
 function isSummaryPending(status: MeetingSummaryResponse['status']): boolean {
-  return status === 'queued' || status === 'processing';
+  return status === null || status === 'queued' || status === 'processing';
 }
 
 const startErrorMessages: Record<string, string> = {

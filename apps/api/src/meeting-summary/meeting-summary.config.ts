@@ -14,6 +14,10 @@ const DEFAULT_MAX_OUTPUT_ATTEMPTS = 3;
 // generous enough for a long meeting's worth of tasks while still stopping a
 // run that a prompt injection has driven into a loop of tool calls.
 const DEFAULT_MAX_TOOL_CALLS = 20;
+// The scheduler is the only thing standing between "transcript ready" and
+// "summary queued" when nobody presses the button, so this is short enough to
+// feel automatic without polling the database aggressively.
+const DEFAULT_SCHEDULER_INTERVAL_MS = 15_000;
 
 function readPositiveInteger(name: string, fallback: number): number {
   const value = process.env[name];
@@ -31,6 +35,22 @@ function readPositiveInteger(name: string, fallback: number): number {
   return parsed;
 }
 
+function readBoolean(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+
+  if (value === undefined) {
+    return fallback;
+  }
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+
+  throw new Error(`${name} must be either true or false`);
+}
+
 export const meetingSummaryConfig = {
   maxInputChars: readPositiveInteger('SUMMARY_MAX_INPUT_CHARS', DEFAULT_MAX_INPUT_CHARS),
   timeoutMs: readPositiveInteger('SUMMARY_TIMEOUT_MS', DEFAULT_TIMEOUT_MS),
@@ -40,4 +60,11 @@ export const meetingSummaryConfig = {
     DEFAULT_MAX_OUTPUT_ATTEMPTS,
   ),
   maxToolCalls: readPositiveInteger('SUMMARY_MAX_TOOL_CALLS', DEFAULT_MAX_TOOL_CALLS),
+  schedulerIntervalMs: readPositiveInteger(
+    'SUMMARY_SCHEDULER_INTERVAL_MS',
+    DEFAULT_SCHEDULER_INTERVAL_MS,
+  ),
+  // Off in apps/api/test/setup.ts, on everywhere else — see the comment on
+  // MeetingSummarySchedulerService.onApplicationBootstrap.
+  schedulerAutoStart: readBoolean('SUMMARY_SCHEDULER_AUTOSTART', true),
 };

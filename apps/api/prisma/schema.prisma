@@ -161,6 +161,12 @@ model MeetingSummary {
   status      MeetingSummaryStatus     @default(QUEUED)
   summaryText String?                  @map("summary_text")
   failureCode String?                  @map("failure_code") @db.VarChar(64)
+  // Identity of the ready TRANSCRIPT file set this run was queued against —
+  // see computeTranscriptFingerprint. Compared against the meeting's current
+  // set to decide whether a finished run is stale and due for a recompute; an
+  // empty string is what a row written before this column existed reads as,
+  // which never matches a real fingerprint and so is treated as stale too.
+  transcriptFingerprint String              @default("") @map("transcript_fingerprint")
   startedAt   DateTime?                @map("started_at")
   finishedAt  DateTime?                @map("finished_at")
   createdAt   DateTime                 @default(now()) @map("created_at")
