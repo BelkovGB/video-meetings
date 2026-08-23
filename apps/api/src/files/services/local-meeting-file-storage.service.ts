@@ -28,6 +28,10 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
   private activeReservations = 0;
   private activeUploadCount = 0;
   private readonly activeUploadUsers = new Set<string>();
+  // A meeting present as a key has at least one upload in flight; the count
+  // is how many, so the last release can tell whether to drop the key. Only
+  // the meeting-summary scheduler reads this, through hasActiveUpload below.
+  private readonly activeUploadsByMeeting = new Map<string, number>();
   private reservationQueue = Promise.resolve();
   private staleTempDirectory: Dir | undefined;
   private storedFilesDirectory: Dir | undefined;
@@ -278,7 +282,11 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
     }
   }
 
-  async reserveCapacity(requestBytes: number, userId: string): Promise<CapacityReservation> {
+  async reserveCapacity(
+    requestBytes: number,
+    userId: string,
+    meetingId: string,
+  ): Promise<CapacityReservation> {
     return this.runExclusively(async () => {
       if (
         this.activeUploadUsers.has(userId) ||
@@ -295,6 +303,10 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
         this.activeReservations += requestBytes;
         this.activeUploadCount += 1;
         this.activeUploadUsers.add(userId);
+        this.activeUploadsByMeeting.set(
+          meetingId,
+          (this.activeUploadsByMeeting.get(meetingId) ?? 0) + 1,
+        );
         let released = false;
 
         return () => {
@@ -303,12 +315,25 @@ export class LocalMeetingFileStorageService implements OnModuleInit, OnModuleDes
             this.activeReservations -= requestBytes;
             this.activeUploadCount -= 1;
             this.activeUploadUsers.delete(userId);
+
+            const remaining = (this.activeUploadsByMeeting.get(meetingId) ?? 1) - 1;
+            if (remaining <= 0) {
+              this.activeUploadsByMeeting.delete(meetingId);
+            } else {
+              this.activeUploadsByMeeting.set(meetingId, remaining);
+            }
           }
         };
       } catch {
         return undefined;
       }
     });
+  }
+
+  /** Whether this API process currently has an upload in flight for the
+   * meeting — used to hold the summary scheduler off a meeting mid-upload. */
+  hasActiveUpload(meetingId: string): boolean {
+    return this.activeUploadsByMeeting.has(meetingId);
   }
 
   /**

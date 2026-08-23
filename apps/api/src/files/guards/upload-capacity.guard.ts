@@ -31,7 +31,14 @@ export class UploadCapacityGuard implements CanActivate {
       });
     }
 
-    const reservation = await this.storage.reserveCapacity(requestBytes, request.user.sub);
+    const meetingId = Array.isArray(request.params.meetingId)
+      ? request.params.meetingId[0]
+      : request.params.meetingId;
+    const reservation = await this.storage.reserveCapacity(
+      requestBytes,
+      request.user.sub,
+      meetingId,
+    );
     if (reservation === 'busy') {
       throw new ConflictException({
         message: 'Another upload is already in progress',

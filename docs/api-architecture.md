@@ -329,6 +329,76 @@ recognition job would.
 `MeetingSummaryRunnerService.process` without awaiting it. The HTTP response
 returns as soon as the row is written; the model call happens after.
 
+`MeetingSummarySchedulerService` is the automatic counterpart to that route:
+it runs once at application startup and every `SUMMARY_SCHEDULER_INTERVAL_MS`
+afterward, guarded by the same single-process, running-flag pattern as the
+file-deletion reconciler. Each pass unions two candidate queries, then drops
+any meeting from either that still has a `TranscriptionJob` in `QUEUED` or
+`PROCESSING`, or that `LocalMeetingFileStorageService.hasActiveUpload` reports
+as currently mid-upload, so neither a recording still being recognized nor a
+file still being received can trigger a summary of a transcript set that is
+not final yet:
+
+- Up to twenty meetings whose `TRANSCRIPT` files include one `READY` and
+  whose `MeetingSummary` relation is still `null` — the same
+  `meeting: { summary: null }` filter Prisma resolves against the unique
+  `meetingId`. This is the first-run path.
+- Meetings whose summary is `COMPLETED` or `FAILED` but whose stored
+  `transcriptFingerprint` no longer matches
+  `computeTranscriptFingerprint` of the meeting's current `READY`
+  `TRANSCRIPT` file ids (`meeting-summary/transcript-fingerprint.ts`; a plain
+  sorted, joined, SHA-256 hash — a transcript file is written once and never
+  edited in place, so its id already stands for its content, and the hash
+  only needs to notice the set changing). This is the recompute path: a new
+  transcript, or any other change to the ready set, moves the fingerprint,
+  while an unchanged set — including one behind a summary that simply
+  failed — does not, which is what keeps a `FAILED` run from retrying itself
+  every pass. Every finished summary is compared and the batch of twenty is
+  taken from what the comparison leaves, least recently updated first —
+  capping the query instead would cap what the pass can see rather than what
+  it takes on, and a page of up-to-date rows would hide every stale meeting
+  behind it.
+
+`MeetingSummaryService.startForMeeting` queues whatever the union leaves
+after the recognition-job filter, for either path alike: it always attempts
+`create` first, and only a `P2002` unique-constraint failure — a row already
+existing, whether from a first run or an earlier finished one — falls
+through to `resetForRecompute`. That method re-reads the row inside a
+transaction and re-checks both its status and the fingerprint itself before
+touching it, so a row this pass's own candidate read is a moment stale about
+— already claimed by a manual start, moved on by another scheduler pass, or
+no longer actually stale — is left alone rather than reset out from under
+whatever is already happening to it. A reset that does proceed clears the
+row the same way a manual rerun does: status back to `QUEUED`, the new
+fingerprint stamped in, previous `summaryText`/`failureCode`/timestamps
+cleared, previous tasks and decisions deleted.
+
+`start` and `startForMeeting` differ in how they hand their claimed row to
+`MeetingSummaryRunnerService.process`, and deliberately so. `start` calls the
+private `launch`, which fires `process` without awaiting it: the manual
+route's HTTP response must return before the model call finishes.
+`startForMeeting` has no HTTP response to protect, so it `await`s `process`
+directly (through the same failure-logging wrapper `launch` uses internally)
+— which is what keeps the scheduler's own loop in `run` from starting a
+second real, billed model call before the first one it queued has finished.
+Several such calls in flight at once was never a case the manual,
+one-click-at-a-time route had reason to consider; the scheduler can find more
+than one eligible meeting in a single pass, so it does.
+
+`onApplicationBootstrap` itself only runs when `SUMMARY_SCHEDULER_AUTOSTART`
+is `true` — the default everywhere except `apps/api/test/setup.ts`, which
+turns it off for the whole e2e suite. Every e2e spec file boots its own full
+`AppModule`, and none of them clean up their meeting-file fixtures
+afterward; left on, the scheduler's boot-time pass in a later, unrelated spec
+file's app instance would auto-summarize whatever ready `TRANSCRIPT` an
+earlier spec left behind — a real, billed model call against data that spec
+never intended to reach Claude. `meeting-summary.e2e-spec.ts` is the one spec
+that wants scheduler behavior, and it drives `run()` on the service directly
+instead of relying on auto-start. A rejection from that first pass is caught
+the same way a later interval tick's is, so a single bad pass fails neither
+that spec's own app boot nor, in the non-test default, the real
+application's startup.
+
 `process` first claims the job with an `updateMany` guarded by
 `status: QUEUED`, the same defensive pattern the transcription worker uses to
 claim a job: the update reports how many rows it touched, and a caller that
