@@ -39,12 +39,19 @@ type McpHttpTransport = InstanceType<McpStreamableHttpModule['StreamableHTTPServ
 export class McpService {
   constructor(private readonly taskTools: TaskTools) {}
 
-  async createConnectedTransport(): Promise<McpHttpTransport> {
+  /**
+   * `viewerId` is the authenticated caller from `McpController`: the tools
+   * and resources are registered for that user alone, which is what keeps a
+   * caller-supplied summaryId or task id from reaching a meeting they are
+   * not part of. A fresh server per request is what makes that possible —
+   * one shared server could not carry a per-caller identity.
+   */
+  async createConnectedTransport(viewerId: string): Promise<McpHttpTransport> {
     const { McpServer, ResourceTemplate } = await importMcpServerModule();
     const { StreamableHTTPServerTransport } = await importMcpStreamableHttpModule();
 
     const server = new McpServer({ name: 'video-meetings', version: '0.1.0' });
-    this.taskTools.registerOn(server, ResourceTemplate);
+    this.taskTools.registerOn(server, ResourceTemplate, viewerId);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

@@ -424,6 +424,23 @@ tool-call budget is a total for the whole run: a `PreToolUse` hook denies an
 and a `PostToolUse` hook writes every tool call and its result to the Nest
 logger as an audit trail.
 
+`McpModule` exposes a second MCP surface, this one for outside clients:
+`McpController` answers every method on `/mcp` behind `JwtAuthGuard`, and
+`McpService.createConnectedTransport` builds a fresh `McpServer` and a
+stateless Streamable HTTP transport for each request — the SDK refuses to let
+one stateless transport serve two requests, so per-request construction is
+required rather than preferred. It also carries the authorization: the server
+is built for the caller `JwtAuthGuard` authenticated, and `TaskTools`
+registers `find_tasks`, `upsert_task`, `tasks://open` and `task://{id}` closed
+over that viewer id, so a caller-supplied `summaryId` or task id outside the
+viewer's meetings is answered as not found rather than served. `TaskService`
+owns the queries behind both surfaces: the viewer-scoped reads for this one,
+and the unscoped `findSimilar`/`upsert` that the agent's tools reach with the
+summaryId of the run they were built for. Both SDKs are ESM-only and this app
+compiles to CommonJS, so `mcp-sdk/import-mcp-sdk.ts` bridges the import the
+same way `importClaudeAgentSdk` does — and for the same reason
+`mcp.e2e-spec.ts` gets its own solo Jest invocation.
+
 The prompt instructs the model to call `find_similar_tasks` before recording
 each task and, when a similar one is already there, call `upsert_task` with
 its id instead of creating a new row — this is how a task mentioned again in

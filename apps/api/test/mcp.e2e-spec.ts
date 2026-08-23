@@ -73,21 +73,36 @@ describe('MCP server (e2e)', () => {
 
   /** Connects a real MCP client to the in-process HTTP server over the
    * Streamable HTTP transport, against the real listening port from
-   * `beforeAll`. */
-  async function connectMcpClient() {
+   * `beforeAll`. The session's bearer token rides on every request the
+   * transport makes: the endpoint is behind the same guard as the REST
+   * routes, and it is that session that decides which meetings the tools
+   * answer for. */
+  async function connectMcpClient(session: UserSession) {
     const { Client } = await importMcpClientModule();
     const { StreamableHTTPClientTransport } = await importMcpStreamableHttpClientModule();
 
     const client = new Client({ name: 'mcp-e2e', version: '0.0.1' });
-    const transport = new StreamableHTTPClientTransport(mcpUrl);
+    const transport = new StreamableHTTPClientTransport(mcpUrl, {
+      requestInit: { headers: { Authorization: `Bearer ${session.accessToken}` } },
+    });
 
     await client.connect(transport);
 
     return client;
   }
 
+  /** A meeting with a finished summary, owned by the given user. */
+  async function createSummary(owner: UserSession): Promise<{ id: string }> {
+    const meeting = await createMeeting(owner);
+
+    return prisma.meetingSummary.create({
+      data: { meetingId: meeting.id, status: MeetingSummaryStatus.COMPLETED, summaryText: 'test' },
+    });
+  }
+
   it('lists find_tasks and upsert_task with their read-only annotations', async () => {
-    const client = await connectMcpClient();
+    const owner = await registerUser('mcp-owner');
+    const client = await connectMcpClient(owner);
 
     try {
       const { tools } = await client.listTools();
@@ -116,7 +131,7 @@ describe('MCP server (e2e)', () => {
       ],
     });
 
-    const client = await connectMcpClient();
+    const client = await connectMcpClient(owner);
 
     try {
       const result = await client.callTool({
@@ -142,7 +157,7 @@ describe('MCP server (e2e)', () => {
       data: { meetingId: meeting.id, status: MeetingSummaryStatus.COMPLETED, summaryText: 'test' },
     });
 
-    const client = await connectMcpClient();
+    const client = await connectMcpClient(owner);
 
     try {
       const created = await client.callTool({
@@ -208,7 +223,7 @@ describe('MCP server (e2e)', () => {
       },
     });
 
-    const client = await connectMcpClient();
+    const client = await connectMcpClient(owner);
 
     try {
       const { resources } = await client.listResources();
@@ -234,6 +249,95 @@ describe('MCP server (e2e)', () => {
       expect(singlePayload).toMatchObject({ id: doneTask.id, status: 'DONE' });
 
       await expect(client.readResource({ uri: 'task://does-not-exist' })).rejects.toThrow();
+    } finally {
+      await client.close();
+    }
+  });
+  it('keeps the assignee the transcript recorded when a client only flips the status', async () => {
+    const owner = await registerUser('mcp-owner');
+    const summary = await createSummary(owner);
+    const task = await prisma.meetingSummaryTask.create({
+      data: {
+        summaryId: summary.id,
+        title: 'Ship the release notes',
+        assignee: 'Vasya',
+        position: 0,
+        status: 'TODO',
+      },
+    });
+
+    const client = await connectMcpClient(owner);
+
+    try {
+      // The tool takes no assignee at all, so the only assignee this update
+      // can end with is the one already stored.
+      const updated = await client.callTool({
+        name: 'upsert_task',
+        arguments: { summaryId: summary.id, taskId: task.id, title: task.title, status: 'DONE' },
+      });
+
+      expect(updated.isError).toBeFalsy();
+      const stored = await prisma.meetingSummaryTask.findUniqueOrThrow({ where: { id: task.id } });
+      expect(stored).toMatchObject({ assignee: 'Vasya', status: 'DONE' });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('refuses a connection that carries no session token', async () => {
+    const { Client } = await importMcpClientModule();
+    const { StreamableHTTPClientTransport } = await importMcpStreamableHttpClientModule();
+    const client = new Client({ name: 'mcp-e2e-anonymous', version: '0.0.1' });
+
+    await expect(client.connect(new StreamableHTTPClientTransport(mcpUrl))).rejects.toThrow();
+  });
+
+  it("answers 'not found' for a summary the caller has no part in", async () => {
+    const owner = await registerUser('mcp-owner');
+    const outsider = await registerUser('mcp-outsider');
+    const summary = await createSummary(owner);
+
+    const client = await connectMcpClient(outsider);
+
+    try {
+      const found = await client.callTool({
+        name: 'find_tasks',
+        arguments: { summaryId: summary.id, query: '' },
+      });
+      expect(found.isError).toBe(true);
+
+      const written = await client.callTool({
+        name: 'upsert_task',
+        arguments: { summaryId: summary.id, title: 'Not mine to write', status: 'TODO' },
+      });
+      expect(written.isError).toBe(true);
+
+      // The refusal has to be a refusal, not a message: a task written anyway
+      // would leave this count at one.
+      const stored = await prisma.meetingSummaryTask.count({ where: { summaryId: summary.id } });
+      expect(stored).toBe(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("keeps another meeting's tasks out of tasks://open and task://{id}", async () => {
+    const owner = await registerUser('mcp-owner');
+    const outsider = await registerUser('mcp-outsider');
+    const summary = await createSummary(owner);
+    const task = await prisma.meetingSummaryTask.create({
+      data: { summaryId: summary.id, title: 'Ship the release notes', position: 0, status: 'TODO' },
+    });
+
+    const client = await connectMcpClient(outsider);
+
+    try {
+      const openList = await client.readResource({ uri: 'tasks://open' });
+      const openContent = openList.contents[0] as { text: string };
+      const openPayload = JSON.parse(openContent.text) as { tasks: Array<{ id: string }> };
+      expect(openPayload.tasks.map((open) => open.id)).not.toContain(task.id);
+
+      await expect(client.readResource({ uri: `task://${task.id}` })).rejects.toThrow();
     } finally {
       await client.close();
     }

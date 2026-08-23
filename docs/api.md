@@ -26,6 +26,7 @@ JSON except for the multipart file-upload endpoint.
 | DELETE | `/meetings/:meetingId/files/:fileId`                 | Bearer JWT (owner) |
 | POST   | `/meetings/:meetingId/summary`                       | Bearer JWT         |
 | GET    | `/meetings/:meetingId/summary`                       | Bearer JWT         |
+| ALL    | `/mcp`                                               | Bearer JWT         |
 
 `UsersModule` is an internal API module and does not expose HTTP routes.
 
@@ -730,6 +731,39 @@ account; assigning an actual participant is separate, later work. Both lists
 are replaced in full, like `summary`, on every rerun.
 
 A missing or inaccessible meeting returns `404 Meeting not found`.
+
+## MCP server
+
+`/mcp` speaks the Model Context Protocol over the SDK's Streamable HTTP
+transport, so an MCP client — an editor, an agent — can read and write the
+tasks of a meeting summary without going through the REST routes. It takes the
+same bearer token as every other route above; a request without one is
+`401 Unauthorized`, exactly as it is elsewhere.
+
+The transport is stateless: no session id is issued, and a fresh MCP server is
+built for each request. That server is built for the authenticated caller, and
+everything it exposes is limited to meetings that caller owns or takes part
+in — the same owner-or-participant rule the meeting-file routes apply. A
+`summaryId` or task id naming anything else is answered as if it did not
+exist, so the endpoint never confirms another meeting's ids to a stranger.
+
+Tools:
+
+- `find_tasks(summaryId, query)` — tasks of that summary whose title or
+  assignee matches the text; an empty query lists them all. A summary outside
+  the caller's meetings comes back as a tool error, `No summary <id> found.`
+- `upsert_task(summaryId, title, status, taskId?)` — creates a task, or
+  updates the one named by `taskId`. `status` is `TODO` or `DONE`. A `taskId`
+  that belongs to another summary is refused with `No task <id> found for this
+summary.`, and a summary outside the caller's meetings with the same
+  not-found answer `find_tasks` gives.
+
+Resources:
+
+- `tasks://open` — every task still `TODO` across the caller's meetings, up to
+  fifty.
+- `task://{id}` — one task by id. An id the caller may not see fails the read,
+  the same as an id that does not exist.
 
 ## Local upload configuration
 

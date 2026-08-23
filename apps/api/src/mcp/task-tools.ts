@@ -20,19 +20,23 @@ type ResourceTemplateClass = McpServerModule['ResourceTemplate'];
  * `../mcp-sdk`), and hands this class the class reference it already
  * resolved for building the server itself.
  *
- * No authorization yet, same as `McpController` — every caller reaches every
- * task regardless of which meeting it belongs to. Closing that is next.
+ * Every callback is scoped to the `viewerId` `registerOn` was given — the
+ * authenticated caller `McpController` took from the request. A summaryId or
+ * a task id arrives from the caller, so nothing here trusts it: a summary the
+ * viewer is not part of comes back as "not found", the same answer a summary
+ * that does not exist gets, so the endpoint never confirms another meeting's
+ * ids to a stranger.
  */
 @Injectable()
 export class TaskTools {
   constructor(private readonly taskService: TaskService) {}
 
-  registerOn(server: McpServer, ResourceTemplate: ResourceTemplateClass): void {
-    this.registerTools(server);
-    this.registerResources(server, ResourceTemplate);
+  registerOn(server: McpServer, ResourceTemplate: ResourceTemplateClass, viewerId: string): void {
+    this.registerTools(server, viewerId);
+    this.registerResources(server, ResourceTemplate, viewerId);
   }
 
-  private registerTools(server: McpServer): void {
+  private registerTools(server: McpServer, viewerId: string): void {
     server.registerTool(
       'find_tasks',
       {
@@ -47,6 +51,10 @@ export class TaskTools {
         annotations: { readOnlyHint: true },
       },
       async ({ summaryId, query }) => {
+        if (!(await this.taskService.isSummaryVisibleTo(summaryId, viewerId))) {
+          return summaryNotFound(summaryId);
+        }
+
         const tasks = await this.taskService.findSimilar(summaryId, query);
 
         return { content: [{ type: 'text' as const, text: JSON.stringify({ tasks }) }] };
@@ -74,6 +82,10 @@ export class TaskTools {
         annotations: { readOnlyHint: false },
       },
       async ({ summaryId, taskId, title, status }) => {
+        if (!(await this.taskService.isSummaryVisibleTo(summaryId, viewerId))) {
+          return summaryNotFound(summaryId);
+        }
+
         const result = await this.taskService.upsert({ summaryId, taskId, title, status });
 
         if (!result.found) {
@@ -99,17 +111,21 @@ export class TaskTools {
     );
   }
 
-  private registerResources(server: McpServer, ResourceTemplate: ResourceTemplateClass): void {
+  private registerResources(
+    server: McpServer,
+    ResourceTemplate: ResourceTemplateClass,
+    viewerId: string,
+  ): void {
     server.registerResource(
       'open-tasks',
       'tasks://open',
       {
         title: 'Open tasks',
-        description: 'Every task not yet marked DONE.',
+        description: 'Every task not yet marked DONE in a meeting you take part in.',
         mimeType: 'application/json',
       },
       async (uri) => {
-        const tasks = await this.taskService.listOpen();
+        const tasks = await this.taskService.listOpenForViewer(viewerId);
 
         return {
           contents: [
@@ -129,7 +145,7 @@ export class TaskTools {
       },
       async (uri, variables) => {
         const id = Array.isArray(variables.id) ? variables.id[0] : variables.id;
-        const task = await this.taskService.findById(id);
+        const task = await this.taskService.findByIdForViewer(id, viewerId);
 
         if (!task) {
           throw new Error(`No task ${id} found.`);
@@ -141,4 +157,13 @@ export class TaskTools {
       },
     );
   }
+}
+
+/** The answer for a summary the viewer may not see, word for word the answer
+ * for one that does not exist. */
+function summaryNotFound(summaryId: string) {
+  return {
+    content: [{ type: 'text' as const, text: `No summary ${summaryId} found.` }],
+    isError: true,
+  };
 }
