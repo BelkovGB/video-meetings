@@ -1,5 +1,6 @@
 export type McpServerModule = typeof import('@modelcontextprotocol/sdk/server/mcp.js');
-export type McpStdioModule = typeof import('@modelcontextprotocol/sdk/server/stdio.js');
+export type McpStreamableHttpModule =
+  typeof import('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
 // Same problem and same fix as `importClaudeAgentSdk`: @modelcontextprotocol/sdk
 // ships ESM-only and this app compiles to CommonJS. `new Function` hides the
@@ -9,6 +10,6 @@ export const importMcpServerModule = new Function(
   'return import("@modelcontextprotocol/sdk/server/mcp.js")',
 ) as () => Promise<McpServerModule>;
 
-export const importMcpStdioModule = new Function(
-  'return import("@modelcontextprotocol/sdk/server/stdio.js")',
-) as () => Promise<McpStdioModule>;
+export const importMcpStreamableHttpModule = new Function(
+  'return import("@modelcontextprotocol/sdk/server/streamableHttp.js")',
+) as () => Promise<McpStreamableHttpModule>;

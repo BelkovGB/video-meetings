@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { ClaudeAgentSdk, importClaudeAgentSdk } from '../claude-agent/import-claude-agent-sdk';
 import { PrismaService } from '../prisma/prisma.service';
-import { findSimilarTasks } from './find-similar-tasks';
+import { TaskService } from './services/task.service';
 
 /**
  * MCP tools the meeting-summary agent uses to build one run's tasks and
@@ -22,7 +22,10 @@ import { findSimilarTasks } from './find-similar-tasks';
  */
 @Injectable()
 export class MeetingToolsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly taskService: TaskService,
+  ) {}
 
   async createServer(summaryId: string) {
     const { tool, createSdkMcpServer } = await importClaudeAgentSdk();
@@ -50,7 +53,7 @@ export class MeetingToolsService {
           .describe('Free text to match against existing task titles and assignee names.'),
       },
       async ({ query }) => {
-        const tasks = await findSimilarTasks(this.prisma, { summaryId, query });
+        const tasks = await this.taskService.findSimilar(summaryId, query);
 
         return { content: [{ type: 'text' as const, text: JSON.stringify({ tasks }) }] };
       },
@@ -79,63 +82,23 @@ export class MeetingToolsService {
           ),
       },
       async ({ taskId, title, assignee }) => {
-        const normalizedAssignee = assignee && assignee.trim().length > 0 ? assignee.trim() : null;
+        const result = await this.taskService.upsert({ summaryId, taskId, title, assignee });
 
-        if (taskId) {
-          // Scoped to this run's summaryId, so a taskId cannot reach a task
-          // belonging to another meeting even as a typo or a guess — a
-          // mismatch comes back as a clean tool error, not a silent cross-
-          // meeting write.
-          const existing = await this.prisma.meetingSummaryTask.findFirst({
-            where: { id: taskId, summaryId },
-            select: { id: true },
-          });
-
-          if (!existing) {
-            return {
-              content: [
-                { type: 'text' as const, text: `No task ${taskId} found for this summary.` },
-              ],
-              isError: true,
-            };
-          }
-
-          const updated = await this.prisma.meetingSummaryTask.update({
-            where: { id: taskId },
-            data: { title, assignee: normalizedAssignee },
-          });
-
+        if (!result.found) {
           return {
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify({
-                  id: updated.id,
-                  title: updated.title,
-                  assignee: updated.assignee,
-                }),
-              },
-            ],
+            content: [{ type: 'text' as const, text: `No task ${taskId} found for this summary.` }],
+            isError: true,
           };
         }
-
-        const created = await this.prisma.meetingSummaryTask.create({
-          data: {
-            summaryId,
-            title,
-            assignee: normalizedAssignee,
-            position: await this.nextTaskPosition(summaryId),
-          },
-        });
 
         return {
           content: [
             {
               type: 'text' as const,
               text: JSON.stringify({
-                id: created.id,
-                title: created.title,
-                assignee: created.assignee,
+                id: result.task.id,
+                title: result.task.title,
+                assignee: result.task.assignee,
               }),
             },
           ],
@@ -179,15 +142,5 @@ export class MeetingToolsService {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true }) }] };
       },
     );
-  }
-
-  private async nextTaskPosition(summaryId: string): Promise<number> {
-    const last = await this.prisma.meetingSummaryTask.findFirst({
-      where: { summaryId },
-      orderBy: { position: 'desc' },
-      select: { position: true },
-    });
-
-    return (last?.position ?? -1) + 1;
   }
 }

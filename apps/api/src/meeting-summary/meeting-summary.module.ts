@@ -10,6 +10,7 @@ import { MeetingSummaryReconciliationService } from './services/meeting-summary-
 import { MeetingSummaryRunnerService } from './services/meeting-summary-runner.service';
 import { MeetingSummarySchedulerService } from './services/meeting-summary-scheduler.service';
 import { MeetingSummaryService } from './services/meeting-summary.service';
+import { TaskService } from './services/task.service';
 
 @Module({
   imports: [AuthModule, PrismaModule, FilesModule, ClaudeAgentModule],
@@ -20,6 +21,7 @@ import { MeetingSummaryService } from './services/meeting-summary.service';
     MeetingSummaryReconciliationService,
     MeetingSummarySchedulerService,
     MeetingToolsService,
+    TaskService,
   ],
 })
 export class MeetingSummaryModule {}

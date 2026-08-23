@@ -8,10 +8,8 @@
     "start": "node --env-file=../../.env dist/main.js",
     "worker": "node --env-file=../../.env dist/transcription/worker/main.js",
     "worker:dev": "npm run prisma:generate && node --env-file=../../.env ../../node_modules/@nestjs/cli/bin/nest.js start --watch --entryFile transcription/worker/main",
-    "mcp-server": "node --env-file=../../.env dist/mcp-server/main.js",
-    "mcp-server:dev": "npm run prisma:generate && node --env-file=../../.env ../../node_modules/@nestjs/cli/bin/nest.js start --watch --entryFile mcp-server/main",
     "lint": "eslint \"src/**/*.ts\"",
-    "test:e2e": "npm run prisma:generate && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand claude-agent.e2e-spec.ts && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand meeting-summary.e2e-spec.ts && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand --testPathIgnorePatterns=\"/node_modules/|claude-agent.e2e-spec.ts|meeting-summary.e2e-spec.ts\"",
+    "test:e2e": "npm run prisma:generate && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand claude-agent.e2e-spec.ts && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand meeting-summary.e2e-spec.ts && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand mcp.e2e-spec.ts && node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --config ./test/jest-e2e.json --runInBand --testPathIgnorePatterns=\"/node_modules/|claude-agent.e2e-spec.ts|meeting-summary.e2e-spec.ts|mcp.e2e-spec.ts\"",
     "prisma": "node --env-file=../../.env ../../node_modules/prisma/build/index.js",
     "prisma:generate": "npm run prisma -- generate --schema ./prisma/schema.prisma",
     "prisma:migrate": "npm run prisma -- migrate dev --schema ./prisma/schema.prisma"
