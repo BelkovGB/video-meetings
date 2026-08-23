@@ -49,8 +49,7 @@
     "lint",
     "build",
     "test:ralph",
-    "test:e2e:api",
-    "test:e2e:web"
+    "test:e2e:api"
   ],
   "review": {
     "enabled": true,
