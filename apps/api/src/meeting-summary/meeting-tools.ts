@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { ClaudeAgentSdk, importClaudeAgentSdk } from '../claude-agent/import-claude-agent-sdk';
 import { PrismaService } from '../prisma/prisma.service';
+import { findSimilarTasks } from './find-similar-tasks';
 
 /**
  * MCP tools the meeting-summary agent uses to build one run's tasks and
@@ -49,18 +50,7 @@ export class MeetingToolsService {
           .describe('Free text to match against existing task titles and assignee names.'),
       },
       async ({ query }) => {
-        const tasks = await this.prisma.meetingSummaryTask.findMany({
-          where: {
-            summaryId,
-            OR: [
-              { title: { contains: query, mode: 'insensitive' } },
-              { assignee: { contains: query, mode: 'insensitive' } },
-            ],
-          },
-          orderBy: { position: 'asc' },
-          take: 20,
-          select: { id: true, title: true, assignee: true },
-        });
+        const tasks = await findSimilarTasks(this.prisma, { summaryId, query });
 
         return { content: [{ type: 'text' as const, text: JSON.stringify({ tasks }) }] };
       },

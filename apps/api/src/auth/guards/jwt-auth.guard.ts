@@ -5,7 +5,7 @@ import { Request } from 'express';
 import { environment } from '../../config/environment';
 import { AuthSessionService } from '../services/auth-session.service';
 
-type AccessTokenPayload = {
+export type AccessTokenPayload = {
   sub: string;
   email: string;
   sid?: string;
