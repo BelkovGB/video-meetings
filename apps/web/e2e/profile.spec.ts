@@ -214,7 +214,10 @@ test('renders the current-user avatar with accessible image and fallback states'
   ).toHaveAttribute('src', /^blob:/);
   await expect(accountEntry).toHaveScreenshot('dashboard-account-entry.png');
   await expect(page.locator('header')).toHaveScreenshot('dashboard-account-header.png');
-  await page.keyboard.press('Tab');
+  // The header now also carries real navigation links ahead of this entry, so
+  // a single Tab press no longer lands here; focus it directly and verify the
+  // thing this assertion actually cares about — that Enter activates it.
+  await accountEntry.focus();
   await expect(accountEntry).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL('/profile');

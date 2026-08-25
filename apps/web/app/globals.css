@@ -1,18 +1,97 @@
 @import 'tailwindcss';
 @import '@heroui/styles';
 
-* {
-  box-sizing: border-box;
+:root {
+  --bg: #0a0e17;
+  --surface: #101624;
+  --surface-2: #151d2e;
+  --surface-3: #16203a;
+  --border: #1e2940;
+  --border-soft: #182236;
+
+  --accent: #4fe0f0;
+  --accent-dim: #4fe0f022;
+  --accent-soft: #4fe0f01a;
+  --accent-border: #4fe0f04d;
+  --accent-hover: #6fe9f5;
+  --accent-press: #35b4c4;
+  --accent-ink: #062a31;
+  --accent-ink-soft: #04222899;
+  --accent-grad-from: #5be9f5;
+  --accent-grad-to: #2ba8d9;
+
+  --text-primary: #f2f6fc;
+  --text-secondary: #93a0b8;
+  --text-muted: #5c6a85;
+
+  --info: #7ea0ff;
+  --info-soft: #2e5bff1f;
+  --info-border: #2e5bff3d;
+  --success: #34d399;
+  --success-soft: #34d3991a;
+  --warning: #fbbf24;
+  --warning-soft: #fbbf241a;
+  --danger: #f87171;
+  --danger-soft: #f871711a;
+  --media: #a78bfa;
+  --media-soft: #a78bfa1a;
+  --neutral-soft: #93a0b81a;
+
+  --surface-grad-from: #232e47;
+  --surface-grad-to: #3a4a6b;
+  --overlay-surface: #151d2e80;
+  --overlay-bg: #10162466;
+  --track: #3a4459;
+  --transparent: #00000000;
+  --glow-accent: #4fe0f03d;
+  --glow-accent-strong: #4fe0f066;
+  --shadow-surface: #00000066;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-20: 80px;
+
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-pill: 99px;
+
+  --shadow-glow: 0 8px 32px var(--glow-accent);
+  --shadow-glow-sm: 0 6px 24px var(--glow-accent);
+  --shadow-elevated: 0 16px 40px var(--shadow-surface);
 }
 
-html,
-body {
-  margin: 0;
-  min-height: 100%;
-}
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
 
-body {
-  background: #f4f4f5;
+  body {
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: var(--font-inter), 'Inter', sans-serif;
+  }
+
+  .font-display {
+    font-family: var(--font-manrope), 'Manrope', sans-serif;
+  }
+
+  .font-body {
+    font-family: var(--font-inter), 'Inter', sans-serif;
+  }
+
+  .font-mono {
+    font-family: var(--font-jetbrains-mono), 'JetBrains Mono', monospace;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
