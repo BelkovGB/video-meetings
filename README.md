@@ -34,6 +34,12 @@ to follow container logs and `npm run db:down` to stop it.
 
 The API also reads `DATABASE_URL` and `JWT_SECRET` from the same `.env` file.
 
+## Project state
+
+The project is paused. [docs/project-state.md](docs/project-state.md) is the
+place to start after a break: what works today, how to bring it up, which
+checks to run, and what is left open.
+
 ## API documentation
 
 - [HTTP API contract](docs/api.md) — authentication, request payloads, response
