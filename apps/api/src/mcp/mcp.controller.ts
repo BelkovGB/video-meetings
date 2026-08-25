@@ -21,7 +21,7 @@ export class McpController {
     @Req() req: AuthenticatedRequest,
     @Res({ passthrough: false }) res: Response,
   ): Promise<void> {
-    const transport = await this.mcpService.createConnectedTransport(req.user.sub);
+    const transport = await this.mcpService.createConnectedTransport({ userId: req.user.sub });
 
     await transport.handleRequest(req, res, req.body);
   }

@@ -160,7 +160,7 @@ describe('Authentication (e2e)', () => {
       .expect(200);
   });
 
-  it('temporarily accepts a legacy token without a session identity', async () => {
+  it('rejects a legacy token without a session identity unless a deployment opts in', async () => {
     const registration = await request(app.getHttpServer())
       .post('/auth/register')
       .send({ email: createEmail('legacy-session'), password: validPassword })
@@ -172,10 +172,14 @@ describe('Authentication (e2e)', () => {
       .get(JwtService)
       .signAsync({ sub: payload.sub, email: payload.email });
 
+    // Nothing revokes a token without a session row — not a logout, not a
+    // password change — so the default refuses it. A rollout that still has
+    // such tokens in the wild sets ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true for
+    // one JWT lifetime and accepts that gap knowingly.
     await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${accessToken}`)
-      .expect(200);
+      .expect(401);
   });
 
   it('rejects a token with a malformed session identity', async () => {

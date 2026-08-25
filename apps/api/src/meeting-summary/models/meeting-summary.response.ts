@@ -16,6 +16,10 @@ export type MeetingSummaryDecisionResponse = {
 };
 
 export type MeetingSummaryResponse = {
+  /** The MeetingSummary row's own id — distinct from the meeting's id, and
+   * what MCP clients pass as `summaryId` to `/mcp`'s tools, resources and
+   * prompts. `null` until a summary has been started at least once. */
+  id: string | null;
   status: MeetingSummaryStatusResponse | null;
   summary: string | null;
   failureCode: MeetingSummaryFailureCode | null;
@@ -39,12 +43,13 @@ export function toMeetingSummaryResponse(
   row: MeetingSummaryWithChildren | null,
 ): MeetingSummaryResponse {
   if (!row) {
-    return { status: null, summary: null, failureCode: null, tasks: [], decisions: [] };
+    return { id: null, status: null, summary: null, failureCode: null, tasks: [], decisions: [] };
   }
 
   const status = statusByRowStatus[row.status];
 
   return {
+    id: row.id,
     status,
     summary: row.summaryText,
     failureCode: status === 'error' ? toMeetingSummaryFailureCode(row.failureCode) : null,

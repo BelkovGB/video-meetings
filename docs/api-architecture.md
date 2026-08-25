@@ -183,13 +183,14 @@ row of that user, which is the only bulk termination the API offers: there is no
 session-management screen and no password reset, so the change is a user's sole
 way to evict a token they no longer hold.
 
-`sid` was added after JWTs had already been issued. During the rollout,
-`ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true` temporarily admits signed legacy tokens
-that lack it, avoiding a global logout. Such a token cannot change a password,
-because it has no session row to revoke. After at least the one-hour maximum JWT
-lifetime, deployments set the flag to `false`; missing, malformed, unknown, or
-revoked session identities are then rejected as `401` and every protected token
-is revocable.
+`sid` was added after JWTs had already been issued. `ACCEPT_LEGACY_JWT_WITHOUT_SESSION`
+defaults to `false`, so a signed token lacking it is rejected as `401` like a
+missing, malformed, unknown or revoked session identity, and every protected
+token is revocable. A rollout that still has pre-session tokens in circulation
+sets the flag to `true` for at most the one-hour maximum JWT lifetime to avoid a
+global logout; while it is on, such a token cannot change a password (no session
+row to revoke) and no password change can evict it, which is why `main.ts` logs
+a warning at every startup that finds the flag on.
 
 Only token verification is treated as an authentication failure: if the session
 lookup itself fails, the error propagates as `5xx` instead of `401`. A `401`
@@ -371,7 +372,15 @@ no longer actually stale — is left alone rather than reset out from under
 whatever is already happening to it. A reset that does proceed clears the
 row the same way a manual rerun does: status back to `QUEUED`, the new
 fingerprint stamped in, previous `summaryText`/`failureCode`/timestamps
-cleared, previous tasks and decisions deleted.
+cleared, previous decisions deleted and previous tasks deleted where their
+`origin` is `AGENT` — a task created _or edited_ through the MCP server's
+`upsert_task` carries `origin: MCP` and survives, since no new run is going to
+reproduce what it says (see `TaskOrigin` in schema.prisma and
+`MeetingSummaryService.start`). The edit case is why `upsert_task` stamps the
+origin on update as well: an agent-written task a client has since rewritten
+would otherwise be deleted by the next rerun, taking the client's wording and
+status with it. The stamp only moves `AGENT` → `MCP`, never back, so the
+agent's own tool updating a client's row cannot hand it to the next delete.
 
 `start` and `startForMeeting` differ in how they hand their claimed row to
 `MeetingSummaryRunnerService.process`, and deliberately so. `start` calls the
@@ -431,12 +440,30 @@ stateless Streamable HTTP transport for each request — the SDK refuses to let
 one stateless transport serve two requests, so per-request construction is
 required rather than preferred. It also carries the authorization: the server
 is built for the caller `JwtAuthGuard` authenticated, and `TaskTools`
-registers `find_tasks`, `upsert_task`, `tasks://open` and `task://{id}` closed
-over that viewer id, so a caller-supplied `summaryId` or task id outside the
-viewer's meetings is answered as not found rather than served. `TaskService`
-owns the queries behind both surfaces: the viewer-scoped reads for this one,
-and the unscoped `findSimilar`/`upsert` that the agent's tools reach with the
-summaryId of the run they were built for. Both SDKs are ESM-only and this app
+registers `find_tasks`, `upsert_task`, `tasks://open`, `task://{id}` and the
+`gather_meeting_tasks` prompt, all closed over that caller as
+`requester: McpRequester` — the prompt does not use it directly, since it only
+hands the calling model instruction text that names the two tools, which are
+scoped on their own. `TaskService` gates every read
+and write by `ownerId`, not by a caller-supplied `summaryId` or task id —
+those say what to search for or write, `requester.userId` says who may see or
+touch it (`MeetingToolsService` passes the meeting's owner instead, resolved
+once per run, since a task the transcript agent writes has no human caller to
+own it). `find_tasks` and `tasks://open` filter to the caller's own tasks
+directly; `upsert_task` stamps `ownerId` on create and requires it to match on
+update, and additionally calls `TaskService.isSummaryWritableBy` first —
+ownership answers which rows a caller may touch, but a new row's owner is
+stamped from the caller, so `summaryId` alone would decide whose meeting it
+appears in. That check is the owner-or-participant rule
+`MeetingAccessService` applies to meeting files, expressed as a `where`
+fragment; without it any authenticated caller who learned a summary id could
+plant an `MCP`-origin task in a stranger's meeting, where no rerun clears it
+and no route deletes it; `task://{id}` loads the row unscoped and then compares `ownerId`
+itself, so it can tell a genuinely missing id (404-style) apart from one that
+exists but belongs to someone else (`403 Forbidden`) — the one place this
+module distinguishes the two, everywhere else "not yours" and "does not
+exist" read the same to avoid confirming another owner's id to a caller who
+guessed it. Both SDKs are ESM-only and this app
 compiles to CommonJS, so `mcp-sdk/import-mcp-sdk.ts` bridges the import the
 same way `importClaudeAgentSdk` does — and for the same reason
 `mcp.e2e-spec.ts` gets its own solo Jest invocation.
@@ -459,8 +486,11 @@ write back on a late failure.
 A rerun goes through the same upsert: the existing row's status,
 `summaryText`, `failureCode`, `startedAt`, and `finishedAt` are all
 overwritten in place rather than a new row being created, which is what makes
-a new run replace the previous result outright — there is no history to keep
-or roll back.
+a new run replace the previous summary text and decisions outright — there is
+no history to keep or roll back. Its tasks are the one exception: an
+`AGENT`-origin task is this run's own output and is cleared with everything
+else above, but an `MCP`-origin one is not this run's to rewrite, so it is
+left in place — see the `origin` note above.
 
 The transcription worker documented above leaves a job `PROCESSING` forever
 after an unclean exit, because a second worker process might still resume it.
