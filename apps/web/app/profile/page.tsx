@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 
+import { AccessTokenField } from './access-token-field';
 import { AvatarSection } from './avatar-section';
 import { DisplayNameForm } from './display-name-form';
 import { PasswordChangeForm } from './password-change-form';
@@ -122,6 +123,7 @@ export default function ProfilePage() {
                 </p>
               </div>
             </div>
+            <AccessTokenField />
           </div>
         </section>
       </div>

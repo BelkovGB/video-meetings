@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { MeetingSummaryStatus, Prisma } from '@prisma/client';
+import { MeetingSummaryStatus, Prisma, TaskOrigin } from '@prisma/client';
 
 import { MeetingSummaryService } from '../src/meeting-summary/services/meeting-summary.service';
 import { computeTranscriptFingerprint } from '../src/meeting-summary/transcript-fingerprint';
@@ -83,7 +83,7 @@ describe('MeetingSummaryService.startForMeeting', () => {
       },
     });
     expect(prisma.meetingSummaryTask.deleteMany).toHaveBeenCalledWith({
-      where: { summaryId: 'summary-1' },
+      where: { summaryId: 'summary-1', origin: TaskOrigin.AGENT },
     });
     expect(runner.process).toHaveBeenCalledWith('summary-1');
   });

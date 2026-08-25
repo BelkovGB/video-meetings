@@ -9,6 +9,7 @@ import {
   MeetingFileStatus,
   MeetingSummaryStatus,
   Prisma,
+  TaskOrigin,
 } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
@@ -59,9 +60,11 @@ export class MeetingSummaryService {
     const fingerprint = computeTranscriptFingerprint(transcriptFileIds);
 
     // A rerun replaces the previous result in place: same row, cleared fields,
-    // and its previous tasks/decisions deleted eagerly here (not deferred to
-    // completion) so the three blocks never show a torn mix of an old list
-    // against a freshly-queued status.
+    // and its previous AGENT-origin tasks and all decisions deleted eagerly
+    // here (not deferred to completion) so the three blocks never show a torn
+    // mix of an old list against a freshly-queued status. An MCP-origin task
+    // has no next run that will rewrite it, so it survives the reset — see
+    // the `origin` field doc on `MeetingSummaryTask` in schema.prisma.
     const summary = await this.prisma.$transaction(async (tx) => {
       const row = await tx.meetingSummary.upsert({
         where: { meetingId },
@@ -76,17 +79,29 @@ export class MeetingSummaryService {
         },
       });
 
-      await tx.meetingSummaryTask.deleteMany({ where: { summaryId: row.id } });
+      await tx.meetingSummaryTask.deleteMany({
+        where: { summaryId: row.id, origin: TaskOrigin.AGENT },
+      });
       await tx.meetingSummaryDecision.deleteMany({ where: { summaryId: row.id } });
 
-      return row;
+      const survivingTasks = await tx.meetingSummaryTask.findMany({
+        where: { summaryId: row.id },
+        orderBy: { position: 'asc' },
+      });
+
+      return { row, survivingTasks };
     });
 
-    this.launch(summary.id);
+    this.launch(summary.row.id);
 
-    // tasks/decisions were just deleted above and nothing new exists yet, so
-    // building the response in place is correct without an extra read.
-    return toMeetingSummaryResponse({ ...summary, tasks: [], decisions: [] });
+    // Decisions were just deleted above and nothing new exists yet, so an
+    // empty list is correct without a read; tasks may still hold whatever
+    // MCP-origin rows survived the reset, so those are read back above.
+    return toMeetingSummaryResponse({
+      ...summary.row,
+      tasks: summary.survivingTasks,
+      decisions: [],
+    });
   }
 
   /**
@@ -177,7 +192,9 @@ export class MeetingSummaryService {
         return null;
       }
 
-      await tx.meetingSummaryTask.deleteMany({ where: { summaryId: existing.id } });
+      await tx.meetingSummaryTask.deleteMany({
+        where: { summaryId: existing.id, origin: TaskOrigin.AGENT },
+      });
       await tx.meetingSummaryDecision.deleteMany({ where: { summaryId: existing.id } });
 
       return { id: existing.id };

@@ -7,7 +7,7 @@ import { AppModule } from '../src/app.module';
 import { configureHttpApplication } from '../src/http-application';
 import { PrismaService } from '../src/prisma/prisma.service';
 
-type UserSession = { accessToken: string };
+type UserSession = { accessToken: string; userId: string };
 type Meeting = { id: string };
 
 // @modelcontextprotocol/sdk ships ESM-only and this test file compiles to
@@ -53,12 +53,14 @@ describe('MCP server (e2e)', () => {
   });
 
   async function registerUser(prefix: string): Promise<UserSession> {
+    const email = createUniqueEmail(prefix);
     const response = await request(app.getHttpServer())
       .post('/auth/register')
-      .send({ email: createUniqueEmail(prefix), password: validPassword })
+      .send({ email, password: validPassword })
       .expect(201);
+    const user = await prisma.user.findUniqueOrThrow({ where: { email }, select: { id: true } });
 
-    return response.body as UserSession;
+    return { accessToken: (response.body as { accessToken: string }).accessToken, userId: user.id };
   }
 
   async function createMeeting(owner: UserSession): Promise<Meeting> {
@@ -118,6 +120,29 @@ describe('MCP server (e2e)', () => {
     }
   });
 
+  it('offers the gather_meeting_tasks prompt', async () => {
+    const owner = await registerUser('mcp-owner');
+    const client = await connectMcpClient(owner);
+
+    try {
+      const { prompts } = await client.listPrompts();
+      expect(prompts.map((prompt) => prompt.name)).toContain('gather_meeting_tasks');
+
+      const result = await client.getPrompt({
+        name: 'gather_meeting_tasks',
+        arguments: { summaryId: 'a-summary-id' },
+      });
+      expect(result.messages).toHaveLength(1);
+      expect(result.messages[0]).toMatchObject({ role: 'user' });
+      const content = result.messages[0].content as { type: string; text: string };
+      expect(content.text).toContain('a-summary-id');
+      expect(content.text).toContain('find_tasks');
+      expect(content.text).toContain('upsert_task');
+    } finally {
+      await client.close();
+    }
+  });
+
   it('lists every task for a summary when find_tasks is called with an empty query', async () => {
     const owner = await registerUser('mcp-owner');
     const meeting = await createMeeting(owner);
@@ -126,8 +151,20 @@ describe('MCP server (e2e)', () => {
     });
     await prisma.meetingSummaryTask.createMany({
       data: [
-        { summaryId: summary.id, title: 'Ship the release notes', assignee: 'Vasya', position: 0 },
-        { summaryId: summary.id, title: 'Update the changelog', assignee: 'Petya', position: 1 },
+        {
+          summaryId: summary.id,
+          title: 'Ship the release notes',
+          assignee: 'Vasya',
+          position: 0,
+          ownerId: owner.userId,
+        },
+        {
+          summaryId: summary.id,
+          title: 'Update the changelog',
+          assignee: 'Petya',
+          position: 1,
+          ownerId: owner.userId,
+        },
       ],
     });
 
@@ -211,6 +248,7 @@ describe('MCP server (e2e)', () => {
         assignee: 'Vasya',
         position: 0,
         status: 'TODO',
+        ownerId: owner.userId,
       },
     });
     const doneTask = await prisma.meetingSummaryTask.create({
@@ -220,6 +258,7 @@ describe('MCP server (e2e)', () => {
         assignee: 'Vasya',
         position: 1,
         status: 'DONE',
+        ownerId: owner.userId,
       },
     });
 
@@ -263,6 +302,7 @@ describe('MCP server (e2e)', () => {
         assignee: 'Vasya',
         position: 0,
         status: 'TODO',
+        ownerId: owner.userId,
       },
     });
 
@@ -292,30 +332,153 @@ describe('MCP server (e2e)', () => {
     await expect(client.connect(new StreamableHTTPClientTransport(mcpUrl))).rejects.toThrow();
   });
 
-  it("answers 'not found' for a summary the caller has no part in", async () => {
+  it("scopes reads to the caller's own tasks and refuses a write into a stranger's meeting", async () => {
     const owner = await registerUser('mcp-owner');
     const outsider = await registerUser('mcp-outsider');
     const summary = await createSummary(owner);
+    const ownersTask = await prisma.meetingSummaryTask.create({
+      data: { summaryId: summary.id, title: "Owner's task", position: 0, ownerId: owner.userId },
+    });
 
-    const client = await connectMcpClient(outsider);
+    const outsiderClient = await connectMcpClient(outsider);
 
     try {
-      const found = await client.callTool({
+      // summaryId says where to search, not whose eyes may search it: the
+      // outsider's find_tasks succeeds, it just sees none of the owner's tasks.
+      const found = await outsiderClient.callTool({
         name: 'find_tasks',
         arguments: { summaryId: summary.id, query: '' },
       });
-      expect(found.isError).toBe(true);
+      expect(found.isError).toBeFalsy();
+      const foundContent = found.content as Array<{ type: string; text: string }>;
+      const foundPayload = JSON.parse(foundContent[0].text) as { tasks: Array<{ id: string }> };
+      expect(foundPayload.tasks.map((task) => task.id)).not.toContain(ownersTask.id);
 
-      const written = await client.callTool({
+      // Writing is a different question from reading: the row's owner is
+      // stamped from the caller, so summaryId alone would decide whose
+      // meeting the task lands in. A caller outside the meeting is refused,
+      // and nothing is written — an MCP-origin row would otherwise survive
+      // every rerun with no route to delete it.
+      const written = await outsiderClient.callTool({
         name: 'upsert_task',
-        arguments: { summaryId: summary.id, title: 'Not mine to write', status: 'TODO' },
+        arguments: { summaryId: summary.id, title: 'Filed by the outsider', status: 'TODO' },
       });
       expect(written.isError).toBe(true);
+      const writtenContent = written.content as Array<{ type: string; text: string }>;
+      expect(writtenContent[0].text).toBe(`No summary ${summary.id} found.`);
+      const storedForSummary = await prisma.meetingSummaryTask.count({
+        where: { summaryId: summary.id },
+      });
+      expect(storedForSummary).toBe(1);
 
-      // The refusal has to be a refusal, not a message: a task written anyway
-      // would leave this count at one.
-      const stored = await prisma.meetingSummaryTask.count({ where: { summaryId: summary.id } });
-      expect(stored).toBe(0);
+      // The same refusal covers an update aimed at someone else's task: the
+      // taskId is real, and it is still the meeting check that stops the call
+      // before ownership is ever consulted.
+      const hijacked = await outsiderClient.callTool({
+        name: 'upsert_task',
+        arguments: {
+          summaryId: summary.id,
+          taskId: ownersTask.id,
+          title: 'Rewritten by the outsider',
+          status: 'DONE',
+        },
+      });
+      expect(hijacked.isError).toBe(true);
+      const untouched = await prisma.meetingSummaryTask.findUniqueOrThrow({
+        where: { id: ownersTask.id },
+      });
+      expect(untouched).toMatchObject({ title: "Owner's task", status: 'TODO' });
+    } finally {
+      await outsiderClient.close();
+    }
+
+    // The owner's own view is unaffected: still only their own task.
+    const ownerClient = await connectMcpClient(owner);
+
+    try {
+      const ownerView = await ownerClient.callTool({
+        name: 'find_tasks',
+        arguments: { summaryId: summary.id, query: '' },
+      });
+      const ownerContent = ownerView.content as Array<{ type: string; text: string }>;
+      const ownerPayload = JSON.parse(ownerContent[0].text) as { tasks: Array<{ id: string }> };
+      expect(ownerPayload.tasks.map((task) => task.id)).toEqual([ownersTask.id]);
+    } finally {
+      await ownerClient.close();
+    }
+  });
+
+  it('lets a meeting participant file a task under that meeting summary', async () => {
+    const owner = await registerUser('mcp-owner');
+    const participant = await registerUser('mcp-participant');
+    const meeting = await createMeeting(owner);
+    const summary = await prisma.meetingSummary.create({
+      data: { meetingId: meeting.id, status: MeetingSummaryStatus.COMPLETED, summaryText: 'test' },
+    });
+    // The write rule is owner-or-participant, the same one the meeting-file
+    // routes apply; without this case a rule narrowed to "owner only" would
+    // still pass the suite.
+    await prisma.meetingParticipant.create({
+      data: { meetingId: meeting.id, userId: participant.userId },
+    });
+
+    const client = await connectMcpClient(participant);
+
+    try {
+      const written = await client.callTool({
+        name: 'upsert_task',
+        arguments: { summaryId: summary.id, title: 'Filed by a participant', status: 'TODO' },
+      });
+
+      expect(written.isError).toBeFalsy();
+      const content = written.content as Array<{ type: string; text: string }>;
+      const task = JSON.parse(content[0].text) as { id: string };
+      const stored = await prisma.meetingSummaryTask.findUniqueOrThrow({ where: { id: task.id } });
+      expect(stored).toMatchObject({ ownerId: participant.userId, origin: 'MCP' });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("marks the agent's task as MCP-written once a client edits it, so a rerun keeps the edit", async () => {
+    const owner = await registerUser('mcp-owner');
+    const summary = await createSummary(owner);
+    // What the summary run itself writes: owned by the meeting's owner and
+    // deleted by the next rerun, which is right until someone edits it.
+    const agentTask = await prisma.meetingSummaryTask.create({
+      data: {
+        summaryId: summary.id,
+        title: 'Подготовить отчёт',
+        position: 0,
+        ownerId: owner.userId,
+        origin: 'AGENT',
+      },
+    });
+
+    const client = await connectMcpClient(owner);
+
+    try {
+      const updated = await client.callTool({
+        name: 'upsert_task',
+        arguments: {
+          summaryId: summary.id,
+          taskId: agentTask.id,
+          title: 'Подготовить отчёт и согласовать с юристами',
+          status: 'DONE',
+        },
+      });
+
+      expect(updated.isError).toBeFalsy();
+      const stored = await prisma.meetingSummaryTask.findUniqueOrThrow({
+        where: { id: agentTask.id },
+      });
+      // AGENT would put the edited row back under the rerun's delete, which
+      // clears exactly the AGENT-origin tasks of the summary.
+      expect(stored).toMatchObject({
+        origin: 'MCP',
+        title: 'Подготовить отчёт и согласовать с юристами',
+        status: 'DONE',
+      });
     } finally {
       await client.close();
     }
@@ -326,7 +489,13 @@ describe('MCP server (e2e)', () => {
     const outsider = await registerUser('mcp-outsider');
     const summary = await createSummary(owner);
     const task = await prisma.meetingSummaryTask.create({
-      data: { summaryId: summary.id, title: 'Ship the release notes', position: 0, status: 'TODO' },
+      data: {
+        summaryId: summary.id,
+        title: 'Ship the release notes',
+        position: 0,
+        status: 'TODO',
+        ownerId: owner.userId,
+      },
     });
 
     const client = await connectMcpClient(outsider);
@@ -337,7 +506,9 @@ describe('MCP server (e2e)', () => {
       const openPayload = JSON.parse(openContent.text) as { tasks: Array<{ id: string }> };
       expect(openPayload.tasks.map((open) => open.id)).not.toContain(task.id);
 
-      await expect(client.readResource({ uri: `task://${task.id}` })).rejects.toThrow();
+      // Distinct from the 404 a truly missing id gets: this one exists, it's
+      // just not the outsider's.
+      await expect(client.readResource({ uri: `task://${task.id}` })).rejects.toThrow(/403/);
     } finally {
       await client.close();
     }

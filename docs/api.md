@@ -243,28 +243,30 @@ usual reason to change a password is a suspected compromise, and the API offers
 no reset flow and no separate "sign out everywhere", so a token the user no
 longer holds could not otherwise be evicted. Each of those JWTs is refused on
 protected routes from the moment the change commits, and every device has to
-sign in again with the new password. A legacy token without `sid` is the one
-exception below: it has no session row, so it survives until it expires.
+sign in again with the new password. The one exception is a legacy token
+without `sid`, and only where a deployment has explicitly turned
+`ACCEPT_LEGACY_JWT_WITHOUT_SESSION` on (see below): it has no session row, so
+it survives until it expires.
 Passwords and password hashes are never included in responses or application
 logs.
 
 ### JWT session migration rollout
 
 New registration and login tokens include a session ID (`sid`) and are checked
-against the persisted session on every protected request. To deploy this change
-without globally invalidating still-valid tokens issued before `sid` existed,
-the API accepts those legacy tokens by default (`ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true`).
-They continue to work on protected routes until their normal JWT expiry, but
-cannot call `POST /users/me/password`: that operation returns `401` and requires
-the user to sign in again, because a legacy token has no session row to revoke.
-For the same reason a password change cannot evict a legacy token held by
-someone else; that gap closes when the flag is turned off below.
+against the persisted session on every protected request. A token without `sid`
+is rejected with `401`: `ACCEPT_LEGACY_JWT_WITHOUT_SESSION` defaults to `false`,
+so every protected token is backed by a session row that a logout or a password
+change can revoke.
 
-Keep this compatibility setting enabled for at least the maximum JWT lifetime
-(currently one hour) after deploying the version that starts issuing `sid`
-tokens. Then set `ACCEPT_LEGACY_JWT_WITHOUT_SESSION=false` and redeploy. From
-that point the guard rejects missing session IDs, and every protected JWT is
-backed by a session row that a password change revokes.
+A deployment that still has pre-session tokens in circulation can set
+`ACCEPT_LEGACY_JWT_WITHOUT_SESSION=true` to avoid a global logout during the
+rollout. While it is on, such tokens work on protected routes until their normal
+JWT expiry but cannot call `POST /users/me/password` — that returns `401` and
+asks the user to sign in again, because there is no session row to revoke — and,
+for the same reason, a password change cannot evict a legacy token someone else
+is holding. That is the gap the flag buys, so keep it on for at most the maximum
+JWT lifetime (currently one hour) after the rollout, then turn it off. The API
+logs a warning at every startup while it is on.
 
 ## Meetings
 
@@ -648,7 +650,8 @@ row yet also starts automatically: an in-process scheduler polls every
 the manual route below does. The same scheduler also recomputes a `ready` or
 `error` summary once the meeting's transcript set changes — a new transcript
 finishes, or one that fed the previous run is otherwise no longer counted —
-replacing the previous result entirely, the same as a manual rerun. A summary
+replacing the previous result, the same as a manual rerun; see the note below
+on what a rerun does and does not clear. A summary
 whose transcript set has not changed since it finished is left alone: an
 `error` result in particular never retries on its own, only on a new
 transcript or the manual route below. A meeting whose recognition job is
@@ -667,8 +670,8 @@ than the scheduler would, even when the transcript set has not changed.
 
 The meeting access check runs before the job is created, so a user outside the
 meeting cannot start or reset a run. A run that is already `queued` or
-`processing` is rejected; a run that is `ready` or `error` is replaced
-entirely by the new one, including its status and result.
+`processing` is rejected; a run that is `ready` or `error` is replaced by the
+new one, including its status and summary text.
 
 The server gathers every `TRANSCRIPT` file currently `READY` on the meeting
 and resets the meeting's one summary row to `queued`. It returns
@@ -676,6 +679,7 @@ and resets the meeting's one summary row to `queued`. It returns
 
 ```json
 {
+  "id": "cm...",
   "status": "queued",
   "summary": null,
   "failureCode": null,
@@ -683,6 +687,13 @@ and resets the meeting's one summary row to `queued`. It returns
   "decisions": []
 }
 ```
+
+`decisions` is always empty here — every decision belongs to the run that
+wrote it and is cleared with it. `tasks` is usually empty too, but not
+always: a task created through the MCP server's `upsert_task` (see below)
+survives a rerun, since nothing is going to write it again. Only a task the
+transcript agent itself wrote is cleared and left for the new run to
+rediscover.
 
 A meeting with no ready transcript file returns `422` with
 `NO_TRANSCRIPT_FILES`; a meeting whose summary is already `queued` or
@@ -695,6 +706,7 @@ Returns `200 OK` with the meeting's current summary:
 
 ```json
 {
+  "id": "cm...",
   "status": "ready",
   "summary": "Reviewed sprint progress; the team agreed to ship the export feature first.",
   "failureCode": null,
@@ -723,12 +735,20 @@ otherwise one of:
 
 Failure codes carry no storage paths or internal identifiers.
 
+`id` is the summary row's own id, not the meeting's, and it is `null` until a
+summary has been started at least once. It is the `summaryId` every `/mcp`
+tool, resource and prompt takes, and this response is the only place a client
+can obtain it.
+
 `tasks` and `decisions` are always arrays: empty before the job reaches
 `ready`, and empty afterward if the meeting genuinely produced none. Each
 task's `assignee` is the name exactly as it was spoken in the meeting, or
 `null` when no one was named — free text, not a link to a participant
-account; assigning an actual participant is separate, later work. Both lists
-are replaced in full, like `summary`, on every rerun.
+account; assigning an actual participant is separate, later work. `decisions`
+is replaced in full on every rerun, like `summary`. `tasks` is replaced only
+in the part the transcript agent wrote: a task written or edited through the
+MCP server's `upsert_task` survives, because no rerun will reproduce what it
+says.
 
 A missing or inaccessible meeting returns `404 Meeting not found`.
 
@@ -742,28 +762,47 @@ same bearer token as every other route above; a request without one is
 
 The transport is stateless: no session id is issued, and a fresh MCP server is
 built for each request. That server is built for the authenticated caller, and
-everything it exposes is limited to meetings that caller owns or takes part
-in — the same owner-or-participant rule the meeting-file routes apply. A
-`summaryId` or task id naming anything else is answered as if it did not
-exist, so the endpoint never confirms another meeting's ids to a stranger.
+every tool and resource is scoped to tasks that caller owns — a task's
+`ownerId` is the meeting owner for a task the transcript agent wrote, or
+whoever created it through `upsert_task`. A `summaryId` or task id in an
+argument says what to search for or write, never permission to see it: a
+`summaryId` outside the caller's own tasks still searches, it simply surfaces
+none of them.
+
+Writing is checked separately, because ownership cannot cover it: a new task's
+owner is stamped from the caller, so `summaryId` alone would decide whose
+meeting the task appears in. `upsert_task` therefore requires the caller to
+own or take part in the meeting behind that summary — the same
+owner-or-participant rule the meeting-file routes apply — and answers
+`No summary <id> found.` otherwise, the same answer an id that does not exist
+gets.
 
 Tools:
 
-- `find_tasks(summaryId, query)` — tasks of that summary whose title or
-  assignee matches the text; an empty query lists them all. A summary outside
-  the caller's meetings comes back as a tool error, `No summary <id> found.`
-- `upsert_task(summaryId, title, status, taskId?)` — creates a task, or
-  updates the one named by `taskId`. `status` is `TODO` or `DONE`. A `taskId`
-  that belongs to another summary is refused with `No task <id> found for this
-summary.`, and a summary outside the caller's meetings with the same
-  not-found answer `find_tasks` gives.
+- `find_tasks(summaryId, query)` — the caller's own tasks in that summary
+  whose title or assignee matches the text; an empty query lists them all.
+- `upsert_task(summaryId, title, status, taskId?)` — creates a task owned by
+  the caller, or updates one of the caller's own tasks named by `taskId`.
+  `status` is `TODO` or `DONE`. A `taskId` the caller does not own, or one
+  belonging to another summary, is refused with `No task <id> found for this
+summary.`; a `summaryId` that does not exist, or that belongs to a meeting
+  the caller neither owns nor takes part in, is refused with `No summary
+<id> found.` A task created or edited this way survives a summary rerun —
+  see [Meeting summary](#meeting-summary) above.
 
 Resources:
 
-- `tasks://open` — every task still `TODO` across the caller's meetings, up to
-  fifty.
-- `task://{id}` — one task by id. An id the caller may not see fails the read,
-  the same as an id that does not exist.
+- `tasks://open` — every task still `TODO` that the caller owns, up to fifty.
+- `task://{id}` — one task by id, if the caller owns it. An id that does not
+  exist fails with a 404-style message; one that exists but belongs to another
+  owner fails with a distinct `403 Forbidden` message.
+
+Prompts:
+
+- `gather_meeting_tasks(summaryId)` — returns a message instructing the
+  calling model to record every task from that summary, checking `find_tasks`
+  for an existing match before each `upsert_task` call so a task mentioned
+  twice does not end up as two rows.
 
 ## Local upload configuration
 

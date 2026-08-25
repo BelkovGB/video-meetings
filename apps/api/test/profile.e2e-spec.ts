@@ -347,7 +347,7 @@ describe('Current user profile (e2e)', () => {
     await loginUser(user.email, validPassword);
   });
 
-  it('requires a session-aware token to change a password during the JWT migration', async () => {
+  it('refuses a token with no session on the password route and everywhere else', async () => {
     const user = await registerUser('password-change-legacy-session');
     const legacyAccessToken = await app
       .get(JwtService)
@@ -363,10 +363,15 @@ describe('Current user profile (e2e)', () => {
       })
       .expect(401);
 
+    // A password change revokes sessions, and a token without one is the
+    // single case that would survive it. With
+    // ACCEPT_LEGACY_JWT_WITHOUT_SESSION off by default such a token is refused
+    // on every protected route, not only on this one — which is what makes the
+    // revocation above complete.
     await request(app.getHttpServer())
       .get('/users/me')
       .set('Authorization', `Bearer ${legacyAccessToken}`)
-      .expect(200);
+      .expect(401);
     await loginUser(user.email, validPassword);
   });
 

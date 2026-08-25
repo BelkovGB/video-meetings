@@ -23,6 +23,7 @@ model User {
   uploadedMeetingFiles       MeetingFile[]               @relation("UploadedMeetingFiles")
   meetingFileDownloadTickets MeetingFileDownloadTicket[]
   authSessions               AuthSession[]
+  ownedTasks                 MeetingSummaryTask[]
 
   @@map("users")
 }
@@ -184,6 +185,20 @@ enum TaskStatus {
   DONE
 }
 
+// Who wrote the row, not which transcript file it came from (that's
+// `MeetingSummaryTaskSource` below). Set on create, and moved from `AGENT`
+// to `MCP` — never back — when a client edits the row through
+// `upsert_task`: once it says something the run did not write, no rerun can
+// reproduce it. `MeetingSummaryService` reads it to decide what a summary rerun may
+// clear: an `AGENT` task is that run's own output and gets recreated fresh
+// every time, so wiping it first is correct; an `MCP` task is something a
+// caller wrote through `upsert_task` and has no next run that will rewrite
+// it, so a rerun must leave it alone or lose it permanently.
+enum TaskOrigin {
+  AGENT
+  MCP
+}
+
 model MeetingSummaryTask {
   id        String                     @id @default(cuid())
   summaryId String                     @map("summary_id")
@@ -191,10 +206,18 @@ model MeetingSummaryTask {
   assignee  String?                    @map("assignee")
   status    TaskStatus                 @default(TODO)
   position  Int
+  origin    TaskOrigin                 @default(AGENT)
+  // Who this task is scoped to for MCP access: the meeting's owner for a task
+  // the transcript agent wrote, or the caller who created it through
+  // upsert_task. Nullable like Meeting.ownerId, whose value it starts from —
+  // a task under an ownerless meeting is simply unreachable through MCP.
+  ownerId   String?                    @map("owner_id")
+  owner     User?                      @relation(fields: [ownerId], references: [id], onDelete: SetNull)
   summary   MeetingSummary             @relation(fields: [summaryId], references: [id], onDelete: Cascade)
   sources   MeetingSummaryTaskSource[]
 
   @@index([summaryId, position])
+  @@index([ownerId, status])
   @@map("meeting_summary_tasks")
 }
 

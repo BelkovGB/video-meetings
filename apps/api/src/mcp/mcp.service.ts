@@ -9,6 +9,12 @@ import { TaskTools } from './task-tools';
 
 type McpHttpTransport = InstanceType<McpStreamableHttpModule['StreamableHTTPServerTransport']>;
 
+/** The authenticated caller `McpController` resolved from the bearer token.
+ * Carried down to every tool/resource so a caller-supplied id (summaryId,
+ * taskId) stays "what to search", never "permission to see it" — see
+ * `TaskService`'s class doc. */
+export type McpRequester = { userId: string };
+
 /**
  * Builds a fresh, connected MCP server + Streamable HTTP transport for every
  * call. This is not a stylistic choice: in stateless mode
@@ -40,18 +46,18 @@ export class McpService {
   constructor(private readonly taskTools: TaskTools) {}
 
   /**
-   * `viewerId` is the authenticated caller from `McpController`: the tools
+   * `requester` is the authenticated caller from `McpController`: the tools
    * and resources are registered for that user alone, which is what keeps a
-   * caller-supplied summaryId or task id from reaching a meeting they are
-   * not part of. A fresh server per request is what makes that possible —
-   * one shared server could not carry a per-caller identity.
+   * caller-supplied summaryId or task id from reaching a task they do not
+   * own. A fresh server per request is what makes that possible — one shared
+   * server could not carry a per-caller identity.
    */
-  async createConnectedTransport(viewerId: string): Promise<McpHttpTransport> {
+  async createConnectedTransport(requester: McpRequester): Promise<McpHttpTransport> {
     const { McpServer, ResourceTemplate } = await importMcpServerModule();
     const { StreamableHTTPServerTransport } = await importMcpStreamableHttpModule();
 
     const server = new McpServer({ name: 'video-meetings', version: '0.1.0' });
-    this.taskTools.registerOn(server, ResourceTemplate, viewerId);
+    this.taskTools.registerOn(server, ResourceTemplate, requester);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

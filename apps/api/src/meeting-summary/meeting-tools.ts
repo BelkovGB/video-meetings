@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { TaskOrigin } from '@prisma/client';
 import { z } from 'zod';
 
 import { ClaudeAgentSdk, importClaudeAgentSdk } from '../claude-agent/import-claude-agent-sdk';
@@ -29,18 +30,34 @@ export class MeetingToolsService {
 
   async createServer(summaryId: string) {
     const { tool, createSdkMcpServer } = await importClaudeAgentSdk();
+    const ownerId = await this.resolveOwnerId(summaryId);
 
     return createSdkMcpServer({
       name: 'meeting',
       tools: [
-        this.findSimilarTasksTool(tool, summaryId),
-        this.upsertTaskTool(tool, summaryId),
+        this.findSimilarTasksTool(tool, summaryId, ownerId),
+        this.upsertTaskTool(tool, summaryId, ownerId),
         this.writeSummaryAndDecisionsTool(tool, summaryId),
       ],
     });
   }
 
-  private findSimilarTasksTool(tool: ClaudeAgentSdk['tool'], summaryId: string) {
+  /** The meeting owner every task this run writes is stamped with — resolved
+   * once per run, not per tool call, since it never changes mid-run. */
+  private async resolveOwnerId(summaryId: string): Promise<string | null> {
+    const summary = await this.prisma.meetingSummary.findUniqueOrThrow({
+      where: { id: summaryId },
+      select: { meeting: { select: { ownerId: true } } },
+    });
+
+    return summary.meeting.ownerId;
+  }
+
+  private findSimilarTasksTool(
+    tool: ClaudeAgentSdk['tool'],
+    summaryId: string,
+    ownerId: string | null,
+  ) {
     return tool(
       'find_similar_tasks',
       'Finds tasks already recorded for the current meeting summary whose title ' +
@@ -53,14 +70,14 @@ export class MeetingToolsService {
           .describe('Free text to match against existing task titles and assignee names.'),
       },
       async ({ query }) => {
-        const tasks = await this.taskService.findSimilar(summaryId, query);
+        const tasks = await this.taskService.findSimilar(summaryId, query, ownerId);
 
         return { content: [{ type: 'text' as const, text: JSON.stringify({ tasks }) }] };
       },
     );
   }
 
-  private upsertTaskTool(tool: ClaudeAgentSdk['tool'], summaryId: string) {
+  private upsertTaskTool(tool: ClaudeAgentSdk['tool'], summaryId: string, ownerId: string | null) {
     return tool(
       'upsert_task',
       'Creates a new task for the current meeting summary, or updates one found ' +
@@ -82,7 +99,14 @@ export class MeetingToolsService {
           ),
       },
       async ({ taskId, title, assignee }) => {
-        const result = await this.taskService.upsert({ summaryId, taskId, title, assignee });
+        const result = await this.taskService.upsert({
+          summaryId,
+          taskId,
+          title,
+          assignee,
+          ownerId,
+          origin: TaskOrigin.AGENT,
+        });
 
         if (!result.found) {
           return {

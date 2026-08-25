@@ -30,8 +30,18 @@ function getBooleanEnvironmentVariable(name: string, defaultValue: boolean): boo
 
 export const environment = {
   jwtSecret: getRequiredEnvironmentVariable('JWT_SECRET'),
+  /**
+   * Admits a signed token that carries no `sid`, from before session-aware
+   * JWTs existed. Off unless a deployment asks for it: such a token has no
+   * session row, so nothing revokes it — not a logout, not a password change
+   * — and it keeps working until it expires. On by default that turned every
+   * password change into a revocation the user only thought they had made,
+   * and a forgotten variable on a fresh deployment reproduced it silently.
+   * Turn it on deliberately, for at most one maximum JWT lifetime after the
+   * rollout that started issuing `sid`.
+   */
   acceptLegacyJwtWithoutSession: getBooleanEnvironmentVariable(
     'ACCEPT_LEGACY_JWT_WITHOUT_SESSION',
-    true,
+    false,
   ),
 };

@@ -175,6 +175,7 @@ describeWithToken('Meeting summary (e2e)', () => {
     // started, not an awaited model answer: this is what proves the request
     // did not wait, without depending on wall-clock timing.
     expect(started.body).toEqual({
+      id: expect.any(String),
       status: 'queued',
       summary: null,
       failureCode: null,
@@ -317,6 +318,56 @@ describeWithToken('Meeting summary (e2e)', () => {
       afterFirstRun.finishedAt!.getTime(),
     );
   }, 360_000);
+
+  it('keeps an MCP-origin task through a rerun but clears an AGENT-origin one', async () => {
+    const owner = await registerUser();
+    const meeting = await createMeeting(owner);
+    await uploadTranscript(meeting.id, owner);
+    // Seeded directly as already COMPLETED, never through the real model:
+    // this is about the rerun's delete filter, not the runner. The first
+    // assertion below only needs the synchronous response the reset
+    // transaction produces before any model call could plausibly answer; the
+    // second waits for that real run to finish, so nothing is left running
+    // in the background once the test returns, the same as every other test
+    // in this file that triggers one.
+    const summary = await prisma.meetingSummary.create({
+      data: {
+        meetingId: meeting.id,
+        status: MeetingSummaryStatus.COMPLETED,
+        summaryText: 'Prior.',
+      },
+    });
+    const agentTask = await prisma.meetingSummaryTask.create({
+      data: { summaryId: summary.id, position: 0, title: 'Written by the transcript agent' },
+    });
+    const mcpTask = await prisma.meetingSummaryTask.create({
+      data: {
+        summaryId: summary.id,
+        position: 1,
+        title: 'Written through upsert_task',
+        origin: 'MCP',
+      },
+    });
+
+    const started = await startSummary(meeting.id, owner).expect(202);
+
+    const returnedTaskIds = (started.body as SummaryResponse).tasks.map((task) => task.id);
+    expect(returnedTaskIds).toContain(mcpTask.id);
+    expect(returnedTaskIds).not.toContain(agentTask.id);
+
+    const afterReset = await prisma.meetingSummaryTask.findMany({
+      where: { summaryId: summary.id },
+    });
+    expect(afterReset.map((task) => task.id)).toEqual([mcpTask.id]);
+
+    const finished = await waitForSummaryResult(meeting.id, owner, 170_000);
+    expect(finished.status).toBe('ready');
+    // The real run's own tasks are whatever it found in the transcript, plus
+    // the MCP task untouched by any of it.
+    expect(finished.tasks.map((task) => task.id)).toContain(mcpTask.id);
+    const stillThere = await prisma.meetingSummaryTask.findUnique({ where: { id: mcpTask.id } });
+    expect(stillThere).toMatchObject({ title: mcpTask.title, origin: 'MCP' });
+  }, 180_000);
 
   it('does not start a summary while the meeting still has a recognition job in flight', async () => {
     const owner = await registerUser();
